@@ -246,11 +246,26 @@ class AdaptiveSchedule(NoiseSchedule):
     vals = spline(t.detach().cpu().numpy())
     return torch.as_tensor(vals, dtype=t.dtype, device=t.device)
 
+  def _maybe_rebuild_spline(self):
+    # After loading from a checkpoint, Lightning copies the registered
+    # buffers (alpha_vals/has_schedule) via the top-level module's
+    # load_state_dict, which does NOT dispatch to this child's
+    # load_state_dict override -- so the splines are never rebuilt and
+    # alpha_t() silently falls back to the base schedule. Rebuild lazily
+    # from the loaded buffer on first use. No-op during training (the
+    # spline is already set by _refit once has_schedule is True).
+    if self._alpha_spline is None and bool(self.has_schedule.item()):
+      av = self.alpha_vals.cpu().numpy()
+      self._alpha_spline = PchipInterpolator(self._grid, av)
+      self._dalpha_spline = self._alpha_spline.derivative()
+
   def alpha_t(self, t):
+    self._maybe_rebuild_spline()
     return self._eval_spline(
       self._alpha_spline, self.base_schedule.alpha_t, t)
 
   def alpha_prime_t(self, t):
+    self._maybe_rebuild_spline()
     return self._eval_spline(
       self._dalpha_spline, self.base_schedule.alpha_prime_t, t)
 

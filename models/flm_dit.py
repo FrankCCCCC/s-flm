@@ -13,8 +13,11 @@ Key difference from models/dit.py DIT:
 import math
 
 import einops
-import flash_attn
-import flash_attn.layers.rotary
+try:  # flash-attn is optional; models.dit provides pure-torch fallbacks.
+  import flash_attn
+  import flash_attn.layers.rotary
+except ImportError:
+  flash_attn = None
 import omegaconf
 import torch
 import torch.nn as nn
