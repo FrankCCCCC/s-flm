@@ -761,7 +761,10 @@ class HyperbolicHeatKernel(GeoUtils):
     @staticmethod
     def _euclid_mean(d: int) -> float:
         """`E[chi_d] = sqrt(2) Gamma((d+1)/2)/Gamma(d/2)`: the short-time radial scale."""
-        return math.sqrt(2.0) * math.gamma((d + 1) / 2.0) / math.gamma(d / 2.0)
+        # lgamma form: the direct Gamma ratio overflows float range for d >= 343
+        # (Gamma(256.5) is +inf), so evaluate the ratio in log-space.
+        return math.sqrt(2.0) * math.exp(
+            math.lgamma((d + 1) / 2.0) - math.lgamma(d / 2.0))
 
     @staticmethod
     def _ddx(f: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
