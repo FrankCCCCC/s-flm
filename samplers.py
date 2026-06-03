@@ -11,11 +11,14 @@ Content:
 """
 
 import abc
+import math
 import torch
 import torch.nn.functional as F
 from dataclass_patch import dataclass
 import candi_utils
 import utils
+from geo_bridge import (
+  HyperbolicHeatKernel, BinaryHyperbolicHeatKernel, Coordinate, Geometry)
 
 
 def sample_categorical(categorical_probs, gumbel_noise=None):
@@ -720,6 +723,159 @@ class SFMSampler(Sampler):
     state.step_idx += 1
     return state
 
+
+@dataclass(kw_only=True)
+class HBFMState(BaseState):
+  # [B, L, d] Poincare-ball point during integration; replaced by
+  # [B, L] int token ids at the final decoding step.
+  xt: torch.Tensor
+  t_schedule: torch.Tensor  # (steps+1,) heat-times decreasing from t_max
+  start_idx: int
+  step_idx: int
+  nfe: int
+  done: bool
+  prefix_lengths: torch.Tensor = None
+  prefix_tokens: torch.Tensor = None
+  prefix_embeds: torch.Tensor = None
+
+
+@dataclass
+class HBFMContext:
+  temperature: float = 1.0
+
+
+def _clamp_ball_float32(z, max_norm=1.0 - 1e-6):
+  """Scale rows with ||z|| >= max_norm down to max_norm, leaving the rest
+  untouched. The float64 kernel clamps to 1 - eps(float64) ~ 1 - 2.2e-16,
+  which rounds to exactly 1.0 in float32; this restores a strict ||z|| < 1
+  after the cast so geodesic's 1/(1-||z||^2) divisor stays finite."""
+  norm = z.norm(dim=-1, keepdim=True)
+  scale = (max_norm / norm.clamp_min(max_norm))
+  return z * scale
+
+
+class HBFMSampler(Sampler):
+  def __init__(self, noise_removal, velocity, use_float64, eps,
+               temperature, p_nucleus, top_k, t_min, t_max,
+               bridge_dim):
+    self.noise_removal = noise_removal
+    self.velocity = velocity
+    self.use_float64 = use_float64
+    self.eps = eps
+    self.temperature = temperature
+    self.p_nucleus = p_nucleus
+    self.top_k = top_k
+    self.t_min = t_min
+    self.t_max = t_max
+    self.bridge_dim = bridge_dim
+
+  def init_state(self, model, num_samples, *,
+                 num_steps=None, eps=1e-5, prefix_tokens=None,
+                 prefix_lengths=None):
+    self._validate_prefix_args(prefix_tokens, prefix_lengths)
+    L = model.num_tokens
+    d = model.backbone.embed_dim
+    ts0 = torch.full((num_samples,), self.t_max,
+                     dtype=torch.float64, device=model.device)
+    if d == 2:
+      xt = BinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
+        ts=ts0.repeat_interleave(L),
+        output_coord=Coordinate.CARTESIAN).reshape(num_samples, L, 2)
+    else:
+      xt = HyperbolicHeatKernel.free_poincare_heat_kernel(
+        ts=ts0, seq_len=L, embedding_size=d,
+        output_coord=Coordinate.CARTESIAN)
+    xt = _clamp_ball_float32(xt.to(torch.float32))
+
+    prefix_embeds = None
+    if prefix_tokens is not None:
+      prefix_embeds = model.backbone.get_sphere_embeddings(
+        prefix_tokens)
+      self._project_prefix(xt, prefix_embeds, prefix_lengths)
+      start_idx = int(prefix_lengths.min())
+    else:
+      start_idx = 0
+
+    if num_steps is None:
+      num_steps = model.config.sampler.steps
+
+    t_schedule = torch.linspace(
+      self.t_max, max(self.t_min, eps), num_steps + 1,
+      device=model.device)
+    state = HBFMState(xt=xt, t_schedule=t_schedule,
+      start_idx=start_idx, step_idx=0, nfe=0, done=False,
+      prefix_lengths=prefix_lengths,
+      prefix_embeds=prefix_embeds,
+      prefix_tokens=prefix_tokens)
+    return state
+
+  def _last_step_decode(self, state, log_p):
+    if self.noise_removal == 'greedy':
+      tokens = log_p.argmax(dim=-1)
+    elif self.noise_removal == 'ancestral':
+      tokens = sample_categorical(log_p.exp())
+    else:
+      raise ValueError(self.noise_removal)
+
+    if state.prefix_tokens is not None:
+      self._project_prefix(tokens, state.prefix_tokens,
+                           state.prefix_lengths)
+    state.xt = tokens  # replace continuous [B,L,d] with int [B,L]
+    state.done = True
+    return state
+
+  @torch.no_grad()
+  def step(self, model, state):
+    num_steps = len(state.t_schedule) - 1
+    is_last_step = (state.step_idx == num_steps - 1)
+
+    t_k = state.t_schedule[state.step_idx]
+    sigma = (t_k / self.t_max).reshape(-1, 1)
+    context = HBFMContext(temperature=self.temperature)
+    log_p = model.forward(xt=state.xt, sigma=sigma, context=context)
+    if self.use_float64:
+      log_p = log_p.to(torch.float64)
+    state.nfe += 1
+
+    if self.p_nucleus != 1.0 or self.top_k != -1:
+      log_p = utils.top_k_top_p_filtering(log_p,
+        top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
+
+    if is_last_step:
+      return self._last_step_decode(state, log_p)
+
+    # dest = clean ball point of the argmax token: its embedding direction
+    # placed at a small interior radius tanh(t_min/2) ~ the bridge endpoint
+    # as heat-time -> 0 (||dest|| < 1, never on the boundary). Geodesic-step
+    # xt toward it by the heat-time fraction, which stays in the ball.
+    t_s = state.t_schedule[state.step_idx + 1]
+    frac = ((t_k - t_s) / t_k.clamp_min(self.eps)).reshape(-1, 1)
+    tokens = log_p[:, state.start_idx:].argmax(dim=-1)  # [B, L]
+    E = model.backbone.sphere_embed.weight.detach()  # [V, d]
+    dest = utils.sphere_normalize(F.embedding(tokens, E)) \
+      * math.tanh(self.t_min / 2.0)  # unit dir at interior radius
+    src = state.xt[:, state.start_idx:]
+    d = model.backbone.embed_dim
+    if d == 2:
+      B, L = tokens.shape
+      result = BinaryHyperbolicHeatKernel.geodesic(
+        t=frac.unsqueeze(1).expand(B, L, 1).reshape(-1, 1),
+        src_cartesian=src.reshape(-1, 2),
+        dest_cartesian=dest.reshape(-1, 2),
+        cartesian_model=Geometry.POINCARE,
+        output_coord=Coordinate.CARTESIAN).reshape(B, L, 2)
+    else:
+      result = HyperbolicHeatKernel.geodesic(
+        t=frac.unsqueeze(1), src_cartesian=src, dest_cartesian=dest,
+        cartesian_model=Geometry.POINCARE,
+        output_coord=Coordinate.CARTESIAN)
+    state.xt[:, state.start_idx:] = _clamp_ball_float32(
+      result.to(state.xt.dtype))
+    self._project_prefix(
+      state.xt, state.prefix_embeds, state.prefix_lengths)
+    state.step_idx += 1
+    return state
+
 # ════════════════════════════════════════════════════════════════
 #  FLM Samplers
 # ════════════════════════════════════════════════════════════════
@@ -1055,6 +1211,14 @@ def get_sampler(config):
       p_nucleus=s.p_nucleus, top_k=s.top_k,
       top_k_velocity=s.top_k_velocity,
       invert_time_convention=config.algo.invert_time_convention)
+
+  if s.predictor == 'hbfm':
+    return HBFMSampler(noise_removal=s.noise_removal,
+      velocity=s.velocity, use_float64=s.use_float64,
+      eps=config.algo.eps, temperature=s.temperature,
+      p_nucleus=s.p_nucleus, top_k=s.top_k,
+      t_min=config.algo.hbfm_t_min, t_max=config.algo.hbfm_t_max,
+      bridge_dim=config.algo.bridge_dim or config.model.hidden_size)
 
   if s.predictor == 'flm_euler':
     return FLMEulerSampler(

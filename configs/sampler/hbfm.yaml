@@ -1,0 +1,11 @@
+predictor: hbfm
+steps: 180                       # Sudoku eval NFE (EXPERIMENT.md §10 eval recipe)
+noise_removal: ancestral        # 'ancestral' or 'greedy' at final step
+use_float64: true
+velocity: exact
+p_nucleus: 1.0
+top_k: -1
+top_k_velocity: -1
+temperature: 1.0
+num_sample_batches: 2
+num_sample_log: 2

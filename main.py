@@ -284,8 +284,8 @@ def _train(diffusion_model, config, logger, tokenizer):
     log_every_n_batches=config.trainer.log_every_n_steps))
 
   # Ensure dataset processing happens on rank 0 first
-  fabric = L.Fabric(num_nodes=config.trainer.num_nodes, 
-                  devices=config.trainer.devices, 
+  fabric = L.Fabric(num_nodes=config.trainer.num_nodes,
+                  devices=config.trainer.devices,
                   accelerator='cuda')
   fabric.launch()
   with fabric.rank_zero_first():
@@ -628,6 +628,8 @@ def main(config):
     diffusion_model = algo.DUO_BASE
   elif config.algo.name == 'sfm':
     diffusion_model = algo.SFM
+  elif config.algo.name == 'hbfm':
+    diffusion_model = algo.HyperbolicBoundaryFM
   elif config.algo.name == 'flm':
     diffusion_model = algo.FLM
   elif config.algo.name == 'candi':

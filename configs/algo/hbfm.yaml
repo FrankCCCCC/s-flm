@@ -1,0 +1,23 @@
+name: hbfm
+diffusion_type: sphere          # reuses the sphere-dit backbone family
+backbone: sphere-dit            # MUST be sphere-dit (not sphere-arch)
+parameterization: mean
+time_conditioning: True
+loss_type: ce
+T: 0
+causal_attention: False
+adaLN: True
+slerp_precision: float64        # kept for config compat; unused by HBFM (no slerp)
+eps: 1e-6
+
+invert_time_convention: true    # kept for _validate_configuration compat; unused by q_xt
+renormalize_weights: False      # LOCKED: embedding not renormalized (free norm)
+
+# --- HBFM-specific ---
+hbfm_t_min: 1e-3                 # uniform heat-time lower bound (d=64 primary)
+hbfm_t_max: 0.05                 # uniform heat-time upper bound (d=64 primary)
+bridge_dim: null                 # null -> config.model.hidden_size (=64 for tiny-sphere-dit)
+input_repr: A                    # A = ball-Cartesian z. B (boundary dir) is OQ-2/deferred.
+proposal_type: unif              # only 'unif' supported
+weighted_ce: false               # A3 ablation toggles this true
+hbfm_log_qxt_time: false         # OQ-1 perf probe; logs per-step q_xt wall time once

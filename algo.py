@@ -11,7 +11,8 @@ import flm_utils
 import candi_utils
 import models.flm_dit
 from geo_bridge import (
-  HyperbolicHeatKernel, BinaryHyperbolicHeatKernel, Coordinate, Geometry)
+  HyperbolicHeatKernel, BinaryHyperbolicHeatKernel, GeoUtils, Coordinate,
+  _LORENTZ_RHO_MAX)
 
 
 class AR(trainer_base.TrainerBase):
@@ -319,102 +320,122 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion):
     super().__init__(config, tokenizer)
     self.eps = config.algo.eps
     self.renormalize_weights = config.algo.renormalize_weights
-    self.invert_time_convention = config.algo.invert_time_convention
+    self.t_min = config.algo.hbfm_t_min
+    self.t_max = config.algo.hbfm_t_max
+    self.bridge_dim = config.algo.bridge_dim or config.model.hidden_size
+    self.weighted_ce = config.algo.weighted_ce
+    self.input_repr = config.algo.input_repr
+    self.proposal_type = config.algo.proposal_type
+    self.log_qxt_time = config.algo.hbfm_log_qxt_time
     self._validate_configuration()
 
   def _validate_configuration(self):
-    if self.invert_time_convention and self.config.noise.adaptive:
-      raise ValueError('Adaptive noise schedule requires '
-                       'invert_time_convention=false '
-                       '(MDLM-like convention).')
-    backbone_type = self.config.model.type
-    if backbone_type == 'sphere-arch' and not self.renormalize_weights:
-      raise ValueError('Backbone sphere-arch requires '
-                       'algo.renormalize_weights=True.')
+    assert self.input_repr == 'A', 'HBFM only supports input_repr=A.'
+    assert self.proposal_type == 'unif', 'HBFM only supports proposal_type=unif.'
+    assert self.config.model.type in ('sphere-dit', 'sphere-arch'), \
+      'HBFM requires model.type sphere-dit or sphere-arch ' \
+      '(backbones exposing sphere_embed).'
+    assert self.t_max >= self.t_min > 0, 'Require t_max >= t_min > 0.'
+    assert self.bridge_dim == self.config.model.hidden_size, \
+      'bridge_dim must equal model.hidden_size.'
 
   def _process_model_output(self, model_output, xt, sigma,
                             context=None):
     return model_output.float().log_softmax(-1)
 
-  def _sample_prior(self, e_clean):
-    e_noisy = torch.randn_like(e_clean)
-    return utils.sphere_normalize(e_noisy)
+  def _sample_heat_t(self, n):
+    ts = torch.rand(n, device=self.device) * (self.t_max - self.t_min) \
+      + self.t_min
+    return ts.float(), self.t_max - self.t_min
 
-  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
-    e_clean = self.backbone.get_sphere_embeddings(x)  # [B, L, d]
-    e_noisy = self._sample_prior(e_clean)
+  def q_xt(self, x, t, use_pure_noise, valid_tokens=None):
+    B, L = x.shape
+    d = self.bridge_dim
+    emb = self.backbone.sphere_embed.weight.to(torch.float64)
+    rhos = None
 
     if use_pure_noise:
-      x_t = e_noisy
+      ts = torch.full((B,), self.t_max, dtype=torch.float64,
+                      device=self.device)
+      if d == 2:
+        z = BinaryHyperbolicHeatKernel.binary_free_poincare_heat_kernel(
+          ts=ts.repeat_interleave(L), output_coord=Coordinate.CARTESIAN)
+        z = z.reshape(B, L, 2)
+      else:
+        z = HyperbolicHeatKernel.free_poincare_heat_kernel(
+          ts=ts, seq_len=L, embedding_size=d,
+          output_coord=Coordinate.CARTESIAN)
     else:
-      slerp_t = alpha_t if self.invert_time_convention else 1 - alpha_t
-      x_t = self._slerp(e_clean, e_noisy, slerp_t)
+      ts = t.to(torch.float64)
+      if d == 2:
+        rhos, thetas = BinaryHyperbolicHeatKernel.binary_poincare_bridge(
+          ts=ts.repeat_interleave(L), targets=x.reshape(-1),
+          word_embedding=emb, output_coord=Coordinate.HYPERBOLIC_POLAR)
+        z = GeoUtils.binary_hyperbolic_polar_to_poincare_cartesian(rhos, thetas)
+        z = z.reshape(B, L, 2)
+        rhos = rhos.reshape(B, L)
+      else:
+        rhos, u = HyperbolicHeatKernel.poincare_bridge(
+          ts=ts, targets=x, word_embedding=emb,
+          output_coord=Coordinate.HYPERBOLIC_POLAR)
+        z = GeoUtils.hyperbolic_polar_to_poincare_cartesian(rhos, u)
 
-    if valid_tokens is not None:
-      x_t = torch.where(valid_tokens.bool().unsqueeze(-1),
-                        x_t, e_clean)
-    return x_t
+    if not use_pure_noise and valid_tokens is not None \
+        and not valid_tokens.all():
+      z_clean = self.q_xt(
+        x, torch.full_like(t, self.t_min), use_pure_noise=False)
+      z = torch.where(valid_tokens.bool().unsqueeze(-1), z,
+                      z_clean.to(z.dtype))
 
-  def optimizer_step(self, *args, **kwargs):
-    out = super().optimizer_step(*args, **kwargs)
-    if self.renormalize_weights:
-      self.backbone.renormalize_weights()
-    return out
+    z = z.to(torch.float32)
+    self._log_diag(rhos)
+    return z
 
-  def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
+  def nll_per_token(self, log_x_theta, xt, x0, interval,
                     low_var=False, context=None, train_mode=False):
-    del xt, alpha_t, dalpha_t, low_var, context
+    del xt, low_var, context, train_mode
 
     ce_loss = -log_x_theta.gather(
       -1, x0.unsqueeze(-1)).squeeze(-1)
 
-    return ce_loss
+    return ce_loss * interval if self.weighted_ce else ce_loss
 
-  def _slerp(self, clean, noisy, alpha_t):
-    # alpha_t = 0 -> clean, alpha_t = 1 -> noisy
-    orig_dtype = None
-    if self.config.algo.slerp_precision == 'float64':
-      orig_dtype = clean.dtype
-      alpha_t = alpha_t.to(torch.float64)
-      clean = clean.to(torch.float64)
-      noisy = noisy.to(torch.float64)
-    out = utils.slerp(
-      clean=clean,
-      noisy=noisy,
-      alpha_t=alpha_t,
-      eps=self.eps)
-
-    if orig_dtype is not None:
-      out = out.to(orig_dtype)
-    return out
+  def _log_diag(self, rhos):
+    if not self.training or rhos is None:
+      return
+    if self.global_step % 50 != 0:
+      return
+    self.log('hbfm/mean_rho', rhos.float().mean(),
+             on_step=True, on_epoch=False, sync_dist=True)
+    self.log('hbfm/rho_saturated_frac',
+             (rhos >= _LORENTZ_RHO_MAX).float().mean(),
+             on_step=True, on_epoch=False, sync_dist=True)
+    self.log('hbfm/emb_norm_mean',
+             self.backbone.sphere_embed.weight.norm(dim=-1).mean(),
+             on_step=True, on_epoch=False, sync_dist=True)
 
   def nll(self, x0, output_tokens, context,
           current_accumulation_step=None, train_mode=False,
           valid_tokens=None):
     del output_tokens
-    t = self._sample_t(x0.shape[0], current_accumulation_step)
+    t, interval = self._sample_heat_t(x0.shape[0])
     assert t.shape[0] == x0.shape[0]
     use_pure_noise = self._use_pure_noise(
       train_mode=train_mode, context=context)
     if use_pure_noise:
-      t = torch.ones_like(t)
-
-    dalpha_t, alpha_t = self.noise(t)
-    alpha_t = alpha_t.unsqueeze(-1)
-    dalpha_t = dalpha_t.unsqueeze(-1)
+      t = torch.full_like(t, self.t_max)
 
     xt = self.q_xt(
-      x0, alpha_t, use_pure_noise=use_pure_noise,
+      x0, t, use_pure_noise=use_pure_noise,
       valid_tokens=valid_tokens)
 
-    sigma = self._sigma_from_alphat(alpha_t)
+    sigma = (t / self.t_max).unsqueeze(-1)
     log_x_theta = self.forward(
       x0=x0, xt=xt, sigma=sigma, context=context)
     utils.print_nans(log_x_theta, 'model_output')
 
     loss = self.nll_per_token(
-      log_x_theta=log_x_theta, xt=xt, x0=x0,
-      alpha_t=alpha_t, dalpha_t=dalpha_t,
+      log_x_theta=log_x_theta, xt=xt, x0=x0, interval=interval,
       low_var=train_mode and self.loss_type == 'low_var',
       context=context, train_mode=train_mode)
 
