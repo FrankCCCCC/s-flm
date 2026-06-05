@@ -337,23 +337,30 @@ class HFLM(trainer_base.Diffusion):
     return model_output.float().log_softmax(-1)
 
   def _sample_prior(self, e_clean):
-    e_noisy = torch.randn_like(e_clean)
-    return utils.sphere_normalize(e_noisy)
+    e_noisy = wrapped_normal(shape=e_clean.shape, m=0.0, cov=1.0, dtype=e_clean.dtype, device=e_clean.device)
+    return e_noisy
 
   def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
-    e_clean = self.backbone.get_sphere_embeddings(x)  # [B, L, d]
-    e_noisy = self._sample_prior(e_clean)
+    # Output hyperbolic cartesian, angles scaled by radial
+    e_clean_rhos, e_clean_thetas = self.backbone.get_hyperbolic_polar_embeddings(x)  # [B, L, d]
+    e_noisy_rhos, e_noisy_thetas = self._sample_prior(e_clean)
 
     if use_pure_noise:
       x_t = e_noisy
     else:
       slerp_t = alpha_t if self.invert_time_convention else 1 - alpha_t
-      x_t = self._slerp(e_clean, e_noisy, slerp_t)
+      x_t_rhos, x_t_thetas = self._hyeprbolic_geodesic(
+        clean_rhos=e_clean_rhos,
+        clean_thetas=e_clean_thetas,
+        noisy_rhos=e_noisy_rhos,
+        noisy_thetas=e_noisy_thetas,
+        alpha_t=slerp_t,
+      )
 
     if valid_tokens is not None:
       x_t = torch.where(valid_tokens.bool().unsqueeze(-1),
                         x_t, e_clean)
-    return x_t
+    return x_t_thetas * x_t_rhos
 
   def optimizer_step(self, *args, **kwargs):
     out = super().optimizer_step(*args, **kwargs)
@@ -370,9 +377,14 @@ class HFLM(trainer_base.Diffusion):
 
     return ce_loss
 
-  
-
-  def _slerp(self, clean, noisy, alpha_t):
+  def _hyeprbolic_geodesic(
+    self,
+    clean_rhos,
+    clean_thetas,
+    noisy_rhos,
+    noisy_thetas,
+    alpha_t
+  ):
     # alpha_t = 0 -> clean, alpha_t = 1 -> noisy
     orig_dtype = None
     if self.config.algo.slerp_precision == 'float64':
@@ -380,12 +392,13 @@ class HFLM(trainer_base.Diffusion):
       alpha_t = alpha_t.to(torch.float64)
       clean = clean.to(torch.float64)
       noisy = noisy.to(torch.float64)
-    out = utils.slerp(
-      clean=clean,
-      noisy=noisy,
-      alpha_t=alpha_t,
-      eps=self.eps)
-
+    
+    HyperbolicHeatKernel.geodesic(
+      t=alpha_t,
+      src_cartesian=noisy,
+      dest_cartesian=clean,
+      cartesian_model=
+    )
     if orig_dtype is not None:
       out = out.to(orig_dtype)
     return out
@@ -448,7 +461,14 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion):
     e_noisy = torch.randn_like(e_clean)
     return utils.sphere_normalize(e_noisy)
 
-  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
+  def q_xt(
+    self,
+    x,
+    alpha_t,
+    use_pure_noise,
+    valid_tokens=None,
+    output_coordinate=''
+  ):
     e_clean = self.backbone.get_sphere_embeddings(x)  # [B, L, d]
     e_noisy = self._sample_prior(e_clean)
 

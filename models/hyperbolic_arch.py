@@ -318,6 +318,12 @@ class SphereArch(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     emb = self.sphere_embed(token_ids)  # [B, L, d]
     return justnorm(emb, self.eps)
 
+  def get_hyperbolic_polar_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
+    emb = self.sphere_embed(token_ids)  # [B, L, d]
+    rhos = emb.norm(p=2, dim=-1, keepdim=True)
+    thetas = utils.sphere_normalize(emb)
+    return rhos, thetas
+
   def reset_kv_cache(self):
     self.ctx_cached_len = 0
 
@@ -355,6 +361,7 @@ class SphereArch(nn.Module, huggingface_hub.PyTorchModelHubMixin):
   def forward(self, x0, xt: torch.Tensor, sigma: torch.Tensor,
               context=None) -> torch.Tensor:
     del x0, context
+    # TODO: LM should output word embedding, doesn't need re-scale or calibrate to sphere
 
     x = xt  # [B, L, d], already on the sphere
 
