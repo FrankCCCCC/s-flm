@@ -87,14 +87,71 @@ class GeoUtils:
 
     @staticmethod
     def _uniform_sphere(
-        B: int, d: int, dtype: torch.dtype, device: torch.device
+        shape, dtype: torch.dtype, device: torch.device
     ) -> torch.Tensor:
         """Sample `B` points uniformly on `S^{d-1}` via normalized Gaussian draws."""
-        if d == 1:
+        if shape[-1] == 1:
             raise ValueError("uniform sphere on S^0 (d=1) is not supported")
-        g = torch.randn(B, d, dtype=dtype, device=device)
-        return g / g.norm(dim=-1, keepdim=True).clamp_min(torch.finfo(dtype).tiny)
+        g = torch.randn(shape, dtype=dtype, device=device)
+        return g / g.norm(p=2, dim=-1, keepdim=True).clamp_min(torch.finfo(dtype).tiny)
 
+    @staticmethod
+    def wrapped_normal(
+        shape: Union[torch.Size, tuple[int]],
+        mean: Union[float, torch.FloatTensor], 
+        cov: Union[float, torch.FloatTensor],
+        dtype: torch.dtype = None,
+        device: torch.device = None,
+    ):
+        r"""Sample `(rho, u)` from the wrapped normal on `H^d` centred at the origin.
+
+        Draws a tangent-space Gaussian `v ~ N(0, Sigma)` at the origin and reads off
+        the polar coordinates of its exponential map. Since
+        `exp_o(0, v) = (cosh ||v||, sinh ||v|| * v / ||v||)`, the radial coordinate is
+        `rho = ||v||` (the geodesic distance to the origin) and the angular coordinate
+        is the unit direction `u = v / ||v||` on `S^{d-1}`. The covariance `Sigma` is
+        set by `std` (see below).
+
+        Args:
+            shape (`torch.Size` or tuple of `int`):
+                Output sample shape `(..., embedding_size)`; the last axis
+                `d = embedding_size` is the tangent / embedding dimension.
+            mean (`float` or `torch.FloatTensor` of shape `()`, `(d,)`):
+                Tangent-space Gaussian mean. A scalar or `(d,)` vector scales each
+                axis (diagonal `Sigma`).
+            std (`float` or `torch.FloatTensor` of shape `()`, `(d,)`, or `(d, d)`):
+                Tangent-space Gaussian scale. A scalar or `(d,)` vector scales each
+                axis (diagonal `Sigma`); a `(d, d)` matrix is the scale factor `L`
+                giving `Sigma = L L^T` (`v = epsilon @ L^T`).
+
+        Returns:
+            tuple `(radial, angular)`:
+                radial (`torch.FloatTensor` of shape `(...,)`):
+                    Radial coordinate `rho = ||v|| >= 0`, the geodesic distance to
+                    the origin.
+                angular (`torch.FloatTensor` of shape `(..., embedding_size)`):
+                    Unit direction `u = v / ||v||` on `S^{d-1}`.
+        """
+
+        # Wrapped normal on H^d with base point at the origin (Nagano et al. 2019):
+        # sample a tangent-space Gaussian v ~ N(0, Sigma) and exp-map it at the
+        # origin. Since exp_o(0, v) = (cosh||v||, sinh||v|| * v/||v||), the polar
+        # coordinates are simply rho = ||v|| and direction u = v/||v||.
+        v = torch.randn(shape).to(dtype=dtype, device=device)
+        # Apply the tangent-space scale `std`: scalar / (D,) diagonal scale each
+        # axis; a (D, D) matrix is a Cholesky-style factor giving Cov = std std^T.
+        if not torch.is_tensor(cov):
+            std = torch.as_tensor(cov, dtype=v.dtype, device=v.device).sqrt()
+        else:
+            std = cov.to(dtype=v.dtype, device=v.device).sqrt()
+        if std.ndim < 2:
+            v = v * std
+        else:
+            v = v @ std.transpose(-1, -2)
+
+        ps = v.norm(p=2, dim=-1)
+        thetas = v / v.norm(p=2, keepdim=True, dim=-1)
+        return ps, thetas
 
     @staticmethod
     def _check_sphere_t_bound(ts: torch.Tensor, d: int) -> None:
