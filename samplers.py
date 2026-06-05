@@ -721,6 +721,136 @@ class SFMSampler(Sampler):
     return state
 
 # ════════════════════════════════════════════════════════════════
+#  HFLM Samplers
+# ════════════════════════════════════════════════════════════════
+
+class HFLMSampler(Sampler):
+  def __init__(self, noise_removal, velocity, use_float64,
+               slerp_float64, eps, temperature, p_nucleus,
+               top_k,
+               top_k_velocity,
+               invert_time_convention):
+    self.noise_removal = noise_removal
+    self.velocity = velocity
+    self.use_float64 = use_float64
+    self.slerp_float64 = slerp_float64
+    self.eps = eps
+    self.temperature = temperature
+    self.p_nucleus = p_nucleus
+    self.top_k = top_k
+    self.top_k_velocity = top_k_velocity
+    self.invert_time_convention = invert_time_convention
+
+  def init_state(self, model, num_samples, *,
+                 num_steps=None, eps=1e-5, prefix_tokens=None,
+                 prefix_lengths=None):
+    self._validate_prefix_args(prefix_tokens, prefix_lengths)
+    xt = torch.randn(num_samples, model.num_tokens,
+      model.backbone.embed_dim, device=model.device,
+      dtype=torch.float32)
+    xt = utils.sphere_normalize(xt)
+
+    prefix_embeds = None
+    if prefix_tokens is not None:
+      prefix_embeds = model.backbone.get_sphere_embeddings(
+        prefix_tokens)
+      self._project_prefix(xt, prefix_embeds, prefix_lengths)
+      start_idx = int(prefix_lengths.min())
+    else:
+      start_idx = 0
+
+    if num_steps is None:
+      num_steps = model.config.sampler.steps
+
+    if self.invert_time_convention:
+      t_schedule = torch.linspace(eps, 1.0, num_steps + 1,
+                                  device=model.device)
+    else:
+      t_schedule = torch.linspace(1.0, eps, num_steps + 1,
+                                  device=model.device)
+    state = SFMState(xt=xt, t_schedule=t_schedule,
+      start_idx=start_idx, step_idx=0, nfe=0, done=False,
+      prefix_lengths=prefix_lengths,
+      prefix_embeds=prefix_embeds,
+      prefix_tokens=prefix_tokens)
+    return state
+
+  def _last_step_decode(self, state, log_p):
+    if self.noise_removal == 'greedy':
+      tokens = log_p.argmax(dim=-1)
+    elif self.noise_removal == 'ancestral':
+      tokens = sample_categorical(log_p.exp())
+    else:
+      raise ValueError(self.noise_removal)
+
+    if state.prefix_embeds is not None:
+      self._project_prefix(tokens, state.prefix_tokens, 
+                           state.prefix_lengths)
+    state.xt = tokens  # replace continuous [B,L,d] with int [B,L]
+    state.done = True
+    return state
+  
+  def _select_topk(self, log_p, E, k):
+    log_p_k, top_idxs = torch.topk(log_p, k, dim=-1)
+    return torch.log_softmax(log_p_k, dim=-1), F.embedding(top_idxs, E)
+
+  def _compute_velocity(self, x, E, log_p):
+    return sfm_compute_velocity(
+      x, E, log_p, mode=self.velocity, eps=self.eps)
+
+  def _get_step_size(self, model, state):
+    _, alpha_t = model.noise(state.t_schedule[state.step_idx])
+    _, alpha_s = model.noise(state.t_schedule[state.step_idx + 1])
+    return sfm_step_size(
+      alpha_t, alpha_s, self.invert_time_convention, self.eps)
+
+  def step(self, model, state):
+    num_steps = len(state.t_schedule) - 1
+    is_last_step = (state.step_idx == num_steps - 1)
+
+    _, alpha_t = model.noise(state.t_schedule[state.step_idx])
+    sigma_t = model._sigma_from_alphat(alpha_t).reshape(-1, 1)
+
+    context = SFMContext(temperature=self.temperature)
+    log_p = model.forward(xt=state.xt, sigma=sigma_t,
+                          context=context)
+    if self.use_float64:
+      log_p = log_p.to(torch.float64)
+    state.nfe += 1
+
+    if self.p_nucleus != 1.0 or self.top_k != -1:
+      log_p = utils.top_k_top_p_filtering(log_p, 
+        top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
+
+    if is_last_step:
+      return self._last_step_decode(state, log_p)
+    # Arguments to compute the velocity field:
+    #  v = sum_k p_k * log_{x}(e_k).
+    log_p_window = log_p[:, state.start_idx:]  # [B, L, V]
+    E = utils.sphere_normalize(
+      model.backbone.sphere_embed.weight.detach())  # [V, d]
+    x = state.xt[:, state.start_idx:].to(E)  # [B, L, d]
+
+    if self.slerp_float64:
+      E = E.to(torch.float64)
+      x = x.to(torch.float64)
+
+    if self.top_k_velocity > 0:
+      log_p_v, E = self._select_topk(log_p_window, E, self.top_k_velocity)
+    else:
+      log_p_v = log_p_window
+
+    vel = self._compute_velocity(x, E, log_p_v)
+
+    dt = self._get_step_size(model, state)
+    x_new = utils.exp_map(x, dt * vel, self.eps)
+    state.xt[:, state.start_idx:] = x_new.to(state.xt.dtype)
+    self._project_prefix(
+      state.xt, state.prefix_embeds, state.prefix_lengths)
+    state.step_idx += 1
+    return state
+
+# ════════════════════════════════════════════════════════════════
 #  FLM Samplers
 # ════════════════════════════════════════════════════════════════
 
