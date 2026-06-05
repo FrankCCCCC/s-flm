@@ -19,7 +19,7 @@ See `unigram/hyper_dm.md` for the underlying math.
 import math
 import torch
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 
 @dataclass
@@ -97,61 +97,109 @@ class GeoUtils:
 
     @staticmethod
     def wrapped_normal(
-        shape: Union[torch.Size, tuple[int]],
-        mean: Union[float, torch.FloatTensor], 
-        cov: Union[float, torch.FloatTensor],
-        dtype: torch.dtype = None,
-        device: torch.device = None,
-    ):
+        shape: Union[torch.Size, Tuple[int, ...]],
+        mean: Union[float, torch.Tensor] = 0.0,
+        cov: Union[float, torch.Tensor] = 1.0,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         r"""Sample `(rho, u)` from the wrapped normal on `H^d` centred at the origin.
 
-        Draws a tangent-space Gaussian `v ~ N(0, Sigma)` at the origin and reads off
-        the polar coordinates of its exponential map. Since
-        `exp_o(0, v) = (cosh ||v||, sinh ||v|| * v / ||v||)`, the radial coordinate is
+        Draws a tangent-space Gaussian `v ~ N(mean, Sigma)` in `T_o H^d ≅ R^d` and
+        reads off the polar coordinates of its exponential map at the origin. Since
+        `exp_o(v) = (cosh ||v||, sinh ||v|| * v / ||v||)`, the radial coordinate is
         `rho = ||v||` (the geodesic distance to the origin) and the angular coordinate
-        is the unit direction `u = v / ||v||` on `S^{d-1}`. The covariance `Sigma` is
-        set by `std` (see below).
+        is the unit direction `u = v / ||v||` on `S^{d-1}` — the polar form shared by
+        the Poincare and Lorentz models. With the default `mean = 0` this is the
+        canonical origin-centred wrapped normal of Nagano et al. (2019); a non-zero
+        `mean` shifts the tangent Gaussian within `T_o`. Convert to Cartesian with
+        [`hyperbolic_polar_to_poincare_cartesian`] / [`hyperbolic_polar_to_lorentz_cartesian`].
 
         Args:
             shape (`torch.Size` or tuple of `int`):
                 Output sample shape `(..., embedding_size)`; the last axis
                 `d = embedding_size` is the tangent / embedding dimension.
-            mean (`float` or `torch.FloatTensor` of shape `()`, `(d,)`):
-                Tangent-space Gaussian mean. A scalar or `(d,)` vector scales each
-                axis (diagonal `Sigma`).
-            std (`float` or `torch.FloatTensor` of shape `()`, `(d,)`, or `(d, d)`):
-                Tangent-space Gaussian scale. A scalar or `(d,)` vector scales each
-                axis (diagonal `Sigma`); a `(d, d)` matrix is the scale factor `L`
-                giving `Sigma = L L^T` (`v = epsilon @ L^T`).
+            mean (`float` or `torch.Tensor` of shape `()`, `(d,)`, or `(..., d)`, *optional*, defaults to `0`):
+                Tangent-space Gaussian mean in `T_o H^d`, broadcast over the batch axes.
+            cov (`float` or `torch.Tensor` of shape `()`, `(d,)`, `(d, d)`, or `(*batch, d, d)`, *optional*, defaults to `1`):
+                Tangent-space Gaussian **covariance** `Sigma`. A scalar gives the
+                isotropic `Sigma = cov * I`; a `(d,)` vector gives the diagonal
+                `Sigma = diag(cov)` (entries are variances, not standard deviations); a
+                matrix is the full covariance, factored by Cholesky so
+                `Cov(v) = L L^T = cov` exactly. Scalar/diagonal variances must be
+                non-negative and a matrix must be symmetric positive-definite, else a
+                `ValueError` is raised. A batched matrix's leading dims must be
+                **broadcastable to `shape[:-1]`** by standard right-aligned rules, so a
+                per-row covariance for `shape = (B, S, d)` is passed as `(B, 1, d, d)`,
+                not `(B, d, d)`.
+            dtype (`torch.dtype`, *optional*):
+                Output dtype; defaults to a tensor `cov`/`mean`'s dtype if given, else
+                the torch default (so a `float64` `cov` is not silently down-cast).
+            device (`torch.device`, *optional*): Output device.
 
         Returns:
-            tuple `(radial, angular)`:
-                radial (`torch.FloatTensor` of shape `(...,)`):
-                    Radial coordinate `rho = ||v|| >= 0`, the geodesic distance to
-                    the origin.
-                angular (`torch.FloatTensor` of shape `(..., embedding_size)`):
-                    Unit direction `u = v / ||v||` on `S^{d-1}`.
+            tuple `(rhos, u)`:
+                rhos (`torch.Tensor` of shape `(...,)`):
+                    Radial coordinate `rho = ||v|| >= 0`, the geodesic distance to the
+                    origin. Unrestricted (like [`sample_radial`]): a large `mean`/`cov`
+                    can push `rho` past `_LORENTZ_RHO_MAX`, which the Lorentz-Cartesian
+                    converter then refuses.
+                u (`torch.Tensor` of shape `(..., embedding_size)`):
+                    Unit direction `u = v / ||v||` on `S^{d-1}` (the canonical `e_0`
+                    where `v == 0`, e.g. `cov = 0`).
         """
 
         # Wrapped normal on H^d with base point at the origin (Nagano et al. 2019):
-        # sample a tangent-space Gaussian v ~ N(0, Sigma) and exp-map it at the
-        # origin. Since exp_o(0, v) = (cosh||v||, sinh||v|| * v/||v||), the polar
+        # sample a tangent-space Gaussian v ~ N(mean, Sigma) and exp-map it at the
+        # origin. Since exp_o(v) = (cosh||v||, sinh||v|| * v/||v||), the polar
         # coordinates are simply rho = ||v|| and direction u = v/||v||.
-        v = torch.randn(shape).to(dtype=dtype, device=device)
-        # Apply the tangent-space scale `std`: scalar / (D,) diagonal scale each
-        # axis; a (D, D) matrix is a Cholesky-style factor giving Cov = std std^T.
-        if not torch.is_tensor(cov):
-            std = torch.as_tensor(cov, dtype=v.dtype, device=v.device).sqrt()
-        else:
-            std = cov.to(dtype=v.dtype, device=v.device).sqrt()
-        if std.ndim < 2:
-            v = v * std
-        else:
-            v = v @ std.transpose(-1, -2)
+        if dtype is None:
+            for _param in (cov, mean):
+                if torch.is_tensor(_param):
+                    dtype = _param.dtype
+                    break
+        eps = torch.randn(tuple(shape), dtype=dtype, device=device)
 
-        ps = v.norm(p=2, dim=-1)
-        thetas = v / v.norm(p=2, keepdim=True, dim=-1)
-        return ps, thetas
+        # Colour the standard-normal draw by the covariance Sigma: scalar / (d,) is a
+        # (diagonal) variance, so v = eps * sqrt(Sigma); a (d, d) (optionally batched)
+        # matrix is the full Sigma, factored as Sigma = L L^T via Cholesky so that
+        # v = L eps has Cov(v) = Sigma exactly.
+        cov_t = torch.as_tensor(cov, dtype=eps.dtype, device=eps.device)
+        if cov_t.ndim < 2:
+            if (cov_t < 0).any():
+                raise ValueError(
+                    "wrapped_normal: scalar/diagonal `cov` is a variance and must be "
+                    f"non-negative; got min(cov)={float(cov_t.min()):.3g}."
+                )
+            v = eps * cov_t.sqrt()
+        else:
+            try:
+                L = torch.linalg.cholesky(cov_t)
+            except RuntimeError as e:
+                raise ValueError(
+                    "wrapped_normal: matrix `cov` must be symmetric positive-definite "
+                    f"(Cholesky failed for shape {tuple(cov_t.shape)}): {e}"
+                ) from e
+            # Sigma broadcasts against the sample batch by standard right-aligned
+            # matmul rules: cov_t's leading dims must be broadcastable to shape[:-1].
+            v = (L @ eps.unsqueeze(-1)).squeeze(-1)
+
+        # Shift by the tangent-space mean (a vector in T_o H^d), broadcasting over
+        # the leading batch axes.
+        mean_t = torch.as_tensor(mean, dtype=eps.dtype, device=eps.device)
+        v = v + mean_t
+
+        tiny = torch.finfo(v.dtype).tiny
+        rhos = v.norm(p=2, dim=-1)
+        u = v / rhos.unsqueeze(-1).clamp_min(tiny)
+        # Where v == 0 (e.g. cov = 0) the direction is undefined; emit the canonical
+        # e_0 so the ||u|| == 1 return contract holds for every input.
+        degenerate = rhos <= tiny
+        if degenerate.any():
+            e0 = torch.zeros(v.shape[-1], dtype=v.dtype, device=v.device)
+            e0[0] = 1.0
+            u = torch.where(degenerate.unsqueeze(-1), e0, u)
+        return rhos, u
 
     @staticmethod
     def _check_sphere_t_bound(ts: torch.Tensor, d: int) -> None:
