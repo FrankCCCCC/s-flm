@@ -16,6 +16,8 @@ import torch.nn.functional as F
 from dataclass_patch import dataclass
 import candi_utils
 import utils
+from geo_bridge import (
+  GeoUtils, HyperbolicHeatKernel, Coordinate, Geometry)
 
 
 def sample_categorical(categorical_probs, gumbel_noise=None):
@@ -729,7 +731,8 @@ class HFLMSampler(Sampler):
                slerp_float64, eps, temperature, p_nucleus,
                top_k,
                top_k_velocity,
-               invert_time_convention):
+               invert_time_convention,
+               prior_cov, rho_max):
     self.noise_removal = noise_removal
     self.velocity = velocity
     self.use_float64 = use_float64
@@ -740,20 +743,30 @@ class HFLMSampler(Sampler):
     self.top_k = top_k
     self.top_k_velocity = top_k_velocity
     self.invert_time_convention = invert_time_convention
+    self.prior_cov = prior_cov
+    self.rho_max = rho_max
+
+  def _rho_clamp(self, rhos):
+    return self.rho_max * torch.tanh(rhos / self.rho_max)
 
   def init_state(self, model, num_samples, *,
                  num_steps=None, eps=1e-5, prefix_tokens=None,
                  prefix_lengths=None):
     self._validate_prefix_args(prefix_tokens, prefix_lengths)
-    xt = torch.randn(num_samples, model.num_tokens,
-      model.backbone.embed_dim, device=model.device,
-      dtype=torch.float32)
-    xt = utils.sphere_normalize(xt)
+    d = model.backbone.embed_dim
+    rhos, u = GeoUtils.wrapped_normal(
+      shape=(num_samples, model.num_tokens, d),
+      mean=0.0, cov=self.prior_cov,
+      dtype=torch.float32, device=model.device)
+    rhos_c = self._rho_clamp(rhos)
+    xt = GeoUtils.hyperbolic_polar_to_poincare_cartesian(rhos_c, u)
 
     prefix_embeds = None
     if prefix_tokens is not None:
-      prefix_embeds = model.backbone.get_sphere_embeddings(
+      p_rhos, p_thetas = model.backbone.get_hyperbolic_polar_embeddings(
         prefix_tokens)
+      prefix_embeds = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+        self._rho_clamp(p_rhos).squeeze(-1), p_thetas)
       self._project_prefix(xt, prefix_embeds, prefix_lengths)
       start_idx = int(prefix_lengths.min())
     else:
@@ -784,19 +797,11 @@ class HFLMSampler(Sampler):
       raise ValueError(self.noise_removal)
 
     if state.prefix_embeds is not None:
-      self._project_prefix(tokens, state.prefix_tokens, 
+      self._project_prefix(tokens, state.prefix_tokens,
                            state.prefix_lengths)
     state.xt = tokens  # replace continuous [B,L,d] with int [B,L]
     state.done = True
     return state
-  
-  def _select_topk(self, log_p, E, k):
-    log_p_k, top_idxs = torch.topk(log_p, k, dim=-1)
-    return torch.log_softmax(log_p_k, dim=-1), F.embedding(top_idxs, E)
-
-  def _compute_velocity(self, x, E, log_p):
-    return sfm_compute_velocity(
-      x, E, log_p, mode=self.velocity, eps=self.eps)
 
   def _get_step_size(self, model, state):
     _, alpha_t = model.noise(state.t_schedule[state.step_idx])
@@ -819,31 +824,47 @@ class HFLMSampler(Sampler):
     state.nfe += 1
 
     if self.p_nucleus != 1.0 or self.top_k != -1:
-      log_p = utils.top_k_top_p_filtering(log_p, 
+      log_p = utils.top_k_top_p_filtering(log_p,
         top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
 
     if is_last_step:
       return self._last_step_decode(state, log_p)
-    # Arguments to compute the velocity field:
-    #  v = sum_k p_k * log_{x}(e_k).
-    log_p_window = log_p[:, state.start_idx:]  # [B, L, V]
-    E = utils.sphere_normalize(
-      model.backbone.sphere_embed.weight.detach())  # [V, d]
-    x = state.xt[:, state.start_idx:].to(E)  # [B, L, d]
+
+    # Geodesic-step toward the predicted-clean token e_{v*}.
+    log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
+    if self.velocity == 'sample':
+      v_star = sample_categorical(log_p_window.exp())  # [B, Lw]
+    else:
+      v_star = log_p_window.argmax(dim=-1)  # [B, Lw]
+
+    dest_rhos, dest_thetas = (
+      model.backbone.get_hyperbolic_polar_embeddings(v_star))
+    dest_rhos_c = self._rho_clamp(dest_rhos.detach())
+    dest_thetas = dest_thetas.detach()
+
+    x = state.xt[:, state.start_idx:]  # current Poincaré point [B, Lw, d]
+    # dt is the fraction of the remaining geodesic distance toward predicted-
+    # clean (reused sfm_step_size). The clamp guards against a degenerate
+    # (negative or huge) dt from a misconfigured schedule that would otherwise
+    # drive xt to the Poincaré boundary; it is a no-op for the real log-linear
+    # schedule where dt in (0, 1). It does not make arbitrary schedules safe.
+    dt = self._get_step_size(model, state).clamp(0.0, 1.0)
+    dt = dt.reshape(-1, 1, 1)
 
     if self.slerp_float64:
-      E = E.to(torch.float64)
       x = x.to(torch.float64)
+      dest_rhos_c = dest_rhos_c.to(torch.float64)
+      dest_thetas = dest_thetas.to(torch.float64)
+      dt = dt.to(torch.float64)
 
-    if self.top_k_velocity > 0:
-      log_p_v, E = self._select_topk(log_p_window, E, self.top_k_velocity)
-    else:
-      log_p_v = log_p_window
+    x_new = HyperbolicHeatKernel.geodesic(
+      t=dt,
+      src_cartesian=x,
+      cartesian_model=Geometry.POINCARE,
+      dest_radial=dest_rhos_c.squeeze(-1),
+      dest_angular=dest_thetas,
+      output_coord=Coordinate.CARTESIAN)
 
-    vel = self._compute_velocity(x, E, log_p_v)
-
-    dt = self._get_step_size(model, state)
-    x_new = utils.exp_map(x, dt * vel, self.eps)
     state.xt[:, state.start_idx:] = x_new.to(state.xt.dtype)
     self._project_prefix(
       state.xt, state.prefix_embeds, state.prefix_lengths)
@@ -1185,6 +1206,16 @@ def get_sampler(config):
       p_nucleus=s.p_nucleus, top_k=s.top_k,
       top_k_velocity=s.top_k_velocity,
       invert_time_convention=config.algo.invert_time_convention)
+
+  if s.predictor == 'hflm':
+    return HFLMSampler(noise_removal=s.noise_removal,
+      velocity=s.velocity, use_float64=s.use_float64,
+      slerp_float64=config.algo.slerp_precision=='float64',
+      eps=config.algo.eps, temperature=s.temperature,
+      p_nucleus=s.p_nucleus, top_k=s.top_k,
+      top_k_velocity=s.top_k_velocity,
+      invert_time_convention=config.algo.invert_time_convention,
+      prior_cov=config.algo.prior_cov, rho_max=config.algo.rho_max)
 
   if s.predictor == 'flm_euler':
     return FLMEulerSampler(

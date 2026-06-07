@@ -75,6 +75,12 @@ class TrainerBase(L.LightningModule):
     elif self.config.model.type == 'sphere-arch':
       self.backbone = models.sphere_arch.SphereArch(
         self.config, vocab_size=self.vocab_size)
+    elif self.config.model.type == 'hyperbolic-dit':
+      self.backbone = models.hyperbolic_dit.HyperbolicDiT(
+        self.config, vocab_size=self.vocab_size)
+    elif self.config.model.type == 'hyperbolic-arch':
+      self.backbone = models.hyperbolic_arch.HyperbolicArch(
+        self.config, vocab_size=self.vocab_size)
     elif self.config.model.type == 'flm-dit':
       self.backbone = models.flm_dit.FLMDIT(
         self.config, vocab_size=self.vocab_size)

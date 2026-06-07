@@ -1,0 +1,11 @@
+predictor: hflm
+steps: 180
+noise_removal: greedy  # 'ancestral' (sample) or 'greedy' (argmax) at the final step
+use_float64: true
+velocity: exact  # exact / sample (geodesic-step-toward-predicted-clean; see ARCH §4.3)
+p_nucleus: 1.0
+top_k: -1
+top_k_velocity: 1  # 1 = top-1 predicted-clean endpoint
+temperature: 1.0
+num_sample_batches: 2
+num_sample_log: 2

@@ -15,7 +15,7 @@ from .dit import (
 )
 
 
-class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
+class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
   def __init__(self, config, vocab_size: int):
     super().__init__()
     if isinstance(config, dict):
@@ -29,11 +29,17 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.init_mode = config.model.init
     self.eps = config.model.eps
 
+    # Embedding param name kept as `sphere_embed` for checkpoint / sampler
+    # compatibility (see ARCH §6); the class is renamed, the param is not.
     self.sphere_embed = nn.Embedding(vocab_size, dim)
     if self.init_mode == 'random':
       nn.init.normal_(self.sphere_embed.weight, std=0.02)
     elif self.init_mode == 'ngpt':
       nn.init.normal_(self.sphere_embed.weight, std=1.0 / math.sqrt(dim))
+    elif self.init_mode == 'hyperbolic':
+      # std=0.3 -> ‖e_v‖≈0.3·√d≈6.8 at d=512: under rho_max=12 with headroom,
+      # same order as E[rho_prior]≈11.3 so clean/noisy radii match at t≈0.
+      nn.init.normal_(self.sphere_embed.weight, std=0.3)
     elif self.init_mode == 'pretrained':
       nn.init.zeros_(self.sphere_embed.weight)
     else:
@@ -153,7 +159,7 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.load_state_dict(own_sd, strict=True)
     fresh = len(own_sd) - loaded
     print(
-      f'[SphereDiT.load_pretrained_from] {ckpt_path}\n'
+      f'[HyperbolicDiT.load_pretrained_from] {ckpt_path}\n'
       f'  source   : algo.name={src_algo_name!r}  adaLN={src_had_adaLN}\n'
       f'  loaded   : {loaded}/{len(own_sd)}\n'
       f'  fresh    : {fresh}\n'
@@ -169,13 +175,8 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       raise ValueError(
         f'Expected pretrained_weight shape ({self.vocab_size}, '
         f'{self.embed_dim}), got {tuple(pretrained_weight.shape)}')
-    normalized = utils.sphere_normalize(pretrained_weight.float())
     with torch.no_grad():
-      self.sphere_embed.weight.copy_(normalized)
-
-  def get_sphere_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
-    emb = self.sphere_embed(token_ids)  # [B, L, d]
-    return utils.sphere_normalize(emb)
+      self.sphere_embed.weight.copy_(pretrained_weight.float())
 
   def get_hyperbolic_polar_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
     emb = self.sphere_embed(token_ids)  # [B, L, d]
@@ -186,16 +187,11 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
   def reset_kv_cache(self):
     self.ctx_cached_len = 0
 
-  def renormalize_weights(self):
-    self.sphere_embed.weight.data = utils.sphere_normalize(
-      self.sphere_embed.weight.data)
-
   def forward(self, x0, xt: torch.Tensor, sigma: torch.Tensor,
               context=None) -> torch.Tensor:
     del x0, context
-    # TODO: LM should output word embedding, doesn't need re-scale or calibrate to sphere
 
-    x = xt  # [B, L, d], already on the sphere
+    x = xt  # [B, L, d], a Poincaré-ball point consumed as-is
 
     if self.adaLN:
       t_cond = F.silu(self.sigma_map(sigma))

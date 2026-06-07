@@ -1,3 +1,9 @@
+"""nGPT-style backbone renamed for HFLM parity. NOT wired into the Sudoku run:
+`HyperbolicArchBlock` calls `justnorm` on activations every block, projecting
+them onto `S^{d-1}` and destroying the radial coordinate after layer 1 — the
+length-as-radial signal HFLM encodes. `HFLM._validate_configuration` rejects
+`model.type=='hyperbolic-arch'`; use `hyperbolic-dit` instead (ARCH §6).
+"""
 import math
 
 import einops
@@ -23,7 +29,7 @@ def justnorm(x: torch.Tensor, eps: float = 1e-6):
   return x / n
 
 
-class SphereArchBlock(nn.Module):
+class HyperbolicArchBlock(nn.Module):
   def __init__(self, dim, n_heads, cond_dim,
                use_time_alpha, mlp_type, mlp_ratio=4,
                dropout=0.1, eps=1e-6):
@@ -162,7 +168,7 @@ class SphereArchBlock(nn.Module):
     return h
 
 
-class SphereArch(nn.Module, huggingface_hub.PyTorchModelHubMixin):
+class HyperbolicArch(nn.Module, huggingface_hub.PyTorchModelHubMixin):
   def __init__(self, config, vocab_size: int):
     super().__init__()
     if isinstance(config, dict):
@@ -200,7 +206,7 @@ class SphereArch(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.rotary_emb = Rotary(dim // self.n_heads)
 
     self.blocks = nn.ModuleList([
-      SphereArchBlock(
+      HyperbolicArchBlock(
         dim=dim,
         n_heads=self.n_heads,
         cond_dim=cond_dim,
@@ -239,7 +245,7 @@ class SphereArch(nn.Module, huggingface_hub.PyTorchModelHubMixin):
 
     Strips the `backbone.` prefix from source keys and renames
         backbone.vocab_embed.embedding  ->  sphere_embed.weight
-    so DIT-trained params map onto SphereArch. DDiTBlock and
+    so DIT-trained params map onto HyperbolicArch. DDiTBlock and
     DDiTBlockCausal share parameter names and shapes. Note: AR's
     DDiTBlock(Causal) attention is a standard dot-product attention whereas
     nGPT normalizes Q/K and reads per-head scales from `sqk` — the raw
@@ -281,7 +287,7 @@ class SphereArch(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.load_state_dict(own_sd, strict=True)
     fresh = len(own_sd) - loaded
     print(
-      f'[SphereArch.load_pretrained_from] {ckpt_path}\n'
+      f'[HyperbolicArch.load_pretrained_from] {ckpt_path}\n'
       f'  loaded   : {loaded}/{len(own_sd)}\n'
       f'  fresh    : {fresh}\n'
       f'  skipped  : {skipped} (not in target or shape mismatch)')
@@ -313,10 +319,6 @@ class SphereArch(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     normalized = utils.sphere_normalize(pretrained_weight.float())
     with torch.no_grad():
       self.sphere_embed.weight.copy_(normalized)
-
-  def get_sphere_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
-    emb = self.sphere_embed(token_ids)  # [B, L, d]
-    return justnorm(emb, self.eps)
 
   def get_hyperbolic_polar_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
     emb = self.sphere_embed(token_ids)  # [B, L, d]

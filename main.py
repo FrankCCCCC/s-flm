@@ -578,13 +578,20 @@ def _sudoku_eval(diffusion_model, config, logger, tokenizer):
         all_records.extend(json.load(f))
     num_correct = sum(r['correct'] for r in all_records)
     total = len(all_records)
-    logger.info(
-      f'Sudoku accuracy: {num_correct}/{total} '
-      f'({num_correct / total * 100:.2f}%)')
+    if total > 0:
+      acc = num_correct / total * 100
+      logger.info(
+        f'Sudoku accuracy: {num_correct}/{total} ({acc:.2f}%)')
+      if config.get('wandb', None) is not None:
+        wandb_logger = L.pytorch.loggers.WandbLogger(
+          config=omegaconf.OmegaConf.to_object(config),
+          **config.wandb)
+        wandb_logger.experiment.log({'sudoku/exact_match_acc': acc})
+        wandb_logger.experiment.finish()
     merged_path = os.path.join(
       config.sudoku.output_dir, 'results.json')
     results = {
-      'accuracy': num_correct / total,
+      'accuracy': num_correct / total if total > 0 else 0.0,
       'num_correct': num_correct,
       'num_total': total,
       'records': all_records,
@@ -628,6 +635,8 @@ def main(config):
     diffusion_model = algo.DUO_BASE
   elif config.algo.name == 'sfm':
     diffusion_model = algo.SFM
+  elif config.algo.name == 'hflm':
+    diffusion_model = algo.HFLM
   elif config.algo.name == 'flm':
     diffusion_model = algo.FLM
   elif config.algo.name == 'candi':

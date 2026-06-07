@@ -11,7 +11,8 @@ import flm_utils
 import candi_utils
 import models.flm_dit
 from geo_bridge import (
-  HyperbolicHeatKernel, BinaryHyperbolicHeatKernel, Coordinate, Geometry)
+  GeoUtils, HyperbolicHeatKernel, BinaryHyperbolicHeatKernel,
+  Coordinate, Geometry)
 
 
 class AR(trainer_base.TrainerBase):
@@ -320,6 +321,8 @@ class HFLM(trainer_base.Diffusion):
     self.eps = config.algo.eps
     self.renormalize_weights = config.algo.renormalize_weights
     self.invert_time_convention = config.algo.invert_time_convention
+    self.prior_cov = config.algo.prior_cov
+    self.rho_max = config.algo.rho_max
     self._validate_configuration()
 
   def _validate_configuration(self):
@@ -327,40 +330,58 @@ class HFLM(trainer_base.Diffusion):
       raise ValueError('Adaptive noise schedule requires '
                        'invert_time_convention=false '
                        '(MDLM-like convention).')
+    if self.prior_cov <= 0 or self.rho_max <= 0:
+      raise ValueError('HFLM requires algo.prior_cov > 0 and '
+                       'algo.rho_max > 0.')
     backbone_type = self.config.model.type
-    if backbone_type == 'sphere-arch' and not self.renormalize_weights:
-      raise ValueError('Backbone sphere-arch requires '
-                       'algo.renormalize_weights=True.')
+    if backbone_type == 'hyperbolic-arch':
+      raise ValueError('hyperbolic-arch justnorms the radial away; '
+                       'use hyperbolic-dit.')
 
   def _process_model_output(self, model_output, xt, sigma,
                             context=None):
     return model_output.float().log_softmax(-1)
 
-  def _sample_prior(self, e_clean):
-    e_noisy = wrapped_normal(shape=e_clean.shape, m=0.0, cov=1.0, dtype=e_clean.dtype, device=e_clean.device)
-    return e_noisy
+  def _rho_clamp(self, rhos):
+    # Soft radial clamp rho_eff = rho_max * tanh(rho / rho_max): caps below the
+    # _LORENTZ_RHO_MAX=20 guard with headroom, smoothly (gradient never zero).
+    return self.rho_max * torch.tanh(rhos / self.rho_max)
+
+  def _sample_prior(self, e_clean_rhos):
+    # Origin wrapped-normal prior on H^d. Returns (rhos[B,L,1], u[B,L,d]).
+    B, L = e_clean_rhos.shape[0], e_clean_rhos.shape[1]
+    d = self.backbone.embed_dim
+    rhos, u = GeoUtils.wrapped_normal(
+      shape=(B, L, d), mean=0.0, cov=self.prior_cov,
+      dtype=e_clean_rhos.dtype, device=e_clean_rhos.device)
+    return rhos.unsqueeze(-1), u
 
   def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
-    # Output hyperbolic cartesian, angles scaled by radial
-    e_clean_rhos, e_clean_thetas = self.backbone.get_hyperbolic_polar_embeddings(x)  # [B, L, d]
-    e_noisy_rhos, e_noisy_thetas = self._sample_prior(e_clean)
+    e_clean_rhos, e_clean_thetas = (
+      self.backbone.get_hyperbolic_polar_embeddings(x))  # [B,L,1], [B,L,d]
+    e_noisy_rhos, e_noisy_thetas = self._sample_prior(e_clean_rhos)
+
+    clean_rhos_c = self._rho_clamp(e_clean_rhos)
+    noisy_rhos_c = self._rho_clamp(e_noisy_rhos)
 
     if use_pure_noise:
-      x_t = e_noisy
+      x_t = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+        noisy_rhos_c.squeeze(-1), e_noisy_thetas)
     else:
       slerp_t = alpha_t if self.invert_time_convention else 1 - alpha_t
-      x_t_rhos, x_t_thetas = self._hyeprbolic_geodesic(
-        clean_rhos=e_clean_rhos,
+      x_t = self._hyperbolic_geodesic(
+        clean_rhos=clean_rhos_c,
         clean_thetas=e_clean_thetas,
-        noisy_rhos=e_noisy_rhos,
+        noisy_rhos=noisy_rhos_c,
         noisy_thetas=e_noisy_thetas,
-        alpha_t=slerp_t,
-      )
+        alpha_t=slerp_t)
 
     if valid_tokens is not None:
+      e_clean_cart = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+        clean_rhos_c.squeeze(-1), e_clean_thetas)
       x_t = torch.where(valid_tokens.bool().unsqueeze(-1),
-                        x_t, e_clean)
-    return x_t_thetas * x_t_rhos
+                        x_t, e_clean_cart)
+    return x_t
 
   def optimizer_step(self, *args, **kwargs):
     out = super().optimizer_step(*args, **kwargs)
@@ -377,7 +398,7 @@ class HFLM(trainer_base.Diffusion):
 
     return ce_loss
 
-  def _hyeprbolic_geodesic(
+  def _hyperbolic_geodesic(
     self,
     clean_rhos,
     clean_thetas,
@@ -385,20 +406,35 @@ class HFLM(trainer_base.Diffusion):
     noisy_thetas,
     alpha_t
   ):
-    # alpha_t = 0 -> clean, alpha_t = 1 -> noisy
+    # slerp convention alpha_t=0 -> clean, alpha_t=1 -> noisy. The geodesic
+    # base convention is t=0 -> src, t=1 -> dest; with src=noisy, dest=clean we
+    # set geo_t = 1 - alpha_t so t=0 -> noisy, t=1 -> clean (ARCH §4.2).
     orig_dtype = None
     if self.config.algo.slerp_precision == 'float64':
-      orig_dtype = clean.dtype
+      orig_dtype = clean_thetas.dtype
       alpha_t = alpha_t.to(torch.float64)
-      clean = clean.to(torch.float64)
-      noisy = noisy.to(torch.float64)
-    
-    HyperbolicHeatKernel.geodesic(
-      t=alpha_t,
-      src_cartesian=noisy,
-      dest_cartesian=clean,
-      cartesian_model=
-    )
+      clean_rhos = clean_rhos.to(torch.float64)
+      clean_thetas = clean_thetas.to(torch.float64)
+      noisy_rhos = noisy_rhos.to(torch.float64)
+      noisy_thetas = noisy_thetas.to(torch.float64)
+
+    geo_t = 1 - alpha_t
+    # geodesic() multiplies t against the [B, L, d+1] ambient points, so t must
+    # broadcast over the seq and embedding axes. alpha_t arrives as [B, 1] (one
+    # noise level per sequence), so lift it to [B, 1, 1]; [B] and [B, L] inputs
+    # are handled too. A python/0-d scalar passes through unchanged.
+    if torch.is_tensor(geo_t):
+      while geo_t.dim() < 3:
+        geo_t = geo_t.unsqueeze(-1)
+    out = HyperbolicHeatKernel.geodesic(
+      t=geo_t,
+      src_radial=noisy_rhos.squeeze(-1),
+      src_angular=noisy_thetas,
+      dest_radial=clean_rhos.squeeze(-1),
+      dest_angular=clean_thetas,
+      cartesian_model=Geometry.POINCARE,
+      output_coord=Coordinate.CARTESIAN)
+
     if orig_dtype is not None:
       out = out.to(orig_dtype)
     return out
