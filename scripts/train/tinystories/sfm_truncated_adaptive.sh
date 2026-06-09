@@ -5,9 +5,9 @@ export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/owt/sfm}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/sfm_truncated_adaptive}"
 NUM_NODES="${NUM_NODES:-1}"
-DEVICES="${DEVICES:-16}"
+DEVICES="${DEVICES:-4}"
 
 GLOBAL_BS=512
 BUF_SIZE=$((50 * GLOBAL_BS))
@@ -15,7 +15,7 @@ BUF_SIZE=$((50 * GLOBAL_BS))
 cd "${REPO_ROOT}"
 
 python -u -m main \
-    data=openwebtext-split \
+    data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small-sphere-dit \
     model.init=ngpt \
@@ -36,7 +36,13 @@ python -u -m main \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \
-    trainer.max_steps=1_000_000 \
-    trainer.val_check_interval=50_000 \
-    callbacks.checkpoint_every_n_steps.every_n_train_steps=5_000 \
+    trainer.max_steps=30_000 \
+    trainer.val_check_interval=60_000 \
+    trainer.limit_val_batches=0 \
+    trainer.num_sanity_val_steps=0 \
+    callbacks.checkpoint_every_n_steps.every_n_train_steps=2_500 \
+    wandb.project=tinystories-flm \
+    wandb.group=geometry-vs-tricks \
+    +wandb.name=tinystories_sfm_trunc_adaptive \
+    +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}"

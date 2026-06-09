@@ -180,3 +180,5 @@ checkpoints/
 multirun/
 .hydra/
 .nfs*
+*.err
+*.out
