@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH -J ts-smoke50                       # Job name
+#SBATCH -o experiments/tinystories/smoke_sbatch_%j.out   # stdout (%j = jobID)
+#SBATCH -e experiments/tinystories/smoke_sbatch_%j.err   # stderr (%j = jobID)
+#SBATCH --mail-type=END,FAIL                # email on completion / failure
+#SBATCH --mail-user=sc3379@cornell.edu      # notification address
+#SBATCH -N 1                                # single node
+#SBATCH -n 1                                # single task
+#SBATCH --cpus-per-task=8                   # cores (for dataloader workers)
+#SBATCH --get-user-env                      # retrieve login environment
+#SBATCH --mem=60gb                          # host RAM
+#SBATCH -t 00:30:00                         # walltime (smoke run is minutes)
+#SBATCH --gres=gpu:1                         # 1 GPU (single-device strategy)
+#SBATCH --constraint="gpu-mid|gpu-high"     # avoid old/low-arch GPUs (cu128 needs sm_75+)
+
+# Phase-7 smoke train for the TinyStories integration (EXPERIMENT.md criterion 5):
+# 50 MDLM steps on the full TinyStories dataset, single GPU, online W&B.
+# NOTE: first run tokenizes the full train split (~2.1M stories) before training.
+set -euo pipefail
+export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+export PATH=/home/sc3379/anaconda3/bin:$PATH
+source activate sfm
+
+REPO_ROOT="/share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm"
+cd "${REPO_ROOT}"
+
+python -u -m main \
+    data=tinystories \
+    data.cache_dir="${REPO_ROOT}/data_cache" \
+    model=small \
+    algo=mdlm \
+    strategy=single-device \
+    loader.global_batch_size=8 \
+    loader.batch_size=8 \
+    loader.eval_batch_size=8 \
+    loader.num_workers=4 \
+    eval.generate_samples=False \
+    eval.compute_generative_perplexity=False \
+    trainer.num_nodes=1 \
+    trainer.devices=1 \
+    trainer.max_steps=50 \
+    trainer.log_every_n_steps=5 \
+    trainer.num_sanity_val_steps=0 \
+    trainer.limit_val_batches=0 \
+    trainer.val_check_interval=1000 \
+    checkpointing.resume_from_ckpt=False \
+    callbacks.checkpoint_every_n_steps.every_n_train_steps=1000 \
+    wandb.project=tinystories-integration \
+    wandb.group=dataset-integration \
+    hydra.run.dir="${REPO_ROOT}/outputs/tinystories/smoke50_sbatch"

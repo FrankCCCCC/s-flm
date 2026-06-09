@@ -786,6 +786,12 @@ def get_dataset(config, tokenizer, mode):
       cache_dir=cache_dir,
       streaming=streaming,
       revision=revision)
+  elif dataset_name == 'tinystories':
+    dataset = datasets.load_dataset(
+      'roneneldan/TinyStories',
+      cache_dir=cache_dir,
+      streaming=streaming,
+      revision=revision)
   elif dataset_name == 'synthetic':
     assert streaming
     assert wrap  # i.e., no pad tokens

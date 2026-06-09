@@ -1,0 +1,131 @@
+[rank: 0] Seed set to 1
+/home/sc3379/anaconda3/envs/sfm/lib/python3.12/site-packages/transformers/tokenization_utils_base.py:1617: FutureWarning: `clean_up_tokenization_spaces` was not set. It will be set to `True` by default. This behavior will be deprecated in transformers v4.45, and will be then set to `False` by default. For more details check this issue: https://github.com/huggingface/transformers/issues/31884
+  warnings.warn(
+Traceback (most recent call last):
+Traceback (most recent call last):
+Traceback (most recent call last):
+Traceback (most recent call last):
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 303, in _run_finalizers
+    finalizer()
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 227, in __call__
+    res = self._callback(*self._args, **self._kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 136, in _remove_temp_dir
+    rmtree(tempdir, onerror=onerror)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 759, in rmtree
+    _rmtree_safe_fd(stack, onexc)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 703, in _rmtree_safe_fd
+    onexc(func, path, err)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 750, in onexc
+    return onerror(func, path, exc_info)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 700, in _rmtree_safe_fd
+    onexc(os.unlink, fullname, err)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 750, in onexc
+    return onerror(func, path, exc_info)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 303, in _run_finalizers
+    finalizer()
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 698, in _rmtree_safe_fd
+    os.unlink(entry.name, dir_fd=topfd)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 303, in _run_finalizers
+    finalizer()
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 227, in __call__
+    res = self._callback(*self._args, **self._kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 136, in _remove_temp_dir
+    rmtree(tempdir, onerror=onerror)
+OSError: [Errno 16] Device or resource busy: '/home/sc3379/tmp/pymp-6ezkr1qb'
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 227, in __call__
+    res = self._callback(*self._args, **self._kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 759, in rmtree
+    _rmtree_safe_fd(stack, onexc)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 136, in _remove_temp_dir
+    rmtree(tempdir, onerror=onerror)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 703, in _rmtree_safe_fd
+    onexc(func, path, err)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 759, in rmtree
+    _rmtree_safe_fd(stack, onexc)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 750, in onexc
+    return onerror(func, path, exc_info)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 703, in _rmtree_safe_fd
+    onexc(func, path, err)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 700, in _rmtree_safe_fd
+    onexc(os.unlink, fullname, err)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 750, in onexc
+    return onerror(func, path, exc_info)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 750, in onexc
+    return onerror(func, path, exc_info)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 700, in _rmtree_safe_fd
+    onexc(os.unlink, fullname, err)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 698, in _rmtree_safe_fd
+    os.unlink(entry.name, dir_fd=topfd)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 303, in _run_finalizers
+    finalizer()
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 750, in onexc
+    return onerror(func, path, exc_info)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 227, in __call__
+    res = self._callback(*self._args, **self._kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 16] Device or resource busy: '/home/sc3379/tmp/pymp-577iud25'
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 698, in _rmtree_safe_fd
+    os.unlink(entry.name, dir_fd=topfd)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/multiprocessing/util.py", line 136, in _remove_temp_dir
+    rmtree(tempdir, onerror=onerror)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 759, in rmtree
+    _rmtree_safe_fd(stack, onexc)
+OSError: [Errno 16] Device or resource busy: '/home/sc3379/tmp/pymp-ju_4wte5'
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 703, in _rmtree_safe_fd
+    onexc(func, path, err)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 750, in onexc
+    return onerror(func, path, exc_info)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 700, in _rmtree_safe_fd
+    onexc(os.unlink, fullname, err)
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 750, in onexc
+    return onerror(func, path, exc_info)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sc3379/anaconda3/envs/sfm/lib/python3.12/shutil.py", line 698, in _rmtree_safe_fd
+    os.unlink(entry.name, dir_fd=topfd)
+OSError: [Errno 16] Device or resource busy: '/home/sc3379/tmp/pymp-7qalv2_i'
+/home/sc3379/anaconda3/envs/sfm/lib/python3.12/site-packages/lightning/fabric/connector.py:571: `precision=bf16` is supported for historical reasons but its usage is discouraged. Please set your precision to bf16-mixed instead!
+Using bfloat16 Automatic Mixed Precision (AMP)
+GPU available: True (cuda), used: True
+TPU available: False, using: 0 TPU cores
+HPU available: False, using: 0 HPUs
+`Trainer(limit_train_batches=1.0)` was configured so 100% of the batches per epoch will be used..
+wandb: Using wandb-core as the SDK backend.  Please refer to https://wandb.me/wandb-core for more information.
+wandb: Currently logged in as: syctw to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: Tracking run with wandb version 0.19.9
+wandb: Run data is saved locally in ./wandb/run-20260608_154857-1zj5jibg
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run charmed-rain-3
+wandb: ⭐️ View project at https://wandb.ai/syctw/tinystories-integration
+wandb: 🚀 View run at https://wandb.ai/syctw/tinystories-integration/runs/1zj5jibg
+LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [0]
+
+  | Name     | Type      | Params | Mode 
+-----------------------------------------------
+0 | backbone | DIT       | 169 M  | train
+1 | softplus | Softplus  | 0      | train
+2 | noise    | LogLinear | 0      | train
+-----------------------------------------------
+169 M     Trainable params
+0         Non-trainable params
+169 M     Total params
+678.509   Total estimated model params size (MB)
+159       Modules in train mode
+0         Modules in eval mode
+SLURM auto-requeueing enabled. Setting signal handlers.
+/home/sc3379/anaconda3/envs/sfm/lib/python3.12/site-packages/torchmetrics/utilities/prints.py:43: UserWarning: The ``compute`` method of metric BPD was called before the ``update`` method which may lead to errors, as metric states have not yet been updated.
+  warnings.warn(*args, **kwargs)
+/home/sc3379/anaconda3/envs/sfm/lib/python3.12/site-packages/torchmetrics/utilities/prints.py:43: UserWarning: The ``compute`` method of metric NLL was called before the ``update`` method which may lead to errors, as metric states have not yet been updated.
+  warnings.warn(*args, **kwargs)
+/home/sc3379/anaconda3/envs/sfm/lib/python3.12/site-packages/torchmetrics/utilities/prints.py:43: UserWarning: The ``compute`` method of metric Perplexity was called before the ``update`` method which may lead to errors, as metric states have not yet been updated.
+  warnings.warn(*args, **kwargs)
+`Trainer.fit` stopped: `max_steps=50` reached.

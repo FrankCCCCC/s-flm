@@ -173,7 +173,12 @@ cython_debug/
 # Local run artifacts
 eval_runs/
 data_cache/
+data_cache
+data_cache_hard/
+data_cache_hard
 checkpoints/
 multirun/
 .hydra/
 .nfs*
+*.err
+*.out
