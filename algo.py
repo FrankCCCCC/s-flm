@@ -315,6 +315,112 @@ class SFM(trainer_base.Diffusion):
 
     return loss, t
 
+class LangFlow(trainer_base.Diffusion):
+  def __init__(self, config, tokenizer):
+    super().__init__(config, tokenizer)
+    self.eps = config.algo.eps
+    self.renormalize_weights = config.algo.renormalize_weights
+    self.invert_time_convention = config.algo.invert_time_convention
+    self._validate_configuration()
+
+  def _validate_configuration(self):
+    if self.invert_time_convention and self.config.noise.adaptive:
+      raise ValueError('Adaptive noise schedule requires '
+                       'invert_time_convention=false '
+                       '(MDLM-like convention).')
+    backbone_type = self.config.model.type
+    if backbone_type == 'sphere-arch' and not self.renormalize_weights:
+      raise ValueError('Backbone sphere-arch requires '
+                       'algo.renormalize_weights=True.')
+
+  def _process_model_output(self, model_output, xt, sigma,
+                            context=None):
+    return model_output.float().log_softmax(-1)
+
+  def _sample_prior(self, e_clean):
+    e_noisy = torch.randn_like(e_clean)
+    return utils.sphere_normalize(e_noisy)
+
+  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
+    e_clean = self.backbone.get_sphere_embeddings(x)  # [B, L, d]
+    e_noisy = self._sample_prior(e_clean)
+
+    if use_pure_noise:
+      x_t = e_noisy
+    else:
+      slerp_t = alpha_t if self.invert_time_convention else 1 - alpha_t
+      x_t = self._slerp(e_clean, e_noisy, slerp_t)
+
+    if valid_tokens is not None:
+      x_t = torch.where(valid_tokens.bool().unsqueeze(-1),
+                        x_t, e_clean)
+    return x_t
+
+  def optimizer_step(self, *args, **kwargs):
+    out = super().optimizer_step(*args, **kwargs)
+    if self.renormalize_weights:
+      self.backbone.renormalize_weights()
+    return out
+
+  def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
+                    low_var=False, context=None, train_mode=False):
+    del xt, alpha_t, dalpha_t, low_var, context
+
+    ce_loss = -log_x_theta.gather(
+      -1, x0.unsqueeze(-1)).squeeze(-1)
+
+    return ce_loss
+
+  def _slerp(self, clean, noisy, alpha_t):
+    # alpha_t = 0 -> clean, alpha_t = 1 -> noisy
+    orig_dtype = None
+    if self.config.algo.slerp_precision == 'float64':
+      orig_dtype = clean.dtype
+      alpha_t = alpha_t.to(torch.float64)
+      clean = clean.to(torch.float64)
+      noisy = noisy.to(torch.float64)
+    out = utils.slerp(
+      clean=clean,
+      noisy=noisy,
+      alpha_t=alpha_t,
+      eps=self.eps)
+
+    if orig_dtype is not None:
+      out = out.to(orig_dtype)
+    return out
+
+  def nll(self, x0, output_tokens, context,
+          current_accumulation_step=None, train_mode=False,
+          valid_tokens=None):
+    del output_tokens
+    t = self._sample_t(x0.shape[0], current_accumulation_step)
+    assert t.shape[0] == x0.shape[0]
+    use_pure_noise = self._use_pure_noise(
+      train_mode=train_mode, context=context)
+    if use_pure_noise:
+      t = torch.ones_like(t)
+
+    dalpha_t, alpha_t = self.noise(t)
+    alpha_t = alpha_t.unsqueeze(-1)
+    dalpha_t = dalpha_t.unsqueeze(-1)
+
+    xt = self.q_xt(
+      x0, alpha_t, use_pure_noise=use_pure_noise,
+      valid_tokens=valid_tokens)
+
+    sigma = self._sigma_from_alphat(alpha_t)
+    log_x_theta = self.forward(
+      x0=x0, xt=xt, sigma=sigma, context=context)
+    utils.print_nans(log_x_theta, 'model_output')
+
+    loss = self.nll_per_token(
+      log_x_theta=log_x_theta, xt=xt, x0=x0,
+      alpha_t=alpha_t, dalpha_t=dalpha_t,
+      low_var=train_mode and self.loss_type == 'low_var',
+      context=context, train_mode=train_mode)
+
+    return loss, t
+
 class HFLM(trainer_base.Diffusion):
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
