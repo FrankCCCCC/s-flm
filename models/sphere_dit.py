@@ -199,7 +199,7 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.sphere_embed.weight.data = utils.sphere_normalize(
       self.sphere_embed.weight.data)
 
-  def _plaid_bias(self, z_gamma, alpha, sigma, r):
+  def _plaid_bias(self, z_gamma, alpha, sigma, r, dtype=None):
     """Plaid bias added to logits: the full Gaussian log-likelihood (Eq. 44).
 
     log p(z_gamma|v) = -||z_gamma - alpha*e_v||^2 / (2 sigma^2)
@@ -208,12 +208,17 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     The first term is constant across v -> drops in softmax (omitted). Under
     Option A (raw, free, drifting norms) ||e_v||^2 is vocab-dependent, so the
     quadratic term is kept; only the ||z_gamma||^2 term drops.
+
+    Computed in `dtype` (the logits dtype, e.g. bf16): the [B, L, V] inner
+    product dominates memory at LM vocab sizes — fp32 OOMs at V=50k, L=1024.
+    norm_sq is reduced in fp32 for accuracy, then cast.
     """
-    E = self.sphere_embed.weight  # [V, d], RAW
-    inner = torch.einsum('bld,vd->blv', z_gamma, E)  # <z_gamma, e_v>
-    norm_sq = (E * E).sum(-1)  # [V] = ||e_v||^2
-    coef1 = (r * alpha / (sigma ** 2)).unsqueeze(-1)  # [B, 1, 1]
-    coef2 = (r * alpha ** 2 / (2 * sigma ** 2)).unsqueeze(-1)  # [B, 1, 1]
+    dtype = dtype if dtype is not None else z_gamma.dtype
+    E = self.sphere_embed.weight.to(dtype)  # [V, d], RAW
+    inner = torch.einsum('bld,vd->blv', z_gamma.to(dtype), E)  # <z_gamma, e_v>
+    norm_sq = (self.sphere_embed.weight.float() ** 2).sum(-1).to(dtype)  # [V]
+    coef1 = (r * alpha / (sigma ** 2)).unsqueeze(-1).to(dtype)  # [B, 1, 1]
+    coef2 = (r * alpha ** 2 / (2 * sigma ** 2)).unsqueeze(-1).to(dtype)
     return coef1 * inner - coef2 * norm_sq
 
   def forward(self, x0, xt: torch.Tensor, sigma: torch.Tensor,
@@ -245,5 +250,5 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
         x = x / t
 
     if self.logit_bias and lf is not None and lf.r > 0.0:
-      x = x + self._plaid_bias(xt, lf.alpha, lf.sigma, lf.r).to(x.dtype)
+      x = x + self._plaid_bias(xt, lf.alpha, lf.sigma, lf.r, dtype=x.dtype)
     return x

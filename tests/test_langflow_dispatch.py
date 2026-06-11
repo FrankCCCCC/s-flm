@@ -6,7 +6,7 @@ These pin the wiring/sampler the implementer must add:
   * `LangFlowSampler.__init__` takes `temperature` / `p_nucleus` / `top_k`.
   * `get_sampler` resolves `predictor=='langflow'` -> `LangFlowSampler`.
   * `init_state` builds a raw-D-space prior `z_0 ~ N(0, sigma_0^2 I)` and zeroed
-    self-cond carry; prefix sampling is unsupported (assert).
+    self-cond carry; prefix positions are clamped to clean raw embeds.
   * `step` performs the Algorithm-2 Euler-on-γ update; the final step argmaxes.
   * the sampler's `zhat` carry == raw `probs @ E` (train/sample parity, inv H).
 
@@ -68,6 +68,9 @@ class _StubBackbone(torch.nn.Module):
     self.vocab_size = vocab_size
     self.sphere_embed = torch.nn.Embedding(vocab_size, d)
     torch.nn.init.normal_(self.sphere_embed.weight, std=1.0)
+
+  def get_raw_embeddings(self, token_ids):
+    return self.sphere_embed(token_ids)
 
 
 class _StubModel:
@@ -168,16 +171,39 @@ def test_init_state_gamma_schedule_length():
   assert tuple(state.gammas.shape) == (5,)
 
 
-def test_init_state_rejects_prefix_tokens():
-  """ARCH §6.2: prefix/infilling is unsupported -> `init_state` with
-  `prefix_tokens` raises."""
+def test_init_state_clamps_prefix_to_clean_raw_embeds():
+  """Prefix conditioning (sudoku): `init_state` clamps prefix positions of the
+  prior to the CLEAN raw embeddings (matches q_xt's valid_tokens=0 = clean)."""
   sampler = _build_langflow_sampler()
   model = _StubModel(d=16, vocab_size=8, length=4, steps=4)
-  prefix = torch.zeros(3, 2, dtype=torch.long)
+  prefix = torch.tensor([[3, 5], [1, 2], [7, 4]], dtype=torch.long)
   lengths = torch.full((3,), 2, dtype=torch.long)
-  with pytest.raises((AssertionError, Exception)):
-    sampler.init_state(model, 3, num_steps=4,
-                       prefix_tokens=prefix, prefix_lengths=lengths)
+  state = sampler.init_state(model, 3, num_steps=4,
+                             prefix_tokens=prefix, prefix_lengths=lengths)
+  clean = model.backbone.get_raw_embeddings(prefix).to(state.xt.dtype)
+  assert torch.allclose(state.xt[:, :2], clean)
+  # Suffix positions remain the Gaussian prior (not clamped).
+  assert not torch.allclose(state.xt[:, 2:], clean)
+
+
+def test_step_keeps_prefix_clamped_and_decodes_prefix_tokens():
+  """Each Euler step re-clamps the prefix to clean embeds; the final argmax
+  decode returns the TRUE prefix tokens at prefix positions (stub argmax
+  is token 0 everywhere else)."""
+  sampler = _build_langflow_sampler()
+  model = _StubModel(d=16, vocab_size=8, length=4, steps=4)
+  prefix = torch.tensor([[3, 5], [1, 2], [7, 4]], dtype=torch.long)
+  lengths = torch.full((3,), 2, dtype=torch.long)
+  state = sampler.init_state(model, 3, num_steps=4,
+                             prefix_tokens=prefix, prefix_lengths=lengths)
+  clean = model.backbone.get_raw_embeddings(prefix).to(state.xt.dtype)
+  while not state.done:
+    state = sampler.step(model, state)
+    if not state.done:  # mid-integration: prefix stays clamped to clean embeds
+      assert torch.allclose(state.xt[:, :2], clean)
+  assert state.xt.shape == (3, 4)
+  assert torch.equal(state.xt[:, :2], prefix)   # decoded prefix == true tokens
+  assert (state.xt[:, 2:] == 0).all()           # stub argmax is token 0
 
 
 # ---------------------------------------------------------------------------

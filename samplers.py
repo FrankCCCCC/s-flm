@@ -1190,6 +1190,9 @@ class LangFlowState(BaseState):
   step_idx: int
   nfe: int
   done: bool
+  prefix_embeds: torch.Tensor = None   # (B, P, d) clean raw embeds, or None
+  prefix_tokens: torch.Tensor = None   # (B, P) int64, or None
+  prefix_lengths: torch.Tensor = None  # (B,) int64, or None
 
 
 class LangFlowSampler(Sampler):
@@ -1204,8 +1207,6 @@ class LangFlowSampler(Sampler):
                  num_steps=None, eps=1e-5, prefix_tokens=None,
                  prefix_lengths=None):
     self._validate_prefix_args(prefix_tokens, prefix_lengths)
-    assert prefix_tokens is None, \
-      'LangFlowSampler does not support prefix/infilling.'
     N = num_steps or model.config.sampler.steps
     lo, hi = model.noise._gamma_clip_bounds()
     k = torch.arange(N + 1, device=model.device)
@@ -1216,10 +1217,21 @@ class LangFlowSampler(Sampler):
     xt = torch.randn(num_samples, model.num_tokens,
                      model.backbone.embed_dim, device=model.device,
                      dtype=torch.float32) * sigmas[0]
+    # Prefix conditioning (e.g. sudoku clues): clamp prefix positions to the
+    # CLEAN raw embeddings at every step — matches LangFlow.q_xt, which keeps
+    # valid_tokens=0 positions clean at all noise levels during training.
+    prefix_embeds = None
+    if prefix_tokens is not None:
+      prefix_embeds = model.backbone.get_raw_embeddings(
+        prefix_tokens).to(xt.dtype)
+      self._project_prefix(xt, prefix_embeds, prefix_lengths)
     z_sc = torch.zeros_like(xt)
     return LangFlowState(xt=xt, gammas=gammas, alphas=alphas,
                          sigmas=sigmas, z_sc=z_sc, step_idx=0,
-                         nfe=0, done=False)
+                         nfe=0, done=False,
+                         prefix_embeds=prefix_embeds,
+                         prefix_tokens=prefix_tokens,
+                         prefix_lengths=prefix_lengths)
 
   def step(self, model, state):
     import algo
@@ -1242,7 +1254,11 @@ class LangFlowSampler(Sampler):
         log_p, top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
 
     if is_last:
-      state.xt = log_p.argmax(-1)
+      tokens = log_p.argmax(-1)
+      if state.prefix_tokens is not None:
+        self._project_prefix(tokens, state.prefix_tokens,
+                             state.prefix_lengths)
+      state.xt = tokens
       state.done = True
       return state
 
@@ -1253,6 +1269,8 @@ class LangFlowSampler(Sampler):
     a_next, s_next = state.alphas[k + 1], state.sigmas[k + 1]
     state.xt = s_next * (state.xt / sigma_k
                          + (a_next / s_next - alpha_k / sigma_k) * zhat)
+    self._project_prefix(state.xt, state.prefix_embeds,
+                         state.prefix_lengths)
     state.step_idx += 1
     return state
 
