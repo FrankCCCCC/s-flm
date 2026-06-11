@@ -1180,8 +1180,89 @@ def run_sampler(sampler, model, num_samples, *,
   return state.xt, sampler.metadata(state)
 
 
+@dataclass(kw_only=True)
+class LangFlowState(BaseState):
+  xt: torch.Tensor          # [B, L, d] during integration; [B, L] ids after argmax
+  gammas: torch.Tensor      # [N+1]
+  alphas: torch.Tensor      # [N+1]
+  sigmas: torch.Tensor      # [N+1]
+  z_sc: torch.Tensor        # [B, L, d] self-cond carry (zeros at k=0)
+  step_idx: int
+  nfe: int
+  done: bool
+
+
+class LangFlowSampler(Sampler):
+  """Euler-on-gamma sampler (LangFlow Algorithm 2), always-on self-conditioning."""
+
+  def __init__(self, temperature, p_nucleus, top_k):
+    self.temperature = temperature
+    self.p_nucleus = p_nucleus
+    self.top_k = top_k
+
+  def init_state(self, model, num_samples, *,
+                 num_steps=None, eps=1e-5, prefix_tokens=None,
+                 prefix_lengths=None):
+    self._validate_prefix_args(prefix_tokens, prefix_lengths)
+    assert prefix_tokens is None, \
+      'LangFlowSampler does not support prefix/infilling.'
+    N = num_steps or model.config.sampler.steps
+    lo, hi = model.noise._gamma_clip_bounds()
+    k = torch.arange(N + 1, device=model.device)
+    q = (1 - k / N).clamp(model.noise.q_clip, 1 - model.noise.q_clip)
+    gammas = (model.noise.P_mu
+              - model.noise.P_beta * torch.log(-torch.log(q))).clamp(lo, hi)
+    alphas, sigmas = model.noise.alpha_sigma_from_gamma(gammas)
+    xt = torch.randn(num_samples, model.num_tokens,
+                     model.backbone.embed_dim, device=model.device,
+                     dtype=torch.float32) * sigmas[0]
+    z_sc = torch.zeros_like(xt)
+    return LangFlowState(xt=xt, gammas=gammas, alphas=alphas,
+                         sigmas=sigmas, z_sc=z_sc, step_idx=0,
+                         nfe=0, done=False)
+
+  def step(self, model, state):
+    import algo
+    N = len(state.gammas) - 1
+    is_last = (state.step_idx == N)
+    k = state.step_idx
+    B = state.xt.shape[0]
+    gamma_k = state.gammas[k].expand(B)
+    alpha_k, sigma_k = state.alphas[k], state.sigmas[k]
+    ctx = algo.LangFlowContext(
+      z_sc=state.z_sc,
+      alpha=alpha_k.reshape(1, 1).expand(B, 1),
+      sigma=sigma_k.reshape(1, 1).expand(B, 1),
+      r=1.0, temperature=self.temperature)
+    log_p = model.forward(x0=None, xt=state.xt, sigma=gamma_k, context=ctx)
+    state.nfe += 1
+
+    if self.p_nucleus != 1.0 or self.top_k != -1:
+      log_p = utils.top_k_top_p_filtering(
+        log_p, top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
+
+    if is_last:
+      state.xt = log_p.argmax(-1)
+      state.done = True
+      return state
+
+    E = model.backbone.sphere_embed.weight
+    zhat = torch.einsum('blv,vd->bld', log_p.exp(), E)
+    state.z_sc = zhat
+
+    a_next, s_next = state.alphas[k + 1], state.sigmas[k + 1]
+    state.xt = s_next * (state.xt / sigma_k
+                         + (a_next / s_next - alpha_k / sigma_k) * zhat)
+    state.step_idx += 1
+    return state
+
+
 def get_sampler(config):
   s = config.sampler
+
+  if s.predictor == 'langflow':
+    return LangFlowSampler(temperature=s.temperature,
+                           p_nucleus=s.p_nucleus, top_k=s.top_k)
 
   if s.predictor == 'ancestral':
     return AncestralSampler(

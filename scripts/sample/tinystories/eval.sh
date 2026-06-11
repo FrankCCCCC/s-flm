@@ -22,6 +22,7 @@ GLOBAL_BS=512
 BUF_SIZE=$((50 * GLOBAL_BS))
 case "${MODEL_TYPE}" in
   sfm)          MARGS=(model=small-sphere-dit model.init=ngpt algo=sfm algo.renormalize_weights=False noise=log-linear sampler=sfm) ;;
+  langflow)     MARGS=(model=small-sphere-dit model.init=unit_var algo=langflow noise=gumbel sampler=langflow) ;;
   sfm_adaptive) MARGS=(model=small-sphere-dit model.init=ngpt algo=sfm algo.renormalize_weights=False noise=log-linear-adaptive noise.alpha_max=0.121 noise.adaptive_refit_every=50 "noise.adaptive_buffer_size=${BUF_SIZE}" noise.adaptive_ema=0.9 noise.adaptive_uniform_mix=1e-3 sampler=sfm) ;;
   hflm)         MARGS=(model=small-hyperbolic-dit algo=hflm algo.prior_cov=0.25 algo.rho_max=12 algo.renormalize_weights=False noise=log-linear sampler=hflm) ;;
   *) echo "unknown MODEL_TYPE=${MODEL_TYPE}"; exit 1 ;;

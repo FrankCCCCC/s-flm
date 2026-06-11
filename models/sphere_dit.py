@@ -34,10 +34,21 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       nn.init.normal_(self.sphere_embed.weight, std=0.02)
     elif self.init_mode == 'ngpt':
       nn.init.normal_(self.sphere_embed.weight, std=1.0 / math.sqrt(dim))
+    elif self.init_mode == 'unit_var':
+      nn.init.normal_(self.sphere_embed.weight, std=1.0)
     elif self.init_mode == 'pretrained':
       nn.init.zeros_(self.sphere_embed.weight)
     else:
       raise ValueError(self.init_mode)
+
+    self.self_conditioning = getattr(
+      config.algo, 'self_conditioning', False)
+    self.logit_bias = getattr(config.algo, 'logit_bias', False)
+    if self.self_conditioning:
+      self.W_in = nn.Linear(dim, dim, bias=False)
+      self.W_sc = nn.Linear(dim, dim, bias=False)
+      self.W_in.weight.data.zero_()
+      self.W_sc.weight.data.zero_()
 
     if self.adaLN:
       self.sigma_map = TimestepEmbedder(cond_dim)
@@ -177,6 +188,10 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     emb = self.sphere_embed(token_ids)  # [B, L, d]
     return utils.sphere_normalize(emb)
 
+  def get_raw_embeddings(self, token_ids: torch.Tensor) -> torch.Tensor:
+    """Raw embedding lookup, NO normalization. Returns [B, L, d]."""
+    return self.sphere_embed(token_ids)
+
   def reset_kv_cache(self):
     self.ctx_cached_len = 0
 
@@ -184,11 +199,33 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.sphere_embed.weight.data = utils.sphere_normalize(
       self.sphere_embed.weight.data)
 
+  def _plaid_bias(self, z_gamma, alpha, sigma, r):
+    """Plaid bias added to logits: the full Gaussian log-likelihood (Eq. 44).
+
+    log p(z_gamma|v) = -||z_gamma - alpha*e_v||^2 / (2 sigma^2)
+      = -||z_gamma||^2/(2 sigma^2)  +  (alpha/sigma^2) <z_gamma,e_v>
+        - (alpha^2/(2 sigma^2)) ||e_v||^2
+    The first term is constant across v -> drops in softmax (omitted). Under
+    Option A (raw, free, drifting norms) ||e_v||^2 is vocab-dependent, so the
+    quadratic term is kept; only the ||z_gamma||^2 term drops.
+    """
+    E = self.sphere_embed.weight  # [V, d], RAW
+    inner = torch.einsum('bld,vd->blv', z_gamma, E)  # <z_gamma, e_v>
+    norm_sq = (E * E).sum(-1)  # [V] = ||e_v||^2
+    coef1 = (r * alpha / (sigma ** 2)).unsqueeze(-1)  # [B, 1, 1]
+    coef2 = (r * alpha ** 2 / (2 * sigma ** 2)).unsqueeze(-1)  # [B, 1, 1]
+    return coef1 * inner - coef2 * norm_sq
+
   def forward(self, x0, xt: torch.Tensor, sigma: torch.Tensor,
               context=None) -> torch.Tensor:
-    del x0, context
+    del x0
 
-    x = xt  # [B, L, d], already on the sphere
+    x = xt  # [B, L, d]
+    lf = context if hasattr(context, 'z_sc') else None
+
+    if self.self_conditioning and lf is not None:
+      z_sc = lf.z_sc if lf.z_sc is not None else torch.zeros_like(x)
+      x = x + self.W_in(x) + self.W_sc(z_sc)
 
     if self.adaLN:
       t_cond = F.silu(self.sigma_map(sigma))
@@ -204,6 +241,9 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       if self.out_temperature_scaling:
         pre_temperature = x[:, :, [-1]]
         x = x[:, :, :-1]
-        t = 1 + self.eps + torch.tanh(pre_temperature) * (1 - self.eps) 
+        t = 1 + self.eps + torch.tanh(pre_temperature) * (1 - self.eps)
         x = x / t
+
+    if self.logit_bias and lf is not None and lf.r > 0.0:
+      x = x + self._plaid_bias(xt, lf.alpha, lf.sigma, lf.r).to(x.dtype)
     return x

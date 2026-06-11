@@ -1,0 +1,9 @@
+predictor: langflow
+steps: 1024                # match sfm.yaml for equal-NFE H4 comparison
+noise_removal: greedy      # final argmax (Algorithm 2); 'greedy' is the argmax decode
+use_float64: false
+p_nucleus: 1.0
+top_k: -1
+temperature: 1.0
+num_sample_batches: 2
+num_sample_log: 2

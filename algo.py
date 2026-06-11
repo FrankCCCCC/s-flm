@@ -315,111 +315,159 @@ class SFM(trainer_base.Diffusion):
 
     return loss, t
 
+@dataclass
+class LangFlowContext:
+  z_sc: torch.Tensor | None = None   # [B, L, d] self-cond embeds, None -> zeros
+  alpha: torch.Tensor | None = None  # [B, 1]
+  sigma: torch.Tensor | None = None  # [B, 1]
+  r: float = 0.0                     # logit-bias ramp
+  temperature: float = 1.0
+
+
 class LangFlow(trainer_base.Diffusion):
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
-    self.eps = config.algo.eps
-    self.renormalize_weights = config.algo.renormalize_weights
-    self.invert_time_convention = config.algo.invert_time_convention
+    self.self_conditioning = config.algo.self_conditioning
+    self.p_self_cond = config.algo.p_self_cond
+    self.logit_bias = config.algo.logit_bias
+    self.logit_bias_warmup_steps = config.algo.logit_bias_warmup_steps
     self._validate_configuration()
 
   def _validate_configuration(self):
-    if self.invert_time_convention and self.config.noise.adaptive:
-      raise ValueError('Adaptive noise schedule requires '
-                       'invert_time_convention=false '
-                       '(MDLM-like convention).')
-    backbone_type = self.config.model.type
-    if backbone_type == 'sphere-arch' and not self.renormalize_weights:
-      raise ValueError('Backbone sphere-arch requires '
-                       'algo.renormalize_weights=True.')
+    assert self.config.noise.type == 'gumbel', \
+      'LangFlow requires noise=gumbel.'
+    assert self.config.model.type == 'sphere-dit', \
+      'LangFlow requires sphere-dit backbone.'
+    if self.self_conditioning:
+      assert 0.0 <= self.p_self_cond <= 1.0
 
-  def _process_model_output(self, model_output, xt, sigma,
-                            context=None):
+  def _embed(self, x0):
+    return self.backbone.get_raw_embeddings(x0)
+
+  def _x_to_embed(self, probs):
+    return probs @ self.backbone.sphere_embed.weight
+
+  def q_xt(self, z, alpha, sigma, valid_tokens=None):
+    eps = torch.randn_like(z)
+    z_gamma = alpha.unsqueeze(-1) * z + sigma.unsqueeze(-1) * eps
+    if valid_tokens is not None:
+      z_gamma = torch.where(valid_tokens.bool().unsqueeze(-1),
+                            z_gamma, z)
+    return z_gamma
+
+  def _process_model_output(self, model_output, xt, sigma, context=None):
+    del xt, sigma, context
     return model_output.float().log_softmax(-1)
 
-  def _sample_prior(self, e_clean):
-    e_noisy = torch.randn_like(e_clean)
-    return utils.sphere_normalize(e_noisy)
+  def nll_per_token(self, log_x_theta, x0):
+    return -log_x_theta.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
 
-  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
-    e_clean = self.backbone.get_sphere_embeddings(x)  # [B, L, d]
-    e_noisy = self._sample_prior(e_clean)
+  def _logit_bias_r(self):
+    if not self.logit_bias:
+      return 0.0
+    w = self.logit_bias_warmup_steps
+    return 1.0 if w <= 0 else min(1.0, self.global_step / w)
 
-    if use_pure_noise:
-      x_t = e_noisy
-    else:
-      slerp_t = alpha_t if self.invert_time_convention else 1 - alpha_t
-      x_t = self._slerp(e_clean, e_noisy, slerp_t)
+  def _shard_like_sample_t(self, gamma_full, B, accum_step):
+    if accum_step is None:
+      return gamma_full[:B]
+    gamma = gamma_full.chunk(self.trainer.num_nodes)[self.trainer.node_rank]
+    gamma = gamma.chunk(self.trainer.num_devices)[self.trainer.local_rank]
+    gamma = gamma.chunk(self.trainer.accumulate_grad_batches)[accum_step]
+    return gamma[:B]
 
-    if valid_tokens is not None:
-      x_t = torch.where(valid_tokens.bool().unsqueeze(-1),
-                        x_t, e_clean)
-    return x_t
+  def _forward_langflow(self, z_gamma, gamma_ce, alpha, sigma_vp, z_sc):
+    r = self._logit_bias_r()
+    ctx = LangFlowContext(z_sc=z_sc, alpha=alpha, sigma=sigma_vp, r=r)
+    return self.forward(x0=None, xt=z_gamma, sigma=gamma_ce, context=ctx)
 
-  def optimizer_step(self, *args, **kwargs):
-    out = super().optimizer_step(*args, **kwargs)
-    if self.renormalize_weights:
-      self.backbone.renormalize_weights()
-    return out
-
-  def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
-                    low_var=False, context=None, train_mode=False):
-    del xt, alpha_t, dalpha_t, low_var, context
-
-    ce_loss = -log_x_theta.gather(
-      -1, x0.unsqueeze(-1)).squeeze(-1)
-
-    return ce_loss
-
-  def _slerp(self, clean, noisy, alpha_t):
-    # alpha_t = 0 -> clean, alpha_t = 1 -> noisy
-    orig_dtype = None
-    if self.config.algo.slerp_precision == 'float64':
-      orig_dtype = clean.dtype
-      alpha_t = alpha_t.to(torch.float64)
-      clean = clean.to(torch.float64)
-      noisy = noisy.to(torch.float64)
-    out = utils.slerp(
-      clean=clean,
-      noisy=noisy,
-      alpha_t=alpha_t,
-      eps=self.eps)
-
-    if orig_dtype is not None:
-      out = out.to(orig_dtype)
-    return out
+  def _self_cond_pass(self, z_gamma, gamma_ce, alpha, sigma_vp, train_mode):
+    if not self.self_conditioning:
+      return None
+    if train_mode and torch.rand(()) >= self.p_self_cond:
+      return None
+    with torch.no_grad():
+      log_xhat = self._forward_langflow(
+        z_gamma, gamma_ce, alpha, sigma_vp, z_sc=None)
+      z_sc = self._x_to_embed(log_xhat.exp())
+    return z_sc.detach()
 
   def nll(self, x0, output_tokens, context,
           current_accumulation_step=None, train_mode=False,
           valid_tokens=None):
-    del output_tokens
-    t = self._sample_t(x0.shape[0], current_accumulation_step)
-    assert t.shape[0] == x0.shape[0]
-    use_pure_noise = self._use_pure_noise(
-      train_mode=train_mode, context=context)
-    if use_pure_noise:
-      t = torch.ones_like(t)
+    del output_tokens, context
+    B = x0.shape[0]
 
-    dalpha_t, alpha_t = self.noise(t)
-    alpha_t = alpha_t.unsqueeze(-1)
-    dalpha_t = dalpha_t.unsqueeze(-1)
+    n = (self.config.loader.global_batch_size
+         if current_accumulation_step is not None else B)
+    gamma_full = self.noise.sample_gamma(
+      n, self.device, antithetic=self.antithetic_sampling)
+    gamma = self._shard_like_sample_t(
+      gamma_full, B, current_accumulation_step)
+    gamma_ce = gamma.detach()
 
-    xt = self.q_xt(
-      x0, alpha_t, use_pure_noise=use_pure_noise,
-      valid_tokens=valid_tokens)
+    alpha, sigma_vp = self.noise.alpha_sigma_from_gamma(gamma_ce)
+    alpha = alpha.unsqueeze(-1)
+    sigma_vp = sigma_vp.unsqueeze(-1)
 
-    sigma = self._sigma_from_alphat(alpha_t)
-    log_x_theta = self.forward(
-      x0=x0, xt=xt, sigma=sigma, context=context)
+    z = self._embed(x0)
+    z_gamma = self.q_xt(z, alpha, sigma_vp, valid_tokens)
+
+    z_sc = self._self_cond_pass(
+      z_gamma, gamma_ce, alpha, sigma_vp, train_mode)
+
+    log_x_theta = self._forward_langflow(
+      z_gamma, gamma_ce, alpha, sigma_vp, z_sc)
     utils.print_nans(log_x_theta, 'model_output')
 
-    loss = self.nll_per_token(
-      log_x_theta=log_x_theta, xt=xt, x0=x0,
-      alpha_t=alpha_t, dalpha_t=dalpha_t,
-      low_var=train_mode and self.loss_type == 'low_var',
-      context=context, train_mode=train_mode)
+    ce = self.nll_per_token(log_x_theta, x0)
 
-    return loss, t
+    self._last_gamma = gamma_ce.detach()
+    if valid_tokens is not None:
+      self._last_ce_per_sample = (
+        (ce * valid_tokens).sum(-1)
+        / valid_tokens.sum(-1).clamp(min=1)).detach()
+    else:
+      self._last_ce_per_sample = ce.mean(-1).detach()
+
+    return ce, gamma_ce
+
+  def _log_langflow_diagnostics(self, ce_loss, sched_loss, gamma):
+    self.log('train/ce_loss', ce_loss.item(),
+             on_step=True, on_epoch=False, sync_dist=True)
+    self.log('sched/loss', float(sched_loss),
+             on_step=True, on_epoch=False, sync_dist=True)
+    self.log('sched/P_mu', float(self.noise.P_mu.detach()),
+             on_step=True, on_epoch=False, sync_dist=True)
+    self.log('sched/P_beta', float(self.noise.P_beta.detach()),
+             on_step=True, on_epoch=False, sync_dist=True)
+    self.log('sched/H_inf', float(self.noise.H_inf.detach()),
+             on_step=True, on_epoch=False, sync_dist=True)
+    self.log('diag/gamma_min', float(gamma.min()),
+             on_step=True, on_epoch=False, sync_dist=True)
+    self.log('diag/gamma_max', float(gamma.max()),
+             on_step=True, on_epoch=False, sync_dist=True)
+    self.log('diag/logit_bias_r', self._logit_bias_r(),
+             on_step=True, on_epoch=False, sync_dist=True)
+
+  def training_step(self, batch, batch_idx):
+    accum = batch_idx % self.trainer.accumulate_grad_batches
+    losses = self._loss(batch['input_ids'], batch['attention_mask'],
+                        current_accumulation_step=accum, train_mode=True)
+    ce_loss = losses.loss
+
+    gamma = self._last_gamma
+    ce_per_sample = self._last_ce_per_sample
+    sched_loss = self.noise.scheduler_loss(gamma, ce_per_sample)
+
+    loss = ce_loss + sched_loss
+    self.metrics.update_train(losses.nlls, losses.prior_loss,
+                              losses.num_tokens)
+    self._log_langflow_diagnostics(ce_loss, sched_loss, gamma)
+    self.log('trainer/loss', loss.item(), on_step=True,
+             on_epoch=False, sync_dist=True)
+    return loss
+
 
 class HFLM(trainer_base.Diffusion):
   def __init__(self, config, tokenizer):

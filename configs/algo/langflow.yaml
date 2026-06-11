@@ -1,0 +1,18 @@
+name: langflow
+diffusion_type: sphere
+backbone: sphere-dit
+parameterization: mean
+time_conditioning: True       # gamma is the time signal
+loss_type: ce
+T: 0
+causal_attention: False
+adaLN: True
+slerp_precision: float64      # unused by LangFlow (no slerp); present for shared eval harness
+eps: 1e-6                     # unused by LangFlow; present for shared sampler dispatch
+invert_time_convention: false # unused by LangFlow; scripts/eval set it; keep for harness parity
+renormalize_weights: False    # unused; present so eval.sh's shared overrides don't KeyError
+
+self_conditioning: true       # user-facing toggle (default true)
+p_self_cond: 0.25             # train-time self-cond probability
+logit_bias: true              # Plaid logit bias on/off
+logit_bias_warmup_steps: 5000 # r ramps 0 -> 1 over these steps

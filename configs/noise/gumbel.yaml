@@ -1,0 +1,7 @@
+type: gumbel
+trainable: true        # true -> P_mu/P_beta/H_inf are nn.Parameters; false -> fixed buffers (A1)
+q_clip: 1e-5           # Gumbel quantile clip; defines gamma range [a, b]
+H_inf_init: 5.0        # initial H_inf (entropy scale, nats); tune if H2 mechanism stalls
+adaptive: false        # consumed by trainer_base._loss gate; MUST be false (no spline path)
+alpha_min: null        # consumed by get_noise pre-branch; unused for gumbel (we return early)
+alpha_max: null        # ditto
