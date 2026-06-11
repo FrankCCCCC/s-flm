@@ -177,3 +177,4 @@ checkpoints/
 multirun/
 .hydra/
 .nfs*
+slurm_logs/
