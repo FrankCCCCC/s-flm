@@ -342,7 +342,7 @@ class EFLM(trainer_base.Diffusion):
     return e_noisy
 
   def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
-    e_clean = self.backbone.get_sphere_embeddings(x)  # [B, L, d]
+    e_clean = self.backbone.get_raw_embeddings(x)  # [B, L, d] raw Euclidean
     e_noisy = self._sample_prior(e_clean)
 
     if use_pure_noise:
@@ -380,6 +380,8 @@ class EFLM(trainer_base.Diffusion):
       clean = clean.to(torch.float64)
       noisy = noisy.to(torch.float64)
 
+    # Broadcast alpha_t [B,1] over the [B,L,d] embeddings (cf. utils.slerp).
+    alpha_t = alpha_t.reshape(alpha_t.shape[0], *([1] * (clean.ndim - 1)))
     out = (1.0 - alpha_t) * clean + alpha_t * noisy
 
     if orig_dtype is not None:

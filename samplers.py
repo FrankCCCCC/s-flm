@@ -730,37 +730,98 @@ class SFMSampler(Sampler):
 class EFLMContext:
   temperature: float = 0.0
 
+@torch.compile
+def elfm_compute_velocity(x, E, log_p, mode, eps):
+  p = log_p.exp()
+  if mode == 'exact':
+    # Euclidean log-map is plain subtraction: v = sum_k p_k (e_k - x) = p @ E - x.
+    ein = 'blv,vd->bld' if E.ndim == 2 else 'blk,blkd->bld'
+    return torch.einsum(ein, p, E) - x
+  elif mode == 'sample':
+    target_idx = sample_categorical(p)
+    if E.ndim == 2:  # [V, d]
+      target = E[target_idx]
+    else:            # [B, L, k, d]
+      B, L = target_idx.shape
+      target = E[
+        torch.arange(B, device=E.device)[:, None],
+        torch.arange(L, device=E.device)[None, :],
+        target_idx]
+    return target - x
+  else:
+    raise ValueError(f'Unknown velocity mode: {mode}')
 
 class EFLMSampler(Sampler):
+  """Euclidean flow-matching sampler: the straight-line analog of SFMSampler.
+
+  Prior is a Gaussian z ~ N(0, prior_cov * I); each Euler step moves along the
+  straight line toward the predicted-clean point x_hat = p @ E, where E are the
+  RAW (un-normalized) Euclidean token embeddings.
+  """
+
   def __init__(self, noise_removal, velocity, use_float64,
-               slerp_float64, eps, temperature, p_nucleus,
+               lerp_float64, eps, temperature, p_nucleus,
                top_k,
                top_k_velocity,
-               invert_time_convention):
+               invert_time_convention,
+               prior_cov):
     self.noise_removal = noise_removal
     self.velocity = velocity
     self.use_float64 = use_float64
-    self.slerp_float64 = slerp_float64
+    self.lerp_float64 = lerp_float64
     self.eps = eps
     self.temperature = temperature
     self.p_nucleus = p_nucleus
     self.top_k = top_k
     self.top_k_velocity = top_k_velocity
     self.invert_time_convention = invert_time_convention
+    self.prior_cov = prior_cov
+  @staticmethod
+  def gaussian(shape, mean, cov, dtype, device):
+    if dtype is None:
+      for _param in (cov, mean):
+        if torch.is_tensor(_param):
+          dtype = _param.dtype
+          break
+    eps = torch.randn(tuple(shape), dtype=dtype, device=device)
+
+    cov_t = torch.as_tensor(cov, dtype=eps.dtype, device=eps.device)
+    if cov_t.ndim < 2:
+      if (cov_t < 0).any():
+        raise ValueError(
+          "wrapped_normal: scalar/diagonal `cov` is a variance and must be "
+          f"non-negative; got min(cov)={float(cov_t.min()):.3g}."
+        )
+      v = eps * cov_t.sqrt()
+    else:
+      try:
+        L = torch.linalg.cholesky(cov_t)
+      except RuntimeError as e:
+        raise ValueError(
+          "wrapped_normal: matrix `cov` must be symmetric positive-definite "
+          f"(Cholesky failed for shape {tuple(cov_t.shape)}): {e}"
+        ) from e
+      # Sigma broadcasts against the sample batch by standard right-aligned
+      # matmul rules: cov_t's leading dims must be broadcastable to shape[:-1].
+      v = (L @ eps.unsqueeze(-1)).squeeze(-1)
+    # Shift by the tangent-space mean (a vector in T_o H^d), broadcasting over
+    # the leading batch axes.
+    mean_t = torch.as_tensor(mean, dtype=eps.dtype, device=eps.device)
+    v = v + mean_t
+    return v
 
   def init_state(self, model, num_samples, *,
                  num_steps=None, eps=1e-5, prefix_tokens=None,
                  prefix_lengths=None):
     self._validate_prefix_args(prefix_tokens, prefix_lengths)
-    xt = torch.randn(num_samples, model.num_tokens,
-      model.backbone.embed_dim, device=model.device,
-      dtype=torch.float32)
-    xt = utils.sphere_normalize(xt)
+    xt = EFLMSampler.gaussian(
+      (num_samples, model.num_tokens, model.backbone.embed_dim),
+      mean=0.0, cov=self.prior_cov,
+      dtype=torch.float32, device=model.device)
 
     prefix_embeds = None
     if prefix_tokens is not None:
-      prefix_embeds = model.backbone.get_sphere_embeddings(
-        prefix_tokens)
+      prefix_embeds = model.backbone.get_raw_embeddings(prefix_tokens)
       self._project_prefix(xt, prefix_embeds, prefix_lengths)
       start_idx = int(prefix_lengths.min())
     else:
@@ -791,18 +852,18 @@ class EFLMSampler(Sampler):
       raise ValueError(self.noise_removal)
 
     if state.prefix_embeds is not None:
-      self._project_prefix(tokens, state.prefix_tokens, 
+      self._project_prefix(tokens, state.prefix_tokens,
                            state.prefix_lengths)
     state.xt = tokens  # replace continuous [B,L,d] with int [B,L]
     state.done = True
     return state
-  
+
   def _select_topk(self, log_p, E, k):
     log_p_k, top_idxs = torch.topk(log_p, k, dim=-1)
     return torch.log_softmax(log_p_k, dim=-1), F.embedding(top_idxs, E)
 
   def _compute_velocity(self, x, E, log_p):
-    return sfm_compute_velocity(
+    return elfm_compute_velocity(
       x, E, log_p, mode=self.velocity, eps=self.eps)
 
   def _get_step_size(self, model, state):
@@ -818,7 +879,7 @@ class EFLMSampler(Sampler):
     _, alpha_t = model.noise(state.t_schedule[state.step_idx])
     sigma_t = model._sigma_from_alphat(alpha_t).reshape(-1, 1)
 
-    context = SFMContext(temperature=self.temperature)
+    context = EFLMContext(temperature=self.temperature)
     log_p = model.forward(xt=state.xt, sigma=sigma_t,
                           context=context)
     if self.use_float64:
@@ -833,12 +894,11 @@ class EFLMSampler(Sampler):
       return self._last_step_decode(state, log_p)
     # Arguments to compute the velocity field:
     #  v = sum_k p_k * log_{x}(e_k).
-    log_p_window = log_p[:, state.start_idx:]  # [B, L, V]
-    E = utils.sphere_normalize(
-      model.backbone.sphere_embed.weight.detach())  # [V, d]
+    log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
+    E = model.backbone.sphere_embed.weight.detach()  # [V, d]
     x = state.xt[:, state.start_idx:].to(E)  # [B, L, d]
 
-    if self.slerp_float64:
+    if self.lerp_float64:
       E = E.to(torch.float64)
       x = x.to(torch.float64)
 
@@ -850,7 +910,7 @@ class EFLMSampler(Sampler):
     vel = self._compute_velocity(x, E, log_p_v)
 
     dt = self._get_step_size(model, state)
-    x_new = utils.exp_map(x, dt * vel, self.eps)
+    x_new = x + dt * vel
     state.xt[:, state.start_idx:] = x_new.to(state.xt.dtype)
     self._project_prefix(
       state.xt, state.prefix_embeds, state.prefix_lengths)
@@ -1434,10 +1494,13 @@ def get_sampler(config):
 
   if s.predictor == 'eflm':
     return EFLMSampler(noise_removal=s.noise_removal,
-      use_float64=s.use_float64, eps=config.algo.eps,
-      temperature=s.temperature, p_nucleus=s.p_nucleus,
-      top_k=s.top_k,
-      invert_time_convention=config.algo.invert_time_convention)
+      velocity=s.velocity, use_float64=s.use_float64,
+      lerp_float64=config.algo.slerp_precision=='float64',
+      eps=config.algo.eps, temperature=s.temperature,
+      p_nucleus=s.p_nucleus, top_k=s.top_k,
+      top_k_velocity=s.top_k_velocity,
+      invert_time_convention=config.algo.invert_time_convention,
+      prior_cov=config.algo.prior_cov)
 
   if s.predictor == 'sfm':
     return SFMSampler(noise_removal=s.noise_removal,
