@@ -17,7 +17,7 @@ python -u -m main \
     data.cache_dir="${CACHE_DIR}" \
     data.difficulty="${DIFFICULTY}" \
     model=tiny-sphere-dit \
-    algo=sfm \
+    algo=eflm \
     algo.invert_time_convention=false \
     noise=log-linear \
     loader.global_batch_size=256 \
