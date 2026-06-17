@@ -1,0 +1,10 @@
+===== hyperbolic-init cells done Sun Jun 14 11:24:50 AM EDT 2026 =====
+sfm_hyperbolic_d512_medium     MISSING -> FileNotFoundError: [Errno 2] No such file or directory: '/share/thicks
+sfm_hyperbolic_d256_medium     MISSING -> FileNotFoundError: [Errno 2] No such file or directory: '/share/thicks
+sfm_hyperbolic_d128_medium     MISSING -> FileNotFoundError: [Errno 2] No such file or directory: '/share/thicks
+eflm_hyperbolic_d512_medium    MISSING -> FileNotFoundError: [Errno 2] No such file or directory: '/share/thicks
+eflm_hyperbolic_d256_medium    MISSING -> FileNotFoundError: [Errno 2] No such file or directory: '/share/thicks
+eflm_hyperbolic_d128_medium    MISSING -> FileNotFoundError: [Errno 2] No such file or directory: '/share/thicks
+hflm_hyperbolic_d512_medium    66.70 1334/2000
+hflm_hyperbolic_d256_medium    61.40 1228/2000
+hflm_hyperbolic_d128_medium    49.65 993/2000

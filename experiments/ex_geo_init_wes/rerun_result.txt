@@ -1,0 +1,2 @@
+rerun eflm_ngpt_d512 done Sun Jun 14 07:13:09 AM EDT 2026
+"accuracy": 0.517

@@ -36,6 +36,8 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       nn.init.normal_(self.sphere_embed.weight, std=1.0 / math.sqrt(dim))
     elif self.init_mode == 'unit_var':
       nn.init.normal_(self.sphere_embed.weight, std=1.0)
+    elif self.init_mode == 'hyperbolic':
+      nn.init.normal_(self.sphere_embed.weight, std=0.3)
     elif self.init_mode == 'pretrained':
       nn.init.zeros_(self.sphere_embed.weight)
     else:

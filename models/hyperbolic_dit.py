@@ -40,6 +40,8 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       # std=0.3 -> ‖e_v‖≈0.3·√d≈6.8 at d=512: under rho_max=12 with headroom,
       # same order as E[rho_prior]≈11.3 so clean/noisy radii match at t≈0.
       nn.init.normal_(self.sphere_embed.weight, std=0.3)
+    elif self.init_mode == 'unit_var':
+      nn.init.normal_(self.sphere_embed.weight, std=1.0)
     elif self.init_mode == 'pretrained':
       nn.init.zeros_(self.sphere_embed.weight)
     else:
