@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH -J ts-hflm                                  # Job name
+#SBATCH -o experiments/tinystories/hflm_%j.out      # stdout (%j = jobID)
+#SBATCH -e experiments/tinystories/hflm_%j.err      # stderr (%j = jobID)
+#SBATCH --mail-type=ALL                             # email on all state changes
+#SBATCH --mail-user=sc3379@cornell.edu              # notification address
+#SBATCH -N 1                                        # single node
+#SBATCH -n 1                                        # single task
+#SBATCH --partition=desa                            # desa Ampere nodes (a6000/a5000); avoid thickstun-compute-01 (NCCL hang)
+#SBATCH --cpus-per-task=16                          # cores for dataloader workers (8/rank × 4 ranks)
+#SBATCH --get-user-env                              # retrieve login environment
+#SBATCH --mem=192gb                                 # host RAM
+#SBATCH -t 48:00:00                                 # walltime
+#SBATCH --gres=gpu:nvidia_rtx_a6000:4               # 4x a6000 48GB (a5000 24GB OOMs; 2-GPU DDP hangs, so 4)
+
+# HFLM (hyperbolic geometry) pre-training on TinyStories. Reuses the shared .dat
+# cache built by sfm.sub — submit after that cache exists.
+export PATH=/home/sc3379/anaconda3/bin:$PATH
+source activate sfm
+export TMPDIR=/tmp                                  # node-local temp (NFS home breaks multiprocessing cleanup)
+export SLURM_JOB_NAME=bash                          # -> Lightning native multi-GPU launcher (not srun/SLURMEnvironment)
+export NCCL_P2P_DISABLE=1                           # avoid NCCL P2P hang on this cluster (proven OWT recipe)
+export NCCL_IB_DISABLE=1                            # avoid NCCL InfiniBand hang on this cluster (proven OWT recipe)
+export TORCHDYNAMO_DISABLE=1                        # eager fallback; torch.compile/inductor stalled the first step
+
+REPO_ROOT="/share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm"
+cd "${REPO_ROOT}"
+bash scripts/train/tinystories/hlfm.sh
