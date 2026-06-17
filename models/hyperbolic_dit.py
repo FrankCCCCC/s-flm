@@ -28,7 +28,7 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.embed_dim = dim
     self.init_mode = config.model.init
     self.eps = config.model.eps
-    self.init_std = config.model.init_std
+    self.init_std = config.model.get('init_std', None)
 
     # Embedding param name kept as `sphere_embed` for checkpoint / sampler
     # compatibility (see ARCH §6); the class is renamed, the param is not.

@@ -7,6 +7,7 @@ n_blocks: 8
 n_heads: 8
 dropout: 0.1
 init: hyperbolic             # std=0.3 ⇒ ‖e_v‖≈6.8 at init
+init_std: null               # std for init=custom; ignored for other init modes
 learn_temperature_scaling: False
 eps: 1e-6
 pretrained_ckpt_path: null

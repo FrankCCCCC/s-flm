@@ -28,7 +28,7 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.embed_dim = dim
     self.init_mode = config.model.init
     self.eps = config.model.eps
-    self.init_std = config.model.init_std
+    self.init_std = config.model.get('init_std', None)
 
     self.sphere_embed = nn.Embedding(vocab_size, dim)
     if self.init_mode == 'random':
