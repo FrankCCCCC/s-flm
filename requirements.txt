@@ -43,3 +43,4 @@ tensorboard==2.16.2
 wandb==0.19.9
 omegaconf==2.3.0
 rich==13.9.4
+simple-slurm==0.3.6

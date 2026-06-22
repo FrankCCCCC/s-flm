@@ -148,6 +148,26 @@ queues — see the docs page above.)
 
 For each experiment, create a project folder under ``experiments`` with ``{project_name}``
 
+### Anaconda Environment
+
+Follow ``README.md``: ``conda create -n sfm python=3.12`` then ``pip install -r requirements.txt``.
+Python **≥3.10** is required (the code uses ``dataclass(kw_only=)``); 3.12 is the reference.
+
+- ``torch`` / ``numpy`` are intentionally **not** pinned in ``requirements.txt`` (the NGC base
+  image provides them) — install a ``torch`` build matching the node CUDA yourself
+  (cu128 for the A100 / RTX-6000-Ada nodes).
+- ``simple-slurm==0.3.6`` (for the sweeps) is now pinned in ``requirements.txt``, so
+  ``pip install -r requirements.txt`` covers it.
+- Export ``TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1`` when loading checkpoints — torch's
+  ``weights_only`` default rejects the pickled Lightning ckpts.
+- Reusing an existing ``sfm`` env instead of building ``sfm``, if there is no env named ``sfm``, build it via
+
+```bash
+conda create -n sfm python=3.12
+conda activate sfm
+pip install -r requirements.txt
+```
+
 ### Training Script
 
 Under ``scripts/train/{dataset_name}``, 
@@ -203,7 +223,7 @@ Unique and semanticful name for each slurm job, ex ``{project_name}_{var1}-{var1
 ### SLURM Env Setup
 
 The sweep submits one SLURM job per run with `simple_slurm`; each job activates the
-conda env (see `## Environment Setup`), then runs the train script followed by the
+conda env (see `## Cluster Environment`), then runs the train script followed by the
 sample/eval script. Boilerplate every job body needs:
 
 ```bash
@@ -232,13 +252,26 @@ CKPT_PATH=<out>/checkpoints/last.ckpt OUTPUT_DIR=<out>/eval DEVICES=1 \
 
 ### Training and Sampling Outputs
 
-All checkpoints and generated text should be put under ``outputs/{project_name}``
+All checkpoints and generated text go under ``outputs/{project_name}`` (same name as the
+experiment folder under ``experiments/``), one subfolder per run:
 
-For checkpoint of each run of the experimental project ``outputs/{project_name}/{run_name}/checkpoints/{checkpoint_names}``
+```
+outputs/{project_name}/{run_name}/          # = hydra.run.dir of the training run
+├── checkpoints/
+│   ├── last.ckpt                            # resume + eval load this (save_last=True)
+│   └── ...                                  # periodic step checkpoint(s), capped by save_top_k=1
+├── .hydra/ , *.log , wandb/                 # training config + logs
+└── eval/
+    ├── ppl.json                             # numerical results: val/nll, val/ppl, val/bpd
+    ├── samples_genppl.json                  # GenPPL (gen_ppl_first_chunk_retok), entropy, avg_nfe, text
+    ├── ppl/                                 # hydra run dir for the ppl_eval pass (config/logs)
+    └── sample/                              # hydra run dir for the sample_eval pass (config/logs)
+```
 
-For the evaluation of each run of the experimental project ``outputs/{project_name}/{run_name}/eval/ppl``
-
-Generated texts is in ``outputs/{project_name}/{run_name}/eval/samples_genppl.json``
-
-Numerical results is in ``outputs/{project_name}/{run_name}/eval/ppl.json``
+- ``{run_name}`` = the semantic SLURM job name (e.g. ``{var}-{val}_...``).
+- ``ppl.json`` holds the ``trainer.validate()`` metrics (the denoising-CE flow bound — not a
+  true AR PPL). ``samples_genppl.json`` is the generation-quality deliverable; read GenPPL
+  **with** entropy (low GenPPL + low entropy ⇒ degenerate/repetitive collapse, not quality).
+- ``experiments/report.py {project_name}`` scans every ``{run_name}/eval/`` and writes a
+  summary table to ``experiments/{project_name}/RESULTS.md``.
 
