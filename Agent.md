@@ -82,7 +82,16 @@ SLURM binaries live at `/usr/local/slurm/current/bin` (prepend to `PATH`). Parti
 
 - Interconnection between sc3379 and ch2263: local account here. `sbatch`/`squeue`
   work directly once `/usr/local/slurm/current/bin` is on `PATH`. To reach `ch2263`,
-  SSH with the key below.
+- Interconnection between sc3379@unicorn and shengyenc@arc
+  - Use ``tailscale`` to check the IP address of the target login node and then use
+  ``ssh -o "ProxyCommand=/home/sc3379/bin/tailscale --socket=/home/sc3379/.tailscale/{target_host_socket} nc %h %p" -i ~/.ssh/unicorn_internal shengyenc@{ip_address}``
+  - ``{target_host_socket}`` is the ``tailscaled`` daemon socket of the host you run this from
+    (its filename encodes that host — e.g. ``tailscaled-unicorn-login-02.sock``; ``ls
+    ~/.tailscale`` may list several, pick the one matching ``hostname`` — only that daemon is on
+    the tailnet). ``{ip_address}`` comes from ``tailscale status``; the magicDNS name also works as
+    ``%h`` (``tinkercliffs1``/``tinkercliffs2``/``falcon1``/``falcon2-1`` — note falcon2's tailnet
+    name is ``falcon2-1``). Use ``unicorn_internal`` (no passphrase) for non-interactive login —
+    ``id_rsa`` is also authorized on ARC but passphrase-protected, so it fails under ``BatchMode``.
 - identity file: not needed for local use; to SSH into `ch2263` use
   `/home/sc3379/.ssh/unicorn_internal` (public key `.pub` alongside it).
 - Partitions: `thickstun,desa` (priority). Add `--exclude=desa-compute-01` — the
@@ -109,6 +118,8 @@ SLURM binaries live at `/usr/local/slurm/current/bin` (prepend to `PATH`). Parti
   `nlplarge-compute-01`).
 - GPUs:
   - `nlplarge-compute-01` — 8× A100-SXM4-80GB, 80 GB   (partitions `nlplarge`, `nlplarge-claire-highpri`)
+- Storage:
+  - Use ``/scratch/ch2263`` to save checkpoints and dataset. But the storage is only available on compute nodes
 
 ### ARC Slurm
 
@@ -122,22 +133,24 @@ Login Nodes
 - tinkercliffs1, tinkercliffs2 — TinkerCliffs cluster
 - falcon1, falcon2 — Falcon cluster
 
-Interconnection between login nodes: same ARC network with shared `/home` and
-`/projects` filesystems, so files are visible from any login node.
+- Interconnection between login nodes: 
+  - identity file ``~/.ssh/id_rsa``
+- Interconnection between Unicorn and Arc:
+  - Use ``tailscale`` to check the IP address of the target login node and then use
+  ``ssh -o "ProxyCommand=/home/shengyenc/bin/tailscale --socket=/home/shengyenc/.tailscale/{target_host_socket} nc %h %p" -i ~/.ssh/id_rsa sc3379@{ip_address}``
+  - ``{target_host_socket}`` is the ``tailscaled`` daemon socket of the ARC node you run this from
+    (its filename encodes that node; see ``ls ~/.tailscale``). This reverse direction is not yet
+    verified from this repo.
 
-identity file ``~/.ssh/id_rsa``
-
-GPUs / Partitions (source: https://www.docs.arc.vt.edu/resources/gpu.html):
-
-TinkerCliffs (login: tinkercliffs1/2)
-- A100-80GB  — 112 GPUs (14 nodes × 8) | `a100_normal_q`, `a100_preemptable_q`
-- H200-141GB —  56 GPUs ( 7 nodes × 8) | `h200_normal_q`, `h200_preemptable_q`
-
-Falcon (login: falcon1/2)
-- L40S-48GB — 80 GPUs  (20 nodes × 4) | `l40s_normal_q`, `l40s_preemptable_q`
-- A30-24GB  — 128 GPUs (32 nodes × 4) | `a30_normal_q`, `a30_preemptable_q`
-- V100-16GB — 80 GPUs  (40 nodes × 2) | `v100_normal_q`, `v100_preemptable_q`
-- T4-16GB   — 18 GPUs  (18 nodes × 1) | `t4_normal_q`, `t4_preemptable_q`
+- GPUs / Partitions (source: https://www.docs.arc.vt.edu/resources/gpu.html):
+  - TinkerCliffs (login: tinkercliffs1/2)
+    - A100-80GB  — 112 GPUs (14 nodes × 8) | `a100_normal_q`, `a100_preemptable_q`
+    - H200-141GB —  56 GPUs ( 7 nodes × 8) | `h200_normal_q`, `h200_preemptable_q`
+  - Falcon (login: falcon1/2)
+    - L40S-48GB — 80 GPUs  (20 nodes × 4) | `l40s_normal_q`, `l40s_preemptable_q`
+    - A30-24GB  — 128 GPUs (32 nodes × 4) | `a30_normal_q`, `a30_preemptable_q`
+    - V100-16GB — 80 GPUs  (40 nodes × 2) | `v100_normal_q`, `v100_preemptable_q`
+    - T4-16GB   — 18 GPUs  (18 nodes × 1) | `t4_normal_q`, `t4_preemptable_q`
 
 (ARC also exposes A100-80GB on the CUI and Biomed clusters via their own `a100_*_q`
 queues — see the docs page above.)
@@ -167,6 +180,12 @@ conda create -n sfm python=3.12
 conda activate sfm
 pip install -r requirements.txt
 ```
+
+### Training & Sampling Run Setup
+
+- Create functions / classes in ``experiment.py`` to set up the soft link of the checkpoint for training and sampling run (if needed)
+- If use ``ch2263@Unicorn``, save the checkpoints at ``/scratch/ch2263/syc_workspace/sfm_output/{project_name}/{run_name}/checkpoints`` and create a soft link at ``${OUTPUT_DIR}/checkpoints`` to link the actual checkpoint path ``/scratch/ch2263/syc_workspace/sfm_output/{project_name}/{run_name}/checkpoints`` before the training starts. This should be handle in ``experiment.py``
+- The sweep.py of each experiment should use setup method in ``experiment.py`` to handle the storage of ch2263@unicorn
 
 ### Training Script
 
@@ -275,3 +294,7 @@ outputs/{project_name}/{run_name}/          # = hydra.run.dir of the training ru
 - ``experiments/report.py {project_name}`` scans every ``{run_name}/eval/`` and writes a
   summary table to ``experiments/{project_name}/RESULTS.md``.
 
+### Reports and Experiment
+
+- For each experimental project, create a experimental arch file called ``experiments/{project_name}/EXPERIMENT.md`` to record the experimental design, hypothesis, GPU allocation, and expected wall clock time
+- For each experimental project, create a experimental report, called ``experiments/{project_name}/RESULTS.md`` to record the numerical and qualitative results of each experiment. Provide table for the numerical results and inisights and conclusions of the experiment.
