@@ -1,19 +1,22 @@
 #!/bin/bash
-
+# S-FLM with truncated adaptive noise schedule. Single TinyStories training run (slides jun25_2026).
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/sfm_truncated_adaptive}"
+RUN_NAME="${RUN_NAME:-sfm_truncated_adaptive}"
+WANDB_GROUP="${WANDB_GROUP:-adv_geo}"
 NUM_NODES="${NUM_NODES:-1}"
-DEVICES="${DEVICES:-4}"
-
-GLOBAL_BS=512
-BUF_SIZE=$((50 * GLOBAL_BS))
+DEVICES="${DEVICES:-1}"
+MAX_STEPS="${MAX_STEPS:-30000}"
+PER_GPU_BS="${PER_GPU_BS:-8}"
+CKPT_EVERY="${CKPT_EVERY:-2500}"
+LR="${LR:-3e-4}"
+ALPHA_MAX="${ALPHA_MAX:-0.121}"
 
 cd "${REPO_ROOT}"
-
 python -u -m main \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
@@ -23,26 +26,27 @@ python -u -m main \
     algo.renormalize_weights=False \
     algo.invert_time_convention=false \
     noise=log-linear-adaptive \
-    noise.alpha_max=0.121 \
-    noise.adaptive_plot_profile=true \
+    noise.alpha_max=${ALPHA_MAX} \
     noise.adaptive_refit_every=50 \
-    noise.adaptive_buffer_size=${BUF_SIZE} \
+    noise.adaptive_buffer_size=25600 \
     noise.adaptive_ema=0.9 \
     noise.adaptive_uniform_mix=1e-3 \
-    loader.global_batch_size=${GLOBAL_BS} \
-    loader.batch_size=32 \
-    loader.eval_batch_size=32 \
+    optim.lr=${LR} \
+    loader.global_batch_size=512 \
+    loader.batch_size=${PER_GPU_BS} \
+    loader.eval_batch_size=${PER_GPU_BS} \
     loader.num_workers=8 \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \
-    trainer.max_steps=30_000 \
+    trainer.max_steps=${MAX_STEPS} \
     trainer.val_check_interval=60_000 \
     trainer.limit_val_batches=0 \
     trainer.num_sanity_val_steps=0 \
-    callbacks.checkpoint_every_n_steps.every_n_train_steps=2_500 \
+    callbacks.checkpoint_every_n_steps.every_n_train_steps=${CKPT_EVERY} \
+    callbacks.checkpoint_every_n_steps.save_top_k=1 \
     wandb.project=tinystories-flm \
-    wandb.group=geometry-vs-tricks \
-    +wandb.name=tinystories_sfm_trunc_adaptive \
+    wandb.group="${WANDB_GROUP}" \
+    +wandb.name="${RUN_NAME}" \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}"

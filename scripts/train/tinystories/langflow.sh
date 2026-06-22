@@ -1,51 +1,53 @@
 #!/bin/bash
-# LangFlow — paper hyperparameters (EXPERIMENT.md §10(i)).
-# Embedding init = unit_var (ARCH §7.4, Option A): std=1 so ||z||~sqrt(D)
-# matches the N(0,I) VP corruption.
-
+# LangFlow (advanced geometry tricks). Single TinyStories training run (slides jun25_2026).
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/langflow}"
+RUN_NAME="${RUN_NAME:-langflow}"
+WANDB_GROUP="${WANDB_GROUP:-adv_geo}"
 NUM_NODES="${NUM_NODES:-1}"
-DEVICES="${DEVICES:-4}"
-
-GLOBAL_BS=512
+DEVICES="${DEVICES:-1}"
+MAX_STEPS="${MAX_STEPS:-30000}"
+PER_GPU_BS="${PER_GPU_BS:-8}"
+CKPT_EVERY="${CKPT_EVERY:-2500}"
+LR="${LR:-3e-4}"
+SELF_COND="${SELF_COND:-true}"
 
 cd "${REPO_ROOT}"
-
 python -u -m main \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small-sphere-dit \
     model.init=unit_var \
     algo=langflow \
-    algo.invert_time_convention=false \
-    noise=gumbel \
-    noise.trainable=true \
-    algo.self_conditioning=true \
+    algo.self_conditioning=${SELF_COND} \
     algo.p_self_cond=0.25 \
     algo.logit_bias=true \
     algo.logit_bias_warmup_steps=5000 \
+    algo.invert_time_convention=false \
+    noise=gumbel \
+    noise.trainable=true \
     lr_scheduler=constant_warmup \
-    optim.lr=3e-4 \
+    optim.lr=${LR} \
     training.ema=0.9999 \
-    loader.global_batch_size=${GLOBAL_BS} \
-    loader.batch_size=32 \
-    loader.eval_batch_size=32 \
+    loader.global_batch_size=512 \
+    loader.batch_size=${PER_GPU_BS} \
+    loader.eval_batch_size=${PER_GPU_BS} \
     loader.num_workers=8 \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \
-    trainer.max_steps=30_000 \
+    trainer.max_steps=${MAX_STEPS} \
     trainer.val_check_interval=60_000 \
     trainer.limit_val_batches=0 \
     trainer.num_sanity_val_steps=0 \
-    callbacks.checkpoint_every_n_steps.every_n_train_steps=2_500 \
+    callbacks.checkpoint_every_n_steps.every_n_train_steps=${CKPT_EVERY} \
+    callbacks.checkpoint_every_n_steps.save_top_k=1 \
     wandb.project=tinystories-flm \
-    wandb.group=geometry-vs-tricks \
-    +wandb.name=tinystories_langflow_paperhp \
+    wandb.group="${WANDB_GROUP}" \
+    +wandb.name="${RUN_NAME}" \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}"

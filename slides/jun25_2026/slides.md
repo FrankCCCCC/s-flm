@@ -55,26 +55,12 @@ hy { color: #7B3FA0; }
 
 ---
 
-## Environment
-
-- Use ``desa`` or ``thickstun`` partitions, use as many as GPUs as possible to accelerate the experiment
-- refer to https://it.coecis.cornell.edu/researchit/using-the-unicorn-cluster/ for detailed guideline
-- For each experiment, create a separate folder in ``experiments`` and ``outputs`` with identical ``name``. Put the checkpoints and sampling results under the experimental subfolder in ``outputs`` folder.
-- Write sweep scripts for each experiment and put under the experimental subfolder in ``experiments``. For each sceript, use the pre-defined sampling and training script in ``scripts/sample/tinystories`` and ``scripts/train/tinystories``. You should only add / modify only when it's necessary. Follow the scripts architecutre and scope carefully, you can add new options to the training and sampling script to provide flexibility only if altering the arguement is necessary, single script under train / sampling should only conduct single run instead of grip sweep. The sweep script of each experiment should call the training and sampling scripts under ``scripts/train/tinystories`` and ``scripts/sample/tinystories``.
-- Evaluate the valid PPL and GenPPL and provide a report under the experimental subfolder in ``experiments``.
-- Follow the principles in ``CLAUDE.md`` and ``Agent.md``
-- Use ``simple_slurm`` to write submission sweep script in python
-- Show me the trianing / sampling scripts in scripts/train/tinystories and scripts/sample/tinystories before job submission
-
----
-
 ## Naive AR Baseline - TinyStories Exp Setup
 
-- Name: ``naive_ar_tinystories``
 - Data: TinyStories, **475M train / 5M val** (seed 42)
 - Model (DiT, *small*): Width **768**, Depth **12**, Heads **12**
 - Training
-  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **1024**, bf16, EMA 0.9999
+  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256, 1024}**, bf16, EMA 0.9999
   - Optimizer: AdamW
     - LR: 3e-4, Weight Decay: 0.0
     - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
@@ -86,7 +72,6 @@ hy { color: #7B3FA0; }
 
 ## Naive Geometry Baseline - TinyStories Exp Setup
 
-- Name: ``naive_geo_tinystories``
 - Data: TinyStories, **475M train / 5M val** (seed 42)
 - Model (DiT, *small*): Width **768**, Depth **12**, Heads **12**, Init ``ngpt``: $\mathcal{N}(0, \frac{1}{d})$ (variance)
 - Geometries
@@ -99,7 +84,7 @@ hy { color: #7B3FA0; }
 ## Naive Geometry Baseline - TinyStories Exp Setup
 
 - Training
-  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **1024**, bf16, EMA 0.9999
+  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256, 1024}**, bf16, EMA 0.9999
   - Optimizer: AdamW
     - LR: 3e-4, Weight Decay: 0.0
     - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
@@ -113,7 +98,6 @@ hy { color: #7B3FA0; }
 
 ## Adv Geometry Baseline - TinyStories Exp Setup
 
-- Name: ``adv_geo_tinystories``
 - Data: TinyStories, **475M train / 5M val** (seed 42)
 - Model (DiT, *small*): Width **768**, Depth **12**, Heads **12**, Init ``ngpt``: $\mathcal{N}(0, \frac{1}{d})$ (variance)
 - Geometries
@@ -125,10 +109,10 @@ hy { color: #7B3FA0; }
 ## Adv Geometry Baseline - TinyStories Exp Setup
 
 - Training
-  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **1024**, bf16, EMA 0.9999
+  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256, 1024}**, bf16, EMA 0.9999
   - Optimizer: AdamW
-    - LR: {5e-5, 1e-4, 3e-4, 1e-3, 5e-3}
-    - Weight Decay: 0.0, Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
+    - LR: 3e-4, Weight Decay: 0.0
+    - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
   - All use cross entropy loss
 
 - Evaluation
@@ -139,7 +123,6 @@ hy { color: #7B3FA0; }
 
 ## H-FLM Sweep - TinyStories Exp Setup
 
-- Name: ``hflm_sweep_tinystories``
 - Data: TinyStories, **475M train / 5M val** (seed 42)
 - Model (DiT, *small*): Width **768**, Depth **12**, Heads **12**
   - Word Embdedding Init: 
@@ -153,7 +136,7 @@ hy { color: #7B3FA0; }
 ## H-FLM Sweep - TinyStories Exp Setup
 
 - Training
-  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **1024**, bf16, EMA 0.9999
+  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256, 1024}**, bf16, EMA 0.9999
   - Optimizer: AdamW
     - LR: 3e-4, Weight Decay: 0.0
     - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0

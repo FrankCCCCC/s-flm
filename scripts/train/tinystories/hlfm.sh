@@ -1,36 +1,38 @@
 #!/bin/bash
-# Hyperbolic-FLM on TinyStories — mirrors scripts/train/tinystories/sfm.sh (same model size
-# 768/12/12, batch 512, optimizer, EMA) for a fair geometry comparison.
-# NECESSARY change vs sfm.sh: noise=log-linear (NO truncation / NO adaptive). The
-# sphere-tuned truncation (alpha_max) collapses HFLM (see Sudoku RESULTS.md), so the
-# hyperbolic model uses the full schedule. Run a matched naive S-FLM (also plain
-# log-linear) as the controlled-geometry baseline.
+# Naive H-FLM (hyperbolic flow). Single TinyStories training run (slides jun25_2026).
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/hflm}"
+RUN_NAME="${RUN_NAME:-naive_geo_hflm}"
+WANDB_GROUP="${WANDB_GROUP:-naive_geo}"
 NUM_NODES="${NUM_NODES:-1}"
-DEVICES="${DEVICES:-4}"
+DEVICES="${DEVICES:-1}"
 MAX_STEPS="${MAX_STEPS:-30000}"
-GLOBAL_BS="${GLOBAL_BS:-512}"
-PER_GPU_BS="${PER_GPU_BS:-32}"
+PER_GPU_BS="${PER_GPU_BS:-8}"
+CKPT_EVERY="${CKPT_EVERY:-2500}"
+INIT="${INIT:-ngpt}"            # ngpt | custom
+INIT_STD="${INIT_STD:-}"        # required only when INIT=custom
+PRIOR_COV="${PRIOR_COV:-0.25}"
+RHO_MAX="${RHO_MAX:-12}"
+if [ "${INIT}" = "custom" ]; then INIT_ARGS="model.init=custom model.init_std=${INIT_STD}"; else INIT_ARGS="model.init=${INIT}"; fi
 
 cd "${REPO_ROOT}"
-
 python -u -m main \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small-hyperbolic-dit \
+    ${INIT_ARGS} \
     algo=hflm \
-    algo.prior_cov=0.25 \
-    algo.rho_max=12 \
+    algo.prior_cov=${PRIOR_COV} \
+    algo.rho_max=${RHO_MAX} \
     algo.renormalize_weights=False \
     algo.invert_time_convention=false \
     sampler=hflm \
     noise=log-linear \
-    loader.global_batch_size=${GLOBAL_BS} \
+    loader.global_batch_size=512 \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \
     loader.num_workers=8 \
@@ -41,9 +43,10 @@ python -u -m main \
     trainer.val_check_interval=60_000 \
     trainer.limit_val_batches=0 \
     trainer.num_sanity_val_steps=0 \
-    callbacks.checkpoint_every_n_steps.every_n_train_steps=2_500 \
+    callbacks.checkpoint_every_n_steps.every_n_train_steps=${CKPT_EVERY} \
+    callbacks.checkpoint_every_n_steps.save_top_k=1 \
     wandb.project=tinystories-flm \
-    wandb.group=geometry-vs-tricks \
-    +wandb.name=tinystories_hflm \
+    wandb.group="${WANDB_GROUP}" \
+    +wandb.name="${RUN_NAME}" \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}"
