@@ -152,21 +152,38 @@ For each experiment, create a project folder under ``experiments`` with ``{proje
 
 Under ``scripts/train/{dataset_name}``, 
 
-One training run for one script
+one bash file per method ``{method}.sh`` — **one training run per script** (no sweeps or
+loops inside; the sweep parameterizes it via env vars).
 
-Bash script
+- Runs ``python -u -m main mode=train`` with hydra overrides, driven by env-var knobs
+  (with defaults) so a sweep can set them without editing the script.
+- Standard knobs: ``OUTPUT_DIR`` (= ``hydra.run.dir``; holds ``checkpoints/`` + logs),
+  ``RUN_NAME``, ``WANDB_GROUP``, ``DEVICES``, ``NUM_NODES``, ``PER_GPU_BS``
+  (= ``loader.batch_size``), ``GLOBAL_BATCH`` (= ``loader.global_batch_size``),
+  ``MAX_STEPS``, ``CKPT_EVERY``, ``MODEL`` (model config), ``SEQ_LEN`` (= ``model.length``).
+- Method knobs as needed: ``INIT``/``INIT_STD``, ``PRIOR_COV``/``RHO_MAX`` (H-FLM), ``LR``,
+  ``ALPHA_MAX`` (truncation), ``SELF_COND`` (LangFlow), …
+- Checkpoints → ``${OUTPUT_DIR}/checkpoints`` with ``save_top_k=1`` + ``save_last=True``.
 
-Refer to ``scripts/train/sudoku/hflm.sh``
+Refer to ``scripts/train/sudoku/hflm.sh`` (and ``scripts/train/tinystories/*.sh``).
 
 ### Sampling Script
 
 Under ``scripts/sample/{dataset_name}``
 
-One sampling / evaluation run for one script
+one bash file per method ``{method}.sh`` — **one eval run per script**, against a trained
+checkpoint. Two passes:
 
-Bash script
+- ``mode=ppl_eval`` → ``ppl.json`` (val/nll, val/ppl, val/bpd — the denoising-CE flow bound).
+- ``mode=sample_eval`` → ``samples_genppl.json`` (GenPPL = gpt2-large retokenized generative
+  perplexity, sample entropy, generated text).
+- Loads the checkpoint via ``eval.checkpoint_path=${CKPT_PATH}`` (``eval.strict_loading=false``).
+- Knobs: ``CKPT_PATH``, ``OUTPUT_DIR``, ``MODEL``, ``SEQ_LEN``, ``EVAL_BS``, sampler
+  ``STEPS``/``VELOCITY``/``TOPK_VELOCITY``. ``MODEL`` and ``SEQ_LEN`` MUST match the training
+  run so the architecture matches the checkpoint.
+- Always single-GPU: ``DEVICES=1`` + ``CUDA_VISIBLE_DEVICES=0`` (see SLURM Env Setup).
 
-Refer to ``scripts/sample/sudoku/hflm.sh``
+Refer to ``scripts/sample/sudoku/hflm.sh`` (and ``scripts/sample/tinystories/*.sh``).
 
 ### Sweep Script
 
@@ -175,6 +192,11 @@ Under ``experiments/{project_name}``
 One experiment project script for one project
 
 Use python and ``simple_slurm`` to submit jobs to slurm
+
+**Orchestration only** — the sweep CALLS the train + sample scripts; it never inlines
+``python -m main``. It builds the parameter grid, submits one SLURM job per cell (train
+then eval), and is idempotent/resumable: skip a cell whose ``eval/ppl.json`` exists or
+whose job name is already in ``squeue``.
 
 Unique and semanticful name for each slurm job, ex ``{project_name}_{var1}-{var1_value}_{var2}-{var2_value}...``, use abbr for each variable nam ``var1``, followed by a parameter value ``var1_value``. Only record the searched parameters in the project
 
