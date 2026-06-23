@@ -159,7 +159,7 @@ queues — see the docs page above.)
 
 ## Experimental Scripts Write Up
 
-For each experiment, create a project folder under ``experiments`` with ``{project_name}``
+For each experiment, create a project folder under ``experiments`` with ``{project_name}`` and store the checkpoints and results of each run under ``experiments/{project_name}/{run_name}``.
 
 ### Anaconda Environment
 
