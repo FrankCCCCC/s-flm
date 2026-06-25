@@ -15,6 +15,7 @@ python -u -m main \
     data=openwebtext-split \
     data.cache_dir="${CACHE_DIR}" \
     model=small \
+    model.length=${SEQ_LEN:-1024} \
     algo=ar \
     sampler=ar \
     loader.global_batch_size=512 \
