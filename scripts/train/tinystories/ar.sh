@@ -19,6 +19,7 @@ python -u -m main \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small \
+    model.length=${SEQ_LEN:-1024} \
     algo=ar \
     loader.global_batch_size=512 \
     loader.batch_size=${PER_GPU_BS} \
@@ -32,7 +33,7 @@ python -u -m main \
     trainer.limit_val_batches=0 \
     trainer.num_sanity_val_steps=0 \
     callbacks.checkpoint_every_n_steps.every_n_train_steps=${CKPT_EVERY} \
-    callbacks.checkpoint_every_n_steps.save_top_k=1 \
+    callbacks.checkpoint_every_n_steps.save_top_k=${SAVE_TOPK:-1} \
     wandb.project=tinystories-flm \
     wandb.group="${WANDB_GROUP}" \
     +wandb.name="${RUN_NAME}" \

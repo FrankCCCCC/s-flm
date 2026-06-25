@@ -10,15 +10,20 @@ CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/ar}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
+GREEDY="${GREEDY:-true}"
+TEMPERATURE="${TEMPERATURE:-1.0}"
+P_NUCLEUS="${P_NUCLEUS:-1.0}"
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
 
 MARGS=(
     model=small
+    model.length=${SEQ_LEN:-1024}
     algo=ar
     sampler=ar
-    sampler.greedy=true
+    sampler.greedy=${GREEDY}
+    sampler.p_nucleus=${P_NUCLEUS}
 )
 
 # (1) validation perplexity
@@ -50,7 +55,7 @@ python -u -m main \
     eval.compute_generative_perplexity=True \
     eval.results_json_path="${OUTPUT_DIR}/samples_genppl.json" \
     sampler.num_sample_batches=4 \
-    sampler.temperature=1.0 \
+    sampler.temperature=${TEMPERATURE} \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
     trainer.num_nodes=1 \
