@@ -1,236 +1,0 @@
-CONFIG
-├── mode
-│   └── train                                                                   
-├── sudoku
-│   └── output_dir: /share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm/
-│       batch_size: 64                                                          
-│                                                                               
-├── gsm8k
-│   └── input_file: null                                                        
-│       output_dir: /share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm/
-│       timeout: 5.0                                                            
-│       bootstrap_size: 1                                                       
-│                                                                               
-├── seed
-│   └── 1                                                                       
-├── allow_tf32
-│   └── True                                                                    
-├── cudnn_benchmark
-│   └── True                                                                    
-├── compile_backbone
-│   └── False                                                                   
-├── neg_infinity_mode
-│   └── large-finite                                                            
-├── loader
-│   └── global_batch_size: 8                                                    
-│       eval_global_batch_size: 8                                               
-│       batch_size: 8                                                           
-│       eval_batch_size: 8                                                      
-│       num_workers: 4                                                          
-│       pin_memory: true                                                        
-│                                                                               
-├── confidence_denoiser
-│   └── confidence_score: entropy                                               
-│       gamma: 0                                                                
-│                                                                               
-├── training
-│   └── ema: 0.9999                                                             
-│       antithetic_sampling: true                                               
-│       importance_sampling: false                                              
-│       sampling_eps: 0.001                                                     
-│       change_of_variables: false                                              
-│       loss_precision: bf16                                                    
-│       finetune_path: ''                                                       
-│       sampling_eps_min: 0.001                                                 
-│       sampling_eps_max: 1.0                                                   
-│       resample: false                                                         
-│                                                                               
-├── eval
-│   └── checkpoint_path: ''                                                     
-│       strict_loading: true                                                    
-│       disable_ema: false                                                      
-│       compute_generative_perplexity: false                                    
-│       perplexity_batch_size: 8                                                
-│       compute_perplexity_on_sanity: false                                     
-│       gen_ppl_eval_model_name_or_path: gpt2-large                             
-│       generate_samples: false                                                 
-│       generated_samples_path: /share/thickstun/sychou/workspace/research/s-flm
-│       results_json_path: null                                                 
-│                                                                               
-├── optim
-│   └── weight_decay: 0                                                         
-│       lr: 0.0003                                                              
-│       beta1: 0.9                                                              
-│       beta2: 0.999                                                            
-│       eps: 1.0e-08                                                            
-│                                                                               
-├── trainer
-│   └── _target_: lightning.Trainer                                             
-│       accelerator: cuda                                                       
-│       num_nodes: 1                                                            
-│       devices: 1                                                              
-│       accumulate_grad_batches: 1                                              
-│       gradient_clip_val: 1.0                                                  
-│       precision: bf16                                                         
-│       num_sanity_val_steps: 0                                                 
-│       max_steps: 50                                                           
-│       log_every_n_steps: 5                                                    
-│       limit_train_batches: 1.0                                                
-│       limit_val_batches: 0                                                    
-│       val_check_interval: 1000                                                
-│       check_val_every_n_epoch: null                                           
-│                                                                               
-├── wandb
-│   └── project: tinystories-integration                                        
-│       notes: null                                                             
-│       group: dataset-integration                                              
-│       job_type: null                                                          
-│       tags:                                                                   
-│       - log-linear                                                            
-│       - tinystories-debug                                                     
-│       - tinystories-debug                                                     
-│       - mdlm                                                                  
-│                                                                               
-├── checkpointing
-│   └── save_dir: /share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm/ou
-│       resume_from_ckpt: false                                                 
-│       resume_ckpt_path: /share/thickstun/sychou/workspace/research/s-flm-dev1/
-│                                                                               
-├── callbacks
-│   └── checkpoint_every_n_steps:                                               
-│         _target_: lightning.pytorch.callbacks.ModelCheckpoint                 
-│         save_top_k: -1                                                        
-│         save_last: true                                                       
-│         dirpath: /share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm/o
-│         verbose: true                                                         
-│         auto_insert_metric_name: false                                        
-│         every_n_train_steps: 1000                                             
-│       checkpoint_monitor:                                                     
-│         _target_: lightning.pytorch.callbacks.ModelCheckpoint                 
-│         monitor: val/nll                                                      
-│         mode: min                                                             
-│         save_top_k: 1                                                         
-│         save_last: false                                                      
-│         dirpath: /share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm/o
-│         filename: best                                                        
-│         auto_insert_metric_name: false                                        
-│         verbose: true                                                         
-│       learning_rate_monitor:                                                  
-│         _target_: lightning.pytorch.callbacks.LearningRateMonitor             
-│         logging_interval: step                                                
-│                                                                               
-├── data
-│   └── train: tinystories-debug                                                
-│       valid: tinystories-debug                                                
-│       tokenizer_name_or_path: gpt2                                            
-│       cache_dir: /share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm/d
-│       wrap: true                                                              
-│       streaming: false                                                        
-│       insert_train_eos: true                                                  
-│       insert_valid_eos: true                                                  
-│                                                                               
-├── model
-│   └── name: small                                                             
-│       type: dit                                                               
-│       hidden_size: 768                                                        
-│       cond_dim: 128                                                           
-│       length: 1024                                                            
-│       n_blocks: 12                                                            
-│       n_heads: 12                                                             
-│       dropout: 0.1                                                            
-│                                                                               
-├── strategy
-│   └── _target_: lightning.pytorch.strategies.SingleDeviceStrategy             
-│       device: cuda:0                                                          
-│                                                                               
-├── noise
-│   └── type: log-linear                                                        
-│       eps: 0.001                                                              
-│       alpha_min: null                                                         
-│       alpha_max: null                                                         
-│       adaptive: false                                                         
-│                                                                               
-├── lr_scheduler
-│   └── _target_: transformers.get_constant_schedule_with_warmup                
-│       num_warmup_steps: 2500                                                  
-│                                                                               
-├── prior
-│   └── type: none                                                              
-│       latent_width: 0                                                         
-│       latent_height: 0                                                        
-│                                                                               
-├── algo
-│   └── name: mdlm                                                              
-│       diffusion_type: absorbing                                               
-│       backbone: dit                                                           
-│       parameterization: subs                                                  
-│       time_conditioning: false                                                
-│       T: 0                                                                    
-│       causal_attention: false                                                 
-│       loss_type: elbo                                                         
-│       post_process_mode: log_probs                                            
-│       adaLN: true                                                             
-│                                                                               
-└── sampler
-    └── predictor: ancestral                                                    
-        steps: 1024                                                             
-        steps_policy: full                                                      
-        noise_removal: ancestral                                                
-        use_float64: true                                                       
-        p_nucleus: 1.0                                                          
-        temperature: 1.0                                                        
-        num_sample_batches: 2                                                   
-        num_sample_log: 2                                                       
-                                                                                
-[2026-06-08 15:48:53,911][__main__][INFO] - Starting Training.
-[2026-06-08 15:48:54,177][dataloader][INFO] - Loading data from: /share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm/data_cache/tinystories-debug_train_bs1024_wrapped.dat
-[2026-06-08 15:48:54,194][dataloader][INFO] - Loading data from: /share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm/data_cache/tinystories-debug_valid_bs1024_wrapped.dat
-Printing train dataloader batch.
-Batch input_ids.shape torch.Size([8, 1024])
-First 64 tokens: <|endoftext|> inside. When he got inside the cave, he noticed something strange. There was a little boy hiding there!
-
-The person asked the boy, "What are you doing here?". The boy said, "I'm hiding from the monsters." The person said "It's ok, you can come out of the
-ids: tensor([50256,  2641,    13,  1649,   339,  1392,  2641,   262, 11527,    11,
-          339,  6810,  1223,  6283,    13,  1318,   373,   257,  1310,  2933,
-        11816,   612,     0,   198,   198,   464,  1048,  1965,   262,  2933,
-           11,   366,  2061,   389,   345,  1804,   994, 43634,   383,  2933,
-          531,    11,   366,    40,  1101, 11816,   422,   262, 10963,   526,
-          383,  1048,   531,   366,  1026,   338, 12876,    11,   345,   460,
-         1282,   503,   286,   262])
-Last 64 tokens:  home and said, "I have some water at home. Would you like me to share it with you?".
-
-The old lady was delighted, and she thanked him deeply. Together they went back to the old man's house and shared the water from the old man's tap.
-
-From then on,<|endoftext|>
-ids: tensor([ 1363,   290,   531,    11,   366,    40,   423,   617,  1660,   379,
-         1363,    13, 10928,   345,   588,   502,   284,  2648,   340,   351,
-          345, 43634,   198,   198,   464,  1468, 10846,   373, 20707,    11,
-          290,   673, 26280,   683,  7744,    13, 17083,   484,  1816,   736,
-          284,   262,  1468,   582,   338,  2156,   290,  4888,   262,  1660,
-          422,   262,  1468,   582,   338,  9814,    13,   198,   198,  4863,
-          788,   319,    11, 50256])
-Printing valid dataloader batch.
-Batch input_ids.shape torch.Size([8, 1024])
-First 64 tokens: <|endoftext|>Spot. Spot saw the shiny car and said, "Wow, Kitty, your car is so bright and clean!" Kitty smiled and replied, "Thank you, Spot. I polish it every day."
-
-After playing with the car, Kitty and Spot felt thirsty. They found a small pond with clear water.
-ids: tensor([50256, 32565,    13, 15899,  2497,   262, 22441,  1097,   290,   531,
-           11,   366, 22017,    11, 21168,    11,   534,  1097,   318,   523,
-         6016,   290,  3424,  2474, 21168, 13541,   290,  8712,    11,   366,
-        10449,   345,    11, 15899,    13,   314, 25245,   340,   790,  1110,
-          526,   198,   198,  3260,  2712,   351,   262,  1097,    11, 21168,
-          290, 15899,  2936, 47124,    13,  1119,  1043,   257,  1402, 16723,
-          351,  1598,  1660,    13])
-Last 64 tokens: . Lucy looked around, but she could not find Tom. She was very sad.
-
-Lucy did not give up. She searched the park for her friend. At last, she found him near a big tree. Tom was trying to catch the lemon, but it vanished into a hole in the ground.<|endoftext|>
-ids: tensor([   13, 22162,  3114,  1088,    11,   475,   673,   714,   407,  1064,
-         4186,    13,  1375,   373,   845,  6507,    13,   198,   198, 25596,
-          948,   750,   407,  1577,   510,    13,  1375, 16499,   262,  3952,
-          329,   607,  1545,    13,  1629,   938,    11,   673,  1043,   683,
-         1474,   257,  1263,  5509,    13,  4186,   373,  2111,   284,  4929,
-          262, 18873,    11,   475,   340, 23717,   656,   257,  7604,   287,
-          262,  2323,    13, 50256])
-Training: |          | 0/? [00:00<?, ?it/s]Training:   0%|          | 0/578 [00:00<?, ?it/s]Epoch 0:   0%|          | 0/578 [00:00<?, ?it/s] Epoch 0:   0%|          | 1/578 [00:00<08:49,  1.09it/s]Epoch 0:   0%|          | 1/578 [00:00<08:50,  1.09it/s, v_num=jibg]Epoch 0:   0%|          | 2/578 [00:01<05:36,  1.71it/s, v_num=jibg]Epoch 0:   0%|          | 2/578 [00:01<05:36,  1.71it/s, v_num=jibg]Epoch 0:   1%|          | 3/578 [00:01<04:41,  2.04it/s, v_num=jibg]Epoch 0:   1%|          | 3/578 [00:01<04:41,  2.04it/s, v_num=jibg]Epoch 0:   1%|          | 4/578 [00:01<04:14,  2.26it/s, v_num=jibg]Epoch 0:   1%|          | 4/578 [00:01<04:14,  2.26it/s, v_num=jibg]Epoch 0:   1%|          | 5/578 [00:02<04:06,  2.32it/s, v_num=jibg]Epoch 0:   1%|          | 5/578 [00:02<04:06,  2.32it/s, v_num=jibg]Epoch 0:   1%|          | 6/578 [00:02<03:47,  2.51it/s, v_num=jibg]Epoch 0:   1%|          | 6/578 [00:02<03:47,  2.51it/s, v_num=jibg]Epoch 0:   1%|          | 7/578 [00:02<03:39,  2.60it/s, v_num=jibg]Epoch 0:   1%|          | 7/578 [00:02<03:39,  2.60it/s, v_num=jibg]Epoch 0:   1%|▏         | 8/578 [00:03<03:33,  2.67it/s, v_num=jibg]Epoch 0:   1%|▏         | 8/578 [00:03<03:33,  2.67it/s, v_num=jibg]Epoch 0:   2%|▏         | 9/578 [00:03<03:28,  2.72it/s, v_num=jibg]Epoch 0:   2%|▏         | 9/578 [00:03<03:28,  2.72it/s, v_num=jibg]Epoch 0:   2%|▏         | 10/578 [00:03<03:28,  2.72it/s, v_num=jibg]Epoch 0:   2%|▏         | 10/578 [00:03<03:28,  2.72it/s, v_num=jibg]Epoch 0:   2%|▏         | 11/578 [00:03<03:22,  2.81it/s, v_num=jibg]Epoch 0:   2%|▏         | 11/578 [00:03<03:22,  2.81it/s, v_num=jibg]Epoch 0:   2%|▏         | 12/578 [00:04<03:19,  2.84it/s, v_num=jibg]Epoch 0:   2%|▏         | 12/578 [00:04<03:19,  2.84it/s, v_num=jibg]Epoch 0:   2%|▏         | 13/578 [00:04<03:16,  2.87it/s, v_num=jibg]Epoch 0:   2%|▏         | 13/578 [00:04<03:16,  2.87it/s, v_num=jibg]Epoch 0:   2%|▏         | 14/578 [00:04<03:14,  2.90it/s, v_num=jibg]Epoch 0:   2%|▏         | 14/578 [00:04<03:14,  2.90it/s, v_num=jibg]Epoch 0:   3%|▎         | 15/578 [00:05<03:15,  2.88it/s, v_num=jibg]Epoch 0:   3%|▎         | 15/578 [00:05<03:15,  2.88it/s, v_num=jibg]Epoch 0:   3%|▎         | 16/578 [00:05<03:11,  2.94it/s, v_num=jibg]Epoch 0:   3%|▎         | 16/578 [00:05<03:11,  2.94it/s, v_num=jibg]Epoch 0:   3%|▎         | 17/578 [00:05<03:09,  2.96it/s, v_num=jibg]Epoch 0:   3%|▎         | 17/578 [00:05<03:09,  2.96it/s, v_num=jibg]Epoch 0:   3%|▎         | 18/578 [00:06<03:08,  2.97it/s, v_num=jibg]Epoch 0:   3%|▎         | 18/578 [00:06<03:08,  2.97it/s, v_num=jibg]Epoch 0:   3%|▎         | 19/578 [00:06<03:07,  2.99it/s, v_num=jibg]Epoch 0:   3%|▎         | 19/578 [00:06<03:07,  2.99it/s, v_num=jibg]Epoch 0:   3%|▎         | 20/578 [00:06<03:07,  2.97it/s, v_num=jibg]Epoch 0:   3%|▎         | 20/578 [00:06<03:07,  2.97it/s, v_num=jibg]Epoch 0:   4%|▎         | 21/578 [00:06<03:05,  3.01it/s, v_num=jibg]Epoch 0:   4%|▎         | 21/578 [00:06<03:05,  3.01it/s, v_num=jibg]Epoch 0:   4%|▍         | 22/578 [00:07<03:04,  3.02it/s, v_num=jibg]Epoch 0:   4%|▍         | 22/578 [00:07<03:04,  3.02it/s, v_num=jibg]Epoch 0:   4%|▍         | 23/578 [00:07<03:03,  3.03it/s, v_num=jibg]Epoch 0:   4%|▍         | 23/578 [00:07<03:03,  3.03it/s, v_num=jibg]Epoch 0:   4%|▍         | 24/578 [00:07<03:02,  3.04it/s, v_num=jibg]Epoch 0:   4%|▍         | 24/578 [00:07<03:02,  3.04it/s, v_num=jibg]Epoch 0:   4%|▍         | 25/578 [00:08<03:02,  3.02it/s, v_num=jibg]Epoch 0:   4%|▍         | 25/578 [00:08<03:02,  3.02it/s, v_num=jibg]Epoch 0:   4%|▍         | 26/578 [00:08<03:00,  3.06it/s, v_num=jibg]Epoch 0:   4%|▍         | 26/578 [00:08<03:00,  3.06it/s, v_num=jibg]Epoch 0:   5%|▍         | 27/578 [00:08<02:59,  3.06it/s, v_num=jibg]Epoch 0:   5%|▍         | 27/578 [00:08<02:59,  3.06it/s, v_num=jibg]Epoch 0:   5%|▍         | 28/578 [00:09<02:59,  3.07it/s, v_num=jibg]Epoch 0:   5%|▍         | 28/578 [00:09<02:59,  3.07it/s, v_num=jibg]Epoch 0:   5%|▌         | 29/578 [00:09<02:58,  3.08it/s, v_num=jibg]Epoch 0:   5%|▌         | 29/578 [00:09<02:58,  3.08it/s, v_num=jibg]Epoch 0:   5%|▌         | 30/578 [00:09<02:58,  3.06it/s, v_num=jibg]Epoch 0:   5%|▌         | 30/578 [00:09<02:58,  3.06it/s, v_num=jibg]Epoch 0:   5%|▌         | 31/578 [00:10<02:57,  3.09it/s, v_num=jibg]Epoch 0:   5%|▌         | 31/578 [00:10<02:57,  3.09it/s, v_num=jibg]Epoch 0:   6%|▌         | 32/578 [00:10<02:56,  3.09it/s, v_num=jibg]Epoch 0:   6%|▌         | 32/578 [00:10<02:56,  3.09it/s, v_num=jibg]Epoch 0:   6%|▌         | 33/578 [00:10<02:55,  3.10it/s, v_num=jibg]Epoch 0:   6%|▌         | 33/578 [00:10<02:55,  3.10it/s, v_num=jibg]Epoch 0:   6%|▌         | 34/578 [00:10<02:55,  3.10it/s, v_num=jibg]Epoch 0:   6%|▌         | 34/578 [00:10<02:55,  3.10it/s, v_num=jibg]Epoch 0:   6%|▌         | 35/578 [00:11<02:55,  3.09it/s, v_num=jibg]Epoch 0:   6%|▌         | 35/578 [00:11<02:55,  3.09it/s, v_num=jibg]Epoch 0:   6%|▌         | 36/578 [00:11<02:54,  3.11it/s, v_num=jibg]Epoch 0:   6%|▌         | 36/578 [00:11<02:54,  3.11it/s, v_num=jibg]Epoch 0:   6%|▋         | 37/578 [00:11<02:53,  3.12it/s, v_num=jibg]Epoch 0:   6%|▋         | 37/578 [00:11<02:53,  3.12it/s, v_num=jibg]Epoch 0:   7%|▋         | 38/578 [00:12<02:53,  3.12it/s, v_num=jibg]Epoch 0:   7%|▋         | 38/578 [00:12<02:53,  3.12it/s, v_num=jibg]Epoch 0:   7%|▋         | 39/578 [00:12<02:52,  3.12it/s, v_num=jibg]Epoch 0:   7%|▋         | 39/578 [00:12<02:52,  3.12it/s, v_num=jibg]Epoch 0:   7%|▋         | 40/578 [00:12<02:52,  3.11it/s, v_num=jibg]Epoch 0:   7%|▋         | 40/578 [00:12<02:52,  3.11it/s, v_num=jibg]Epoch 0:   7%|▋         | 41/578 [00:13<02:51,  3.13it/s, v_num=jibg]Epoch 0:   7%|▋         | 41/578 [00:13<02:51,  3.13it/s, v_num=jibg]Epoch 0:   7%|▋         | 42/578 [00:13<02:51,  3.13it/s, v_num=jibg]Epoch 0:   7%|▋         | 42/578 [00:13<02:51,  3.13it/s, v_num=jibg]Epoch 0:   7%|▋         | 43/578 [00:13<02:50,  3.14it/s, v_num=jibg]Epoch 0:   7%|▋         | 43/578 [00:13<02:50,  3.14it/s, v_num=jibg]Epoch 0:   8%|▊         | 44/578 [00:14<02:50,  3.14it/s, v_num=jibg]Epoch 0:   8%|▊         | 44/578 [00:14<02:50,  3.14it/s, v_num=jibg]Epoch 0:   8%|▊         | 45/578 [00:14<02:50,  3.13it/s, v_num=jibg]Epoch 0:   8%|▊         | 45/578 [00:14<02:50,  3.13it/s, v_num=jibg]Epoch 0:   8%|▊         | 46/578 [00:14<02:49,  3.14it/s, v_num=jibg]Epoch 0:   8%|▊         | 46/578 [00:14<02:49,  3.14it/s, v_num=jibg]Epoch 0:   8%|▊         | 47/578 [00:14<02:48,  3.15it/s, v_num=jibg]Epoch 0:   8%|▊         | 47/578 [00:14<02:48,  3.15it/s, v_num=jibg]Epoch 0:   8%|▊         | 48/578 [00:15<02:48,  3.15it/s, v_num=jibg]Epoch 0:   8%|▊         | 48/578 [00:15<02:48,  3.15it/s, v_num=jibg]Epoch 0:   8%|▊         | 49/578 [00:15<02:47,  3.15it/s, v_num=jibg]Epoch 0:   8%|▊         | 49/578 [00:15<02:47,  3.15it/s, v_num=jibg]Epoch 0:   9%|▊         | 50/578 [00:15<02:48,  3.14it/s, v_num=jibg]Epoch 0:   9%|▊         | 50/578 [00:15<02:48,  3.14it/s, v_num=jibg]Epoch 0:   9%|▊         | 50/578 [00:15<02:48,  3.14it/s, v_num=jibg]Epoch 0:   9%|▊         | 50/578 [00:15<02:48,  3.14it/s, v_num=jibg]
-[1;34mwandb[0m: 
-[1;34mwandb[0m: 🚀 View run [33mcharmed-rain-3[0m at: [34mhttps://wandb.ai/syctw/tinystories-integration/runs/1zj5jibg[0m
