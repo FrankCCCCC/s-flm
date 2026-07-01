@@ -183,3 +183,4 @@ papers/
 .nfs*
 *.err
 *.out
+*.npz
