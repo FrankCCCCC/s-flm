@@ -3,6 +3,8 @@ import types
 import typing
 
 import einops
+import flash_attn
+import flash_attn.layers.rotary
 import huggingface_hub
 import omegaconf
 import torch
@@ -17,82 +19,92 @@ import torch.nn.functional as F
 # reference GPT-NeoX rotary embedding. For the non-causal, no-softcap
 # (Sphere)DiT path these are numerically equivalent to the flash-attn
 # kernels actually used during training.
-def _fa_apply_rotary_emb_torch(x, cos, sin, *args, **kwargs):
-  """flash_attn.layers.rotary.apply_rotary_emb_torch fallback.
+# def _fa_apply_rotary_emb_torch(x, cos, sin, *args, **kwargs):
+#   """flash_attn.layers.rotary.apply_rotary_emb_torch fallback.
 
-  x: [B, S, H, D]; cos/sin: [S, rotary_dim // 2]. Applies rotary to the
-  first `rotary_dim` head dims and leaves any remainder untouched.
-  """
-  ro_dim = cos.shape[-1] * 2
-  assert ro_dim <= x.shape[-1]
-  cos = torch.cat([cos, cos], dim=-1)[None, :, None, :]
-  sin = torch.cat([sin, sin], dim=-1)[None, :, None, :]
-  x_ro = x[..., :ro_dim]
-  x_rot = x_ro * cos + rotate_half(x_ro) * sin
-  if ro_dim < x.shape[-1]:
-    return torch.cat([x_rot, x[..., ro_dim:]], dim=-1)
-  return x_rot
-
-
-def _fa_apply_rotary_emb_qkv_(qkv, cos, sin, *args, **kwargs):
-  """flash_attn.layers.rotary.apply_rotary_emb_qkv_ fallback.
-
-  qkv: [B, S, 3, H, D]; rotary applied to q (idx 0) and k (idx 1).
-  """
-  q = _fa_apply_rotary_emb_torch(qkv[:, :, 0], cos, sin)
-  k = _fa_apply_rotary_emb_torch(qkv[:, :, 1], cos, sin)
-  v = qkv[:, :, 2]
-  return torch.stack([q, k, v], dim=2)
+#   x: [B, S, H, D]; cos/sin: [S, rotary_dim // 2]. Applies rotary to the
+#   first `rotary_dim` head dims and leaves any remainder untouched.
+#   """
+#   ro_dim = cos.shape[-1] * 2
+#   assert ro_dim <= x.shape[-1]
+#   cos = torch.cat([cos, cos], dim=-1)[None, :, None, :]
+#   sin = torch.cat([sin, sin], dim=-1)[None, :, None, :]
+#   x_ro = x[..., :ro_dim]
+#   x_rot = x_ro * cos + rotate_half(x_ro) * sin
+#   if ro_dim < x.shape[-1]:
+#     return torch.cat([x_rot, x[..., ro_dim:]], dim=-1)
+#   return x_rot
 
 
-def _fa_flash_attn_func(q, k, v, causal=False, *args, **kwargs):
-  """flash_attn.flash_attn_func fallback. q/k/v: [B, S, H, D]."""
-  q, k, v = (t.transpose(1, 2) for t in (q, k, v))  # -> [B, H, S, D]
-  out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
-  return out.transpose(1, 2)
+# def _fa_apply_rotary_emb_qkv_(qkv, cos, sin, *args, **kwargs):
+#   """flash_attn.layers.rotary.apply_rotary_emb_qkv_ fallback.
+
+#   qkv: [B, S, 3, H, D]; rotary applied to q (idx 0) and k (idx 1).
+#   """
+#   q = _fa_apply_rotary_emb_torch(qkv[:, :, 0], cos, sin)
+#   k = _fa_apply_rotary_emb_torch(qkv[:, :, 1], cos, sin)
+#   v = qkv[:, :, 2]
+#   return torch.stack([q, k, v], dim=2)
 
 
-def _fa_flash_attn_qkvpacked_func(qkv, dropout_p=0.0, causal=False,
-                                  softcap=0.0, *args, **kwargs):
-  """flash_attn.flash_attn_qkvpacked_func fallback.
-
-  qkv: [B, S, 3, H, D] -> [B, S, H, D]. Supports logit softcapping.
-  """
-  q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
-  q, k, v = (t.transpose(1, 2) for t in (q, k, v))  # -> [B, H, S, D]
-  if softcap and softcap > 0:
-    scale = 1.0 / math.sqrt(q.shape[-1])
-    scores = torch.matmul(q, k.transpose(-1, -2)) * scale
-    scores = softcap * torch.tanh(scores / softcap)
-    if causal:
-      s = scores.shape[-1]
-      mask = torch.triu(
-        torch.ones(s, s, device=scores.device, dtype=torch.bool),
-        diagonal=1)
-      scores = scores.masked_fill(mask, float('-inf'))
-    attn = torch.softmax(scores, dim=-1)
-    if dropout_p > 0:
-      attn = F.dropout(attn, p=dropout_p)
-    out = torch.matmul(attn, v)
-  else:
-    out = F.scaled_dot_product_attention(
-      q, k, v, dropout_p=dropout_p, is_causal=causal)
-  return out.transpose(1, 2)
+# def _fa_flash_attn_func(q, k, v, causal=False, *args, **kwargs):
+#   """flash_attn.flash_attn_func fallback. q/k/v: [B, S, H, D]."""
+#   q, k, v = (t.transpose(1, 2) for t in (q, k, v))  # -> [B, H, S, D]
+#   Lq, Lk = q.shape[-2], k.shape[-2]
+#   if causal and Lq != Lk:
+#     # kv-cache decoding: query (Lq new tokens) attends to all Lk cached+new keys.
+#     # torch's is_causal top-left-aligns a non-square mask (wrong: new token would
+#     # see only key 0); real flash-attn bottom-right-aligns. Build that mask.
+#     mask = torch.ones(Lq, Lk, dtype=torch.bool,
+#                       device=q.device).tril(diagonal=Lk - Lq)
+#     out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+#   else:
+#     out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+#   return out.transpose(1, 2)
 
 
-try:
-  import flash_attn
-  import flash_attn.layers.rotary
-  _HAS_FLASH_ATTN = True
-except ImportError:
-  _HAS_FLASH_ATTN = False
-  flash_attn = types.SimpleNamespace(
-    flash_attn_func=_fa_flash_attn_func,
-    flash_attn_qkvpacked_func=_fa_flash_attn_qkvpacked_func,
-    layers=types.SimpleNamespace(
-      rotary=types.SimpleNamespace(
-        apply_rotary_emb_torch=_fa_apply_rotary_emb_torch,
-        apply_rotary_emb_qkv_=_fa_apply_rotary_emb_qkv_)))
+# def _fa_flash_attn_qkvpacked_func(qkv, dropout_p=0.0, causal=False,
+#                                   softcap=0.0, *args, **kwargs):
+#   """flash_attn.flash_attn_qkvpacked_func fallback.
+
+#   qkv: [B, S, 3, H, D] -> [B, S, H, D]. Supports logit softcapping.
+#   """
+#   q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+#   q, k, v = (t.transpose(1, 2) for t in (q, k, v))  # -> [B, H, S, D]
+#   if softcap and softcap > 0:
+#     scale = 1.0 / math.sqrt(q.shape[-1])
+#     scores = torch.matmul(q, k.transpose(-1, -2)) * scale
+#     scores = softcap * torch.tanh(scores / softcap)
+#     if causal:
+#       s = scores.shape[-1]
+#       mask = torch.triu(
+#         torch.ones(s, s, device=scores.device, dtype=torch.bool),
+#         diagonal=1)
+#       scores = scores.masked_fill(mask, float('-inf'))
+#     attn = torch.softmax(scores, dim=-1)
+#     if dropout_p > 0:
+#       attn = F.dropout(attn, p=dropout_p)
+#     out = torch.matmul(attn, v)
+#   else:
+#     out = F.scaled_dot_product_attention(
+#       q, k, v, dropout_p=dropout_p, is_causal=causal)
+#   return out.transpose(1, 2)
+
+
+# try:
+#   import flash_attn
+#   import flash_attn.layers.rotary
+#   _HAS_FLASH_ATTN = True
+# except ImportError:
+#   _HAS_FLASH_ATTN = False
+#   flash_attn = types.SimpleNamespace(
+#     flash_attn_func=_fa_flash_attn_func,
+#     flash_attn_qkvpacked_func=_fa_flash_attn_qkvpacked_func,
+#     layers=types.SimpleNamespace(
+#       rotary=types.SimpleNamespace(
+#         apply_rotary_emb_torch=_fa_apply_rotary_emb_torch,
+#         apply_rotary_emb_qkv_=_fa_apply_rotary_emb_qkv_)))
+# ── Optional flash-attn dependency ───────────────────────────────────
 
 # Flags required to enable jit fusion kernels
 torch._C._jit_set_profiling_mode(False)

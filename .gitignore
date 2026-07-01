@@ -179,6 +179,7 @@ data_cache_hard
 checkpoints/
 multirun/
 .hydra/
+papers/
 .nfs*
 *.err
 *.out

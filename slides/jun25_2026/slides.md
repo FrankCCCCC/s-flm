@@ -419,7 +419,7 @@ The target word embedding is initialized by $\mathcal{N}(0, \text{init}^2)$
 
 ### Distribution over Values, Log-scled Y axis
 
-
+![alt text](image-19.png)
 
 ---
 
@@ -427,7 +427,7 @@ The target word embedding is initialized by $\mathcal{N}(0, \text{init}^2)$
 
 ### Distribution over Values, Linear-scled Y axis
 
-
+![alt text](image-20.png)
 
 ---
 
