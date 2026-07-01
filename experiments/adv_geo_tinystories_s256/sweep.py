@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""adv_geo_tinystories (slides jun25_2026) — "advanced" geometry baselines, LR sweep.
+"""adv_geo_tinystories_s256 (slides jun25_2026) — "advanced" geometry baselines, LR sweep, SEQ LEN 256.
 
 5 variants x 5 LRs = 25 cells:
   S-FLM   : ada-sched, truncation, ada-sched+truncation   (init=ngpt)
@@ -7,10 +7,11 @@
   LR      : {5e-5, 1e-4, 3e-4, 1e-3, 5e-3}
 
 Recipe: small DiT 768/12/12, 30k steps, effective batch 512 (1 GPU x PER_GPU_BS=8,
-accum auto = 64), seq 1024, bf16, EMA 0.9999, AdamW wd 0 / grad-clip 1.0.
+accum auto = 64), seq 256, bf16, EMA 0.9999, AdamW wd 0 / grad-clip 1.0.
+Checkpoints every 5k steps, all retained (SAVE_TOPK=-1).
 Eval: exact-velocity, top_k_v=1, 180 steps, greedy last (langflow: steps=180, top_k=1).
 
-ORCHESTRATION ONLY — each cell calls the single-run shared scripts:
+ORCHESTRATION ONLY — each cell calls the single-run shared scripts (SEQ_LEN=256 knob):
   scripts/train/tinystories/{sfm_truncated_adaptive,sfm_truncated,langflow}.sh
   scripts/sample/tinystories/{...same...}.sh
 The variant is selected by which script + a fixed env toggle (ALPHA_MAX / SELF_COND).
@@ -32,9 +33,13 @@ from simple_slurm import Slurm
 
 REPO = '/share/thickstun/sychou/workspace/research/s-flm'
 ENVBIN = '/home/sc3379/anaconda3/envs/sfm/bin'
-EXP = f'{REPO}/experiments/adv_geo_tinystories'
+EXP = f'{REPO}/experiments/adv_geo_tinystories_s256'
 LOGS = f'{EXP}/logs'
-OUT = f'{REPO}/outputs/adv_geo_tinystories'
+OUT = f'{REPO}/outputs/adv_geo_tinystories_s256'
+
+SEQ_LEN = 256
+CKPT_EVERY = 5000
+SAVE_TOPK = -1
 
 LRS = ['5e-5', '1e-4', '3e-4', '1e-3', '5e-3']
 # tag -> (train_script, sample_script, fixed_env)   fixed_env carries the variant toggle
@@ -69,10 +74,11 @@ def job_body(tag, train_script, sample_script, fixed_env, lr):
         export PATH={ENVBIN}:$PATH
         cd {REPO}
         echo "[$(date)] TRAIN {tag} on $(hostname)"
-        {fixed_env} LR={lr} OUTPUT_DIR={tdir} RUN_NAME=adv_{tag} DEVICES=1 PER_GPU_BS=8 \\
+        {fixed_env} LR={lr} OUTPUT_DIR={tdir} RUN_NAME=adv_{tag}_s256 DEVICES=1 PER_GPU_BS=32 \\
+            SEQ_LEN={SEQ_LEN} CKPT_EVERY={CKPT_EVERY} SAVE_TOPK={SAVE_TOPK} \\
             bash scripts/train/tinystories/{train_script}
         echo "[$(date)] EVAL {tag}"
-        {fixed_env} CKPT_PATH={tdir}/checkpoints/last.ckpt OUTPUT_DIR={edir} DEVICES=1 \\
+        {fixed_env} CKPT_PATH={tdir}/checkpoints/last.ckpt OUTPUT_DIR={edir} DEVICES=1 SEQ_LEN={SEQ_LEN} \\
             bash scripts/sample/tinystories/{sample_script}
         echo "[$(date)] DONE {tag}"
         ''')
@@ -84,10 +90,10 @@ def main():
     args = ap.parse_args()
     os.makedirs(LOGS, exist_ok=True)
     cells = list(itertools.product(VARIANTS.keys(), LRS))
-    print(f'adv_geo_tinystories: {len(cells)} cells ({len(VARIANTS)} variants x {len(LRS)} lr)')
+    print(f'adv_geo_tinystories_s256: {len(cells)} cells ({len(VARIANTS)} variants x {len(LRS)} lr)')
     if args.dry_run:
         for v, lr in cells:
-            print(f'  adv_{v}_lr{lr}')
+            print(f'  adv256_{v}_lr{lr}')
         v0, lr0 = cells[0]
         print('\n--- example body ---\n' + job_body(f'{v0}_lr{lr0}', *VARIANTS[v0], lr0))
         return
@@ -95,13 +101,13 @@ def main():
     n_sub = n_skip = 0
     for v, lr in cells:
         tag = f'{v}_lr{lr}'
-        jobname = f'adv_{tag}'
+        jobname = f'adv256_{tag}'
         if os.path.exists(f'{OUT}/{tag}/eval/ppl.json') or jobname in active:
             n_skip += 1
             continue
         train_script, sample_script, fixed_env = VARIANTS[v]
         slurm = Slurm(job_name=jobname, partition='thickstun,desa', gres='gpu:1',
-                      ntasks=1, cpus_per_task=8, mem='64G', time='10-00:00:00',
+                      ntasks=1, cpus_per_task=8, mem='32G', time='10-00:00:00',
                       exclude='desa-compute-01', output=f'{LOGS}/{tag}_%j.log')
         jid = slurm.sbatch(job_body(tag, train_script, sample_script, fixed_env, lr))
         print(f'  submitted {tag}: job {jid}')

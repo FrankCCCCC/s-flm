@@ -4,8 +4,8 @@
 
 | Cell | Valid PPL | GenPPL | Entropy | Note |
 |---|---|---|---|---|
-| ar | 3.3556 | 27.2700 | 0.0256 | ⚠collapse? |
+| ar | 3.3556 | 6.7900 | 4.2478 | |
 
 ## Best
 - Lowest Valid PPL: **ar** = 3.3556
-- Lowest GenPPL: (all evaluated cells look collapsed)
+- Lowest GenPPL (non-collapsed, entropy≥3.0): **ar** = 6.7900
