@@ -1,24 +1,25 @@
 #!/usr/bin/env python
-"""Plot the word-embedding length (L2-norm) distribution of ONE model — linear-Y and log-Y.
+"""Visualize the word-embedding of ONE model: (a) length (L2-norm) distribution and
+(b) element-value distribution. Each in linear-Y and log-Y. Prints dim / length / value stats.
 
-Give it a model source + (optionally) the embedding key, and it draws two figures:
-  <out>.png        histogram of ||e_v||  (linear Y)
-  <out>_log.png    same, log Y           (exposes the heavy tail)
+Outputs (base = --out):
+  <out>.png            length ||e_v|| histogram        (linear Y)
+  <out>_log.png        length ||e_v|| histogram        (log Y)
+  <out>_value.png      element-value distribution      (linear Y, y = portion)
+  <out>_value_log.png  element-value distribution      (log Y,    y = portion)
 
 SOURCE is auto-detected:
-  *.ckpt/*.pt/*.pth   Lightning/torch checkpoint -> embedding tensor from the state_dict
-                      (pick it with --key, e.g. backbone.sphere_embed.weight; else auto)
+  *.ckpt/*.pt/*.pth   Lightning/torch checkpoint -> embedding from state_dict (pick with --key)
   *.npy/*.npz         raw [vocab, dim] matrix (npz: --npz-key, else first array)
-  anything else       HuggingFace model id, e.g. 'gpt2' / 'openai-community/gpt2'
+  anything else       HuggingFace model id, e.g. 'gpt2', 'google-bert/bert-base-uncased'
 
-For HFLM the embedding ||e_v|| IS the hyperbolic radial coord rho (hyperbolic_dit.py:183);
-pass --rho-max 12 to also show the sampler's clamped radius 12*tanh(||e||/12).
+For HFLM ||e_v|| IS the hyperbolic radius rho; pass --rho-max 12 to also show the clamped radius.
 
   python hflm_embed_norms.py outputs/tinystories/hflm/checkpoints/last.ckpt \
       --key backbone.sphere_embed.weight --rho-max 12 \
       --out experiments/tinystories/hflm_embed_norms --label "HFLM TinyStories (30k)"
 
-mmap=True keeps the big checkpoint off RAM — but still run on a compute node (desa/thickstun).
+mmap=True keeps the big checkpoint off RAM — still run on a compute node (desa/thickstun).
 """
 import os, argparse
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
@@ -75,26 +76,35 @@ def load_embedding(spec, key=None, npz_key=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("source", help="ckpt path / .npy/.npz/.pt / HF model id")
-    ap.add_argument("--out", required=True, help="output base path -> <out>.png and <out>_log.png")
+    ap.add_argument("--out", required=True, help="output base path")
     ap.add_argument("--key", default=None, help="embedding key suffix in the state_dict")
     ap.add_argument("--npz-key", default=None)
     ap.add_argument("--label", default=None, help="title label (default: the source)")
     ap.add_argument("--rho-max", type=float, default=None, help="also show clamped radius rho_max*tanh(||e||/rho_max)")
-    ap.add_argument("--bins", type=int, default=80)
+    ap.add_argument("--bins", type=int, default=80, help="bins for the length histogram")
+    ap.add_argument("--value-bins", type=int, default=200, help="bins for the value histogram")
     args = ap.parse_args()
     label = args.label or os.path.basename(args.source.rstrip("/"))
 
-    rho = load_embedding(args.source, key=args.key, npz_key=args.npz_key).norm(p=2, dim=-1)
+    W = load_embedding(args.source, key=args.key, npz_key=args.npz_key)
+    vocab, dim = W.shape
+    rho = W.norm(p=2, dim=-1)
     r = rho.numpy()
-    print(f"||e_v||: vocab={len(r)} min={r.min():.3f} p1={np.percentile(r,1):.3f} "
-          f"median={np.median(r):.3f} mean={r.mean():.3f} p99={np.percentile(r,99):.3f} "
-          f"max={r.max():.3f} std={r.std():.3f}")
-    r_clamp = None
-    if args.rho_max is not None:
-        r_clamp = (args.rho_max * torch.tanh(rho / args.rho_max)).numpy()
+    vals = W.reshape(-1).numpy()
+
+    # ---- stats ----
+    print(f"\n=== {label} ===")
+    print(f"dim = {dim}   vocab = {vocab}")
+    print(f"length ||e_v||: median={np.median(r):.4f}  mean={r.mean():.4f}  std={r.std():.4f}  "
+          f"range=[{r.min():.4f}, {r.max():.4f}]")
+    print(f"value (elements): mean={vals.mean():.5f}  std={vals.std():.5f}  "
+          f"range=[min {vals.min():.4f}, max {vals.max():.4f}]")
+
+    r_clamp = (args.rho_max * torch.tanh(rho / args.rho_max)).numpy() if args.rho_max is not None else None
     np.savez(args.out + ".npz", raw=r, **({"clamp": r_clamp} if r_clamp is not None else {}))
 
-    def make_fig(logy):
+    # ---- (a) length figures ----
+    def make_len_fig(logy):
         ncol = 2 if r_clamp is not None else 1
         fig, axes = plt.subplots(1, ncol, figsize=(13 if ncol == 2 else 8, 5), squeeze=False)
         ax = axes[0][0]
@@ -109,17 +119,33 @@ def main():
             ax2 = axes[0][1]
             ax2.hist(r_clamp, bins=args.bins, color="#aa3377", edgecolor="white")
             ax2.set_xlabel(f"clamped radius  {args.rho_max:g}·tanh(‖e‖/{args.rho_max:g})")
-            ax2.set_ylabel("# tokens" + (" (log)" if logy else ""))
-            ax2.set_title("effective hyperbolic radius")
+            ax2.set_ylabel("# tokens" + (" (log)" if logy else "")); ax2.set_title("effective hyperbolic radius")
             if logy: ax2.set_yscale("log")
         if logy: ax.set_yscale("log")
-        fig.suptitle(f"{label} — word-embedding length distribution" + (" (log Y)" if logy else ""))
-        fig.tight_layout()
-        out = args.out + ("_log.png" if logy else ".png")
+        fig.suptitle(f"{label} — word-embedding length" + (" (log Y)" if logy else ""))
+        fig.tight_layout(); out = args.out + ("_log.png" if logy else ".png")
         fig.savefig(out, dpi=130); print(f"wrote {out}")
 
-    make_fig(False)
-    make_fig(True)
+    # ---- (b) value-distribution figures (y = portion of all elements) ----
+    w = np.ones_like(vals) / vals.size
+    def make_val_fig(logy):
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.hist(vals, bins=args.value_bins, weights=w, color="#ee6677", edgecolor="none")
+        ax.axvline(0, color="k", lw=0.6)
+        if logy: ax.set_yscale("log")
+        ax.set_xlabel("embedding element value")
+        ax.set_ylabel("portion of values" + (" (log)" if logy else ""))
+        ax.set_title(f"{label} — embedding value distribution" + (" (log Y)" if logy else ""))
+        ax.text(0.02, 0.97,
+                f"dim={dim}  vocab={vocab}\n‖e‖ median={np.median(r):.2f}  std={r.std():.2f}\n"
+                f"value range=[{vals.min():.3f}, {vals.max():.3f}]  std={vals.std():.4f}",
+                transform=ax.transAxes, va="top", fontsize=9,
+                bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.85))
+        fig.tight_layout(); out = args.out + ("_value_log.png" if logy else "_value.png")
+        fig.savefig(out, dpi=130); print(f"wrote {out}")
+
+    make_len_fig(False); make_len_fig(True)
+    make_val_fig(False); make_val_fig(True)
 
 
 if __name__ == "__main__":
