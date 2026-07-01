@@ -19,6 +19,7 @@ mkdir -p "${OUTPUT_DIR}"
 
 MARGS=(
     model=small-sphere-dit
+    model.length=${SEQ_LEN:-1024}
     model.init=unit_var
     algo=langflow
     algo.self_conditioning=${SELF_COND}

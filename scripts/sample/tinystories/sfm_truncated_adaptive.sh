@@ -20,6 +20,7 @@ mkdir -p "${OUTPUT_DIR}"
 
 MARGS=(
     model=small-sphere-dit
+    model.length=${SEQ_LEN:-1024}
     model.init=ngpt
     algo=sfm
     algo.renormalize_weights=False

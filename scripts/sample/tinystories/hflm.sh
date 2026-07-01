@@ -21,6 +21,7 @@ mkdir -p "${OUTPUT_DIR}"
 
 MARGS=(
     model=small-hyperbolic-dit
+    model.length=${SEQ_LEN:-1024}
     model.init=ngpt
     algo=hflm
     algo.prior_cov=${PRIOR_COV}
