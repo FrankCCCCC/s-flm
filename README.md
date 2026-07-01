@@ -30,6 +30,24 @@ pip install -r requirements.txt
 
 `requirements.txt` intentionally does **not** pin `torch` or `numpy`. We work inside the NGC PyTorch container (`nvcr.io/nvidia/pytorch:25.02-py3`) which already ships matching CUDA / cuDNN / NCCL builds; pip-installing torch on top of that will mess up the NGC build. If you are not using the container, install `torch` and `numpy` (we use `torch==2.7.0`, `numpy==1.26.4`) **before** running `pip install -r requirements.txt`.
 
+### Flash Attention (optional)
+
+FlashAttention is **optional** — `models/dit.py` falls back to `torch.nn.functional.scaled_dot_product_attention` when `flash_attn` is not installed, so everything runs without it (just slower on GPU). To use the real kernels, install a **prebuilt wheel matching your `torch` / CUDA / Python / C++ ABI** (building from source needs `nvcc` and is slow). For the reference env (`torch==2.7.0+cu128`, Python 3.12, C++11 ABI):
+
+```bash
+pip install --no-deps \
+  "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1%2Bcu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+python -c "import flash_attn; print(flash_attn.__version__)"   # verify
+```
+
+For a different setup, pick the matching wheel from the [FlashAttention releases](https://github.com/Dao-AILab/flash-attention/releases). The filename encodes what must line up: `cu12` (CUDA major), `torch2.7`, `cp312` (Python 3.12), and `cxx11abiTRUE`/`FALSE`. Check yours with:
+
+```bash
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch._C._GLIBCXX_USE_CXX11_ABI)"
+```
+
+`--no-deps` keeps pip from touching your `torch`.
+
 # Checkpoints
 
 All the checkpoints are in the HuggingFace repo [`jdeschena/s-flm`](https://huggingface.co/jdeschena/s-flm).
