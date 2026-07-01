@@ -48,7 +48,16 @@ def _fa_apply_rotary_emb_qkv_(qkv, cos, sin, *args, **kwargs):
 def _fa_flash_attn_func(q, k, v, causal=False, *args, **kwargs):
   """flash_attn.flash_attn_func fallback. q/k/v: [B, S, H, D]."""
   q, k, v = (t.transpose(1, 2) for t in (q, k, v))  # -> [B, H, S, D]
-  out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
+  Lq, Lk = q.shape[-2], k.shape[-2]
+  if causal and Lq != Lk:
+    # kv-cache decoding: query (Lq new tokens) attends to all Lk cached+new keys.
+    # torch's is_causal top-left-aligns a non-square mask (wrong: new token would
+    # see only key 0); real flash-attn bottom-right-aligns. Build that mask.
+    mask = torch.ones(Lq, Lk, dtype=torch.bool,
+                      device=q.device).tril(diagonal=Lk - Lq)
+    out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+  else:
+    out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
   return out.transpose(1, 2)
 
 

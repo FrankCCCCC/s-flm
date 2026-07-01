@@ -468,12 +468,13 @@ class ARSampler(Sampler):
      only (suggested to use with causal transformers only)"""
 
   def __init__(self, use_float64, kv_cache, greedy,
-               early_stopping, temperature=1.0):
+               early_stopping, temperature=1.0, p_nucleus=1.0):
     self.use_float64 = use_float64
     self.kv_cache = kv_cache
     self.greedy = greedy
     self.early_stopping = early_stopping
     self.temperature = temperature
+    self.p_nucleus = p_nucleus
 
   def init_state(self, model, num_samples, *,
                  num_steps=None, eps=1e-5, prefix_tokens=None,
@@ -518,6 +519,9 @@ class ARSampler(Sampler):
                         temperature=self.temperature))
 
     log_probs = _maybe_cast_log_probs(log_p[:, -1], self.use_float64)
+    if not self.greedy and self.p_nucleus < 1.0:
+      log_probs = utils.top_k_top_p_filtering(
+        log_probs, top_p=self.p_nucleus).log_softmax(-1)
     new_tok = _decode_direct_tokens(log_probs, greedy=self.greedy)
 
     x[:, state.token_idx] = new_tok
@@ -1490,7 +1494,8 @@ def get_sampler(config):
       kv_cache=s.use_kv_cache,
       greedy=s.greedy,
       early_stopping=s.early_stopping,
-      temperature=s.temperature)
+      temperature=s.temperature,
+      p_nucleus=s.p_nucleus)
 
   if s.predictor == 'eflm':
     return EFLMSampler(noise_removal=s.noise_removal,
