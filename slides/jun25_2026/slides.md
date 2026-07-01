@@ -60,7 +60,7 @@ hy { color: #7B3FA0; }
 - Data: TinyStories, **475M train / 5M val** (seed 42)
 - Model (DiT, *small*): Width **768**, Depth **12**, Heads **12**
 - Training
-  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256, 1024}**, bf16, EMA 0.9999
+  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256}**, bf16, EMA 0.9999
   - Optimizer: AdamW
     - LR: 3e-4, Weight Decay: 0.0
     - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
@@ -77,14 +77,14 @@ hy { color: #7B3FA0; }
 - Geometries
   - S-FLM
   - E-FLM
-  - H-FLM
+  <!-- - H-FLM -->
 
 ---
 
 ## Naive Geometry Baseline - TinyStories Exp Setup
 
 - Training
-  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256, 1024}**, bf16, EMA 0.9999
+  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256}**, bf16, EMA 0.9999
   - Optimizer: AdamW
     - LR: 3e-4, Weight Decay: 0.0
     - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
@@ -109,7 +109,7 @@ hy { color: #7B3FA0; }
 ## Adv Geometry Baseline - TinyStories Exp Setup
 
 - Training
-  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256, 1024}**, bf16, EMA 0.9999
+  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256}**, bf16, EMA 0.9999
   - Optimizer: AdamW
     - LR: 3e-4, Weight Decay: 0.0
     - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
@@ -133,10 +133,21 @@ hy { color: #7B3FA0; }
 
 ---
 
+## Definition of ``init`` / ``prior_cov`` of H-FLM
+
+Given a target word embedding $z_{T} \in \mathbb{R}^{d}$, a Gaussian noise $\epsilon \in \mathbb{R}^d$ and a timestep $t \in [0, 1], t \in \mathbb{R}$
+
+- $\epsilon \sim \mathcal{N}(0, \text{prior\_cov})$
+- $z_{t} = \text{geodesic}(z_{T}, \epsilon, t)$
+
+The target word embedding is initialized by $\mathcal{N}(0, \text{init}^2)$
+
+---
+
 ## H-FLM Sweep - TinyStories Exp Setup
 
 - Training
-  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256, 1024}**, bf16, EMA 0.9999
+  - Training Steps: **30K**, Batch Size: **512**, Max Seq Len: **{256}**, bf16, EMA 0.9999
   - Optimizer: AdamW
     - LR: 3e-4, Weight Decay: 0.0
     - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
@@ -148,22 +159,288 @@ hy { color: #7B3FA0; }
 
 ---
 
+# TinyStories — Numerical Results
+
+## Metric
+
+- GenPPL
+  - Gold standard: pretrained gpt2-large (↓ better)</small>
+
 ---
+
+## Naive Baselines — Generation Quality
+
+| Model | Valid PPL <small>†</small> | GenPPL ↓ | Entropy |
+|:--|--:|--:|--:|
+| **AR** (greedy) | 3.36 | **6.8** | 4.25 |
+| E-FLM | 1.10 | 34.6 | 3.67 |
+| S-FLM | 1.26 | 35.9 | 3.86 |
+
+- Low GenPPL + low entropy = degenerate collapse (⚠).
+- Valid PPL is **not comparable** across AR (true PPL) vs. flows (a denoising-CE bound).</small>
+
+---
+
+## Adavanced Baselines (LangFlow, S-FLM)
+
+### Still training...
+
+---
+
+## H-FLM Sweep Summary, ``init`` / ``prior_cov``
+
+<style scoped>table { font-size: 0.8em; margin: 0 auto; }</style>
+| Selected for | init / prior_cov | Valid PPL | GenPPL ↓ | Entropy |
+|:--|:--|--:|--:|--:|
+| Best generation | std0.04 / 1.0 | 9.9 | **17.7** | 4.03 |
+| Best balanced | std0.02 / 0.04 | 2.0 | 19.5 | 4.29 |
+| Best Valid PPL | std0.001 / 0.001 | **1.03** | 73 | 3.82 |
+
+- 64 / 132 cells complete. 
+- Tiny `prior_cov` → tight bound but **poor** text; the **mid `prior_cov` (0.04–0.5)** band is the generation sweet spot.
+
+---
+
+## H-FLM Sweep - Valid PPL, (init × prior_cov)
+
+**tightest Valid PPL at small `prior_cov` (left), degrading rightward.**
+
+<style scoped>table { font-size: 0.56em; margin: 0 auto; }</style>
+
+| init \\ pc | 0.001 | 0.01 | 0.02 | 0.04 | 0.1 | 0.3 | 0.5 | 0.8 | 1.0 | 1.5 | 2.0 |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| `ngpt` | 1.04 | 1.34 | 2.17 | 4.33 | 91.5 | 6.67 | 8.67 | 7.98 | 8.48 | 8.81 | 8.77 |
+| 0.001 | <rd>**1.03**</rd> | 1.34 | 2.25 | 8.53 | 3.15 | 13.3 | 7.58 | 4921 | 7.49 | 6.60 | 14.2 |
+| 0.01 | 1.04 | 1.33 | 1.58 | 2.09 | 3.55 | 7.42 | 10.7 | 8.48 | 460 | 8.86 | 8.58 |
+| 0.02 | 1.04 | 1.70 | 1.97 | 2.03 | 3.71 | 6.62 | 7.94 | 11.7 | 7.68 | 7.53 | 16.0 |
+| 0.04 | 1.04 | 1.35 | 2.42 | 13.1 | 9.67 | 6.76 | 13.1 | 8.01 | 9.86 | 9.07 | 8.55 |
+| 0.1 | 1.04 | 1.39 | 1.64 | 3.75 | 4.58 | 11.2 | 7.38 | 12.8 | 9.97 | - | - |
+
+- Rows of ``init`` > 0.3–2.0 are still running.
+
+---
+
+## H-FLM Sweep - GenPPL, (init × prior_cov)
+
+**Generation is best in a mid-`prior_cov` band (≈0.02–0.5); the ≈1 cells (\*) are collapses, not wins.**
+
+<style scoped>table { font-size: 0.56em; margin: 0 auto; }</style>
+
+| init \\ pc | 0.001 | 0.01 | 0.02 | 0.04 | 0.1 | 0.3 | 0.5 | 0.8 | 1.0 | 1.5 | 2.0 |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| `ngpt` | 109 | 23.8 | 159 | 40.3 | <ng>1.0\*</ng> | 27.3 | 20.4 | 32.7 | 44.4 | 31.8 | 35.9 |
+| 0.001 | 73.1 | 24.6 | 38.7 | 120 | 22.6 | 438 | 41.5 | 108 | 39.2 | 53.8 | 46.5 |
+| 0.01 | 109 | 23.8 | 27.5 | 20.1 | 24.1 | 21.1 | 17.9 | 32.5 | <ng>5.5\*</ng> | 31.6 | 45.8 |
+| 0.02 | 112 | <ng>14.4\*</ng> | 21.1 | 19.5 | 19.0 | 23.7 | 29.9 | 22.7 | 37.3 | 70.0 | 54.6 |
+| 0.04 | 102 | 33.7 | 31.7 | <ng>1.0\*</ng> | <ng>1.2\*</ng> | 29.2 | 25.0 | 41.2 | <rd>**17.7**</rd> | 33.9 | 32.7 |
+| 0.1 | 103 | 29.1 | 23.3 | 48.5 | 49.5 | 58.3 | 54.6 | 33.1 | <ng>1.0\*</ng> | · | · |
+
+- <rd>**Bold**</rd> = best non-collapsed (17.7)
+- <ng>**\***</ng> = entropy < 3 → degenerate
+
+---
+
+## H-FLM Sweep - Entropy, (init × prior_cov)
+
+<style scoped>table { font-size: 0.56em; margin: 0 auto; }</style>
+
+| init \\ pc | 0.001 | 0.01 | 0.02 | 0.04 | 0.1 | 0.3 | 0.5 | 0.8 | 1.0 | 1.5 | 2.0 |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| `ngpt` | 3.9 | 3.9 | 3.9 | 3.9 | <ng>0.0\*</ng> | 3.6 | 4.1 | 3.6 | 3.7 | 3.6 | 3.7 |
+| 0.001 | 3.8 | 4.1 | 4.0 | 3.0 | 4.2 | 4.7 | 4.1 | 3.6 | 4.2 | 4.0 | 4.1 |
+| 0.01 | 3.9 | 3.8 | 4.0 | 4.0 | 4.0 | 4.1 | 4.1 | 3.5 | <ng>0.0\*</ng> | 3.8 | 3.5 |
+| 0.02 | 3.9 | <ng>1.8\*</ng> | 4.3 | 4.3 | 4.1 | 3.9 | 3.8 | 4.0 | 3.4 | 4.0 | 3.0 |
+| 0.04 | 3.9 | 3.7 | 4.1 | <ng>0.0\*</ng> | <ng>0.1\*</ng> | 4.0 | 4.1 | 3.8 | <rd>**4.0**</rd> | 3.4 | 3.8 |
+| 0.1 | 3.8 | 3.9 | 4.2 | 3.9 | 4.2 | 3.4 | 4.4 | 3.9 | <ng>0.0\*</ng> | · | · |
+
+- Healthy generation ≈ 3.5–4.4
+- <rd>**Bold**</rd> = Best non-degenerated
+- <ng>\*</ng> = entropy < 3 (collapse)
+
+---
+
+## Conclusion
+
+- Hyperbolic is the bets geometry but requires tuning ``init`` and ``prior_cov``
+- Hyperbolic surpass Euclidean and Sphere, but still far from AR
+
+---
+
+## Next Step
+
+- How to set up a proper ``init`` and ``prior_cov`` for trainable word embedding?
+- I found the distribution of the length of word embeddings differ across H-FLM and other models.
+
+---
+
+---
+
+# Distribution over the Length & Value of Word Embeddings
 
 ![alt text](image-2.png)
 
+- The length of word embeddings of all AR and S-FLM follow normal distribution (no long tail)
+
 ---
 
-## H-FLM pre-trained on TinyStories
+## H-FLM Pre-trained on TinyStories
 
-### Log-scled Y axis
+### Distribution over Length, Log-scled Y axis
 
 ![alt text](image.png)
 
 ---
 
-## H-FLM pre-trained on TinyStories
+## H-FLM Pre-trained on TinyStories
 
-### Linear-scled Y axis
+### Distribution over Length, Linear-scled Y axis
 
 ![alt text](image-1.png)
+
+---
+
+## S-FLM Naive Pre-trained on TinyStories
+
+### Distribution over Length, Log-scled Y axis
+
+![alt text](image-9.png)
+
+---
+
+## S-FLM Naive Pre-trained on TinyStories
+
+### Distribution over Length, Linear-scled Y axis
+
+![alt text](image-10.png)
+
+---
+
+## GPT2 Small Pre-trained on OWT
+
+### Distribution over Length, Log-scled Y axis
+
+![alt text](image-3.png)
+
+---
+
+## GPT2 Small Pre-trained on OWT
+
+### Distribution over Length, Linear-scled Y axis
+
+![alt text](image-4.png)
+
+---
+
+## GPT2 XL Pre-trained on OWT
+
+### Distribution over Length, Log-scled Y axis
+
+![alt text](image-5.png)
+
+---
+
+## GPT2 XL Pre-trained on OWT
+
+### Distribution over Length, Linear-scled Y axis
+
+![alt text](image-6.png)
+
+---
+
+### BERT Base Pre-trained on BooksCorpus + Eng Wiki
+
+### Distribution over Length, Log-scled Y axis
+
+![alt text](image-7.png)
+
+---
+
+### BERT Base Pre-trained on BooksCorpus + Eng Wiki
+
+### Distribution over Length, Linear-scled Y axis
+
+![alt text](image-8.png)
+
+---
+
+# Distribution over the Value of Word Embeddings
+
+---
+
+## H-FLM Pre-trained on TinyStories
+
+### Distribution over Values, Log-scled Y axis
+
+![alt text](image-11.png)
+
+---
+
+## H-FLM Pre-trained on TinyStories
+
+### Distribution over Values, Linear-scled Y axis
+
+![alt text](image-12.png)
+
+---
+
+## S-FLM Naive Pre-trained on TinyStories
+
+### Distribution over Values, Log-scled Y axis
+
+![alt text](image-13.png)
+
+---
+
+## S-FLM Naive Pre-trained on TinyStories
+
+### Distribution over Values, Linear-scled Y axis
+
+![alt text](image-14.png)
+
+---
+
+## GPT2 Small Pre-trained on OWT
+
+### Distribution over Values, Log-scled Y axis
+
+![alt text](image-15.png)
+
+---
+
+## GPT2 Small Pre-trained on OWT
+
+### Distribution over Values, Linear-scled Y axis
+
+![alt text](image-16.png)
+
+---
+
+## GPT2 XL Pre-trained on OWT
+
+### Distribution over Values, Log-scled Y axis
+
+
+
+---
+
+## GPT2 XL Pre-trained on OWT
+
+### Distribution over Values, Linear-scled Y axis
+
+
+
+---
+
+### BERT Base Pre-trained on BooksCorpus + Eng Wiki
+
+### Distribution over Values, Log-scled Y axis
+
+![alt text](image-17.png)
+
+---
+
+### BERT Base Pre-trained on BooksCorpus + Eng Wiki
+
+### Distribution over Values, Linear-scled Y axis
+
+![alt text](image-18.png)
