@@ -53,7 +53,8 @@ SITES = {
         curvatures=['-0.25', '-0.5'],
         # 4 CPU / 16G (vs 8/32): fits the CPU-saturated kuleshov nodes and the
         # mem-squeezed thickstun node; training is GPU-bound so this costs ~nothing
-        slurm=dict(partition='thickstun,desa', exclude='desa-compute-01',
+        partitions=['thickstun,desa'],  # same-cluster comma-list is fine on unicorn
+        slurm=dict(exclude='desa-compute-01',
                    gres='gpu:1', ntasks=1, cpus_per_task=4, mem='16G',
                    time='06:00:00'),
         wandb_offline=False,
@@ -62,12 +63,12 @@ SITES = {
         repo='/home/shengyenc/workspace/research/s-flm',
         envbin='/home/shengyenc/anaconda3/envs/sfm/bin',
         curvatures=['-0.3', '-0.7'],
-        # a100 (112) + h200 (48) are both TinkerCliffs queues (same controller);
-        # 0-pending at the 2026-07-02 check. Preemptable queues widen reach:
-        # ckpt every 5k steps caps a preemption's cost at ~40 min of redone work.
-        slurm=dict(partition='a100_normal_q,h200_normal_q,'
-                             'a100_preemptable_q,h200_preemptable_q',
-                   account='swan_research_dlm',
+        # ARC rejects multi-partition submissions (per-partition QOS), so cells
+        # round-robin across these single queues (fast-starting first; preemption
+        # costs <=~40 min of redone work: ckpt-5k + --requeue + auto-resume).
+        partitions=['h200_preemptable_q', 'a100_preemptable_q',
+                    'h200_normal_q', 'a100_normal_q'],
+        slurm=dict(account='swan_research_dlm',
                    gres='gpu:1', ntasks=1, cpus_per_task=4, mem='32G',
                    time='06:00:00'),
         wandb_offline=True,
@@ -78,10 +79,11 @@ SITES = {
         curvatures=['-1.0', '-1.5'],
         # Falcon has NO a100 queue: L40S-48GB (l40s_*) and A30-24GB (a30_*) are the
         # bf16+flash-attn-capable options (V100/T4 are not) — see Agent.md.
-        # Preemptable queues widen reach; ckpt-5k caps preemption cost (~40 min).
-        slurm=dict(partition='l40s_normal_q,a30_normal_q,'
-                             'l40s_preemptable_q,a30_preemptable_q',
-                   account='swan_research_dlm',
+        # Round-robin single queues (ARC rejects multi-partition; per-partition QOS),
+        # fast-starting first; preemption cost <=~40 min (ckpt-5k + --requeue).
+        partitions=['a30_preemptable_q', 'l40s_preemptable_q',
+                    'a30_normal_q', 'l40s_normal_q'],
+        slurm=dict(account='swan_research_dlm',
                    gres='gpu:1', ntasks=1, cpus_per_task=4, mem='32G',
                    time='06:00:00'),
         wandb_offline=True,
@@ -184,8 +186,9 @@ def main():
             continue
         # --nice on the command line: simple_slurm's '#SBATCH --nice N' directive
         # is rejected by sbatch (--nice takes an optional arg, needs '=' form)
+        part = site['partitions'][n_sub % len(site['partitions'])]
         slurm = Slurm(job_name=jobname, output=f'{logs}/{tag}_%j.log',
-                      **site['slurm'])
+                      partition=part, **site['slurm'])
         jid = slurm.sbatch(job_body(site, k, init, istd, lr, f'{out}/{tag}', diff, seed),
                            sbatch_cmd=f'sbatch --nice={nice} --requeue', verbose=False)
         print(f'  submitted {tag}: job {jid}')
