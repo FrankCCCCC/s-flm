@@ -10,6 +10,7 @@ GAUSS_CURV="${GAUSS_CURV:--1.0}"     # Gaussian curvature, restrict to < 0.0 for
 INIT="${INIT:-hyperbolic}"           # embedding init: hyperbolic / ngpt / random / unit_var / custom
 INIT_STD="${INIT_STD:-null}"         # std for INIT=custom; ignored otherwise
 LR="${LR:-3e-4}"                     # AdamW learning rate
+SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/hflm_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
@@ -24,6 +25,7 @@ python -u -m main \
     model.init="${INIT}" \
     model.init_std="${INIT_STD}" \
     optim.lr="${LR}" \
+    seed="${SEED}" \
     algo=hflm \
     algo.invert_time_convention=false \
     algo.prior_cov=0.25 \
