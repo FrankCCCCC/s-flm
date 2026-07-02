@@ -71,6 +71,10 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## Cluster Environment 
 
+### Job Priority
+
+Use nice to set the job priority dynamically on Slurm.
+
 ### Unicorn Slurm
 
 Single Cornell CoECIS SLURM cluster; `sc3379` and `ch2263` are two accounts on it.
