@@ -15,6 +15,7 @@ TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
 PRIOR_COV="${PRIOR_COV:-0.25}"
 RHO_MAX="${RHO_MAX:-12}"
+GAUSS_CURV="${GAUSS_CURV:--1.0}"    # Gaussian curvature K < 0; must match training
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -26,6 +27,7 @@ MARGS=(
     algo=hflm
     algo.prior_cov=${PRIOR_COV}
     algo.rho_max=${RHO_MAX}
+    algo.gaussian_curvature=${GAUSS_CURV}
     algo.renormalize_weights=False
     noise=log-linear
     sampler=hflm

@@ -7,6 +7,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?set CKPT_PATH to the trained HFLM sudoku checkpoint}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
+GAUSS_CURV="${GAUSS_CURV:--1.0}"     # Gaussian curvature K < 0; must match training
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/sudoku/hflm_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
@@ -28,6 +29,7 @@ python -u -m main \
     algo.invert_time_convention=false \
     algo.prior_cov=0.25 \
     algo.rho_max=12 \
+    algo.gaussian_curvature="${GAUSS_CURV}" \
     noise=log-linear \
     sampler=hflm \
     sampler.noise_removal=greedy \

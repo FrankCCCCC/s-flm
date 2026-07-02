@@ -6,6 +6,7 @@ export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
+GAUSS_CURV="${GAUSS_CURV:--1.0}"     # Gaussian curvature, restrict to < 0.0 for hyperbolic
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/hflm_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
@@ -21,6 +22,7 @@ python -u -m main \
     algo.invert_time_convention=false \
     algo.prior_cov=0.25 \
     algo.rho_max=12 \
+    algo.gaussian_curvature="${GAUSS_CURV}" \
     sampler=hflm \
     noise=log-linear \
     loader.global_batch_size=256 \

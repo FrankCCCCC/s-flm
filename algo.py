@@ -582,6 +582,9 @@ class HFLM(trainer_base.Diffusion):
     self.invert_time_convention = config.algo.invert_time_convention
     self.prior_cov = config.algo.prior_cov
     self.rho_max = config.algo.rho_max
+    # getattr default keeps checkpoints/configs from before the curvature knob
+    # loading with the standard unit hyperboloid (K = -1).
+    self.gaussian_curvature = config.algo.gaussian_curvature
     self._validate_configuration()
 
   def _validate_configuration(self):
@@ -592,6 +595,9 @@ class HFLM(trainer_base.Diffusion):
     if self.prior_cov <= 0 or self.rho_max <= 0:
       raise ValueError('HFLM requires algo.prior_cov > 0 and '
                        'algo.rho_max > 0.')
+    if self.gaussian_curvature >= 0:
+      raise ValueError('HFLM requires algo.gaussian_curvature < 0 '
+                       '(hyperbolic space).')
     backbone_type = self.config.model.type
     if backbone_type == 'hyperbolic-arch':
       raise ValueError('hyperbolic-arch justnorms the radial away; '
@@ -625,7 +631,8 @@ class HFLM(trainer_base.Diffusion):
 
     if use_pure_noise:
       x_t = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
-        noisy_rhos_c.squeeze(-1), e_noisy_thetas)
+        noisy_rhos_c.squeeze(-1), e_noisy_thetas,
+        gaussian_curvature=self.gaussian_curvature)
     else:
       slerp_t = alpha_t if self.invert_time_convention else 1 - alpha_t
       x_t = self._hyperbolic_geodesic(
@@ -637,7 +644,8 @@ class HFLM(trainer_base.Diffusion):
 
     if valid_tokens is not None:
       e_clean_cart = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
-        clean_rhos_c.squeeze(-1), e_clean_thetas)
+        clean_rhos_c.squeeze(-1), e_clean_thetas,
+        gaussian_curvature=self.gaussian_curvature)
       x_t = torch.where(valid_tokens.bool().unsqueeze(-1),
                         x_t, e_clean_cart)
     return x_t
@@ -687,6 +695,7 @@ class HFLM(trainer_base.Diffusion):
         geo_t = geo_t.unsqueeze(-1)
     out = HyperbolicHeatKernel.geodesic(
       t=geo_t,
+      gaussian_curvature=self.gaussian_curvature,
       src_radial=noisy_rhos.squeeze(-1),
       src_angular=noisy_thetas,
       dest_radial=clean_rhos.squeeze(-1),

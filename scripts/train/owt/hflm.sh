@@ -16,6 +16,7 @@ DEVICES="${DEVICES:-8}"
 MAX_STEPS="${MAX_STEPS:-1000000}"
 GLOBAL_BS="${GLOBAL_BS:-512}"
 PER_GPU_BS="${PER_GPU_BS:-32}"
+GAUSS_CURV="${GAUSS_CURV:--1.0}"    # Gaussian curvature, restrict to < 0.0 for hyperbolic
 
 cd "${REPO_ROOT}"
 
@@ -26,6 +27,7 @@ python -u -m main \
     algo=hflm \
     algo.prior_cov=0.25 \
     algo.rho_max=12 \
+    algo.gaussian_curvature=${GAUSS_CURV} \
     algo.renormalize_weights=False \
     algo.invert_time_convention=false \
     sampler=hflm \

@@ -931,7 +931,7 @@ class HFLMSampler(Sampler):
                top_k,
                top_k_velocity,
                invert_time_convention,
-               prior_cov, rho_max):
+               prior_cov, rho_max, gaussian_curvature=-1.0):
     self.noise_removal = noise_removal
     self.velocity = velocity
     self.use_float64 = use_float64
@@ -944,6 +944,7 @@ class HFLMSampler(Sampler):
     self.invert_time_convention = invert_time_convention
     self.prior_cov = prior_cov
     self.rho_max = rho_max
+    self.gaussian_curvature = gaussian_curvature
 
   def _rho_clamp(self, rhos):
     return self.rho_max * torch.tanh(rhos / self.rho_max)
@@ -958,14 +959,16 @@ class HFLMSampler(Sampler):
       mean=0.0, cov=self.prior_cov,
       dtype=torch.float32, device=model.device)
     rhos_c = self._rho_clamp(rhos)
-    xt = GeoUtils.hyperbolic_polar_to_poincare_cartesian(rhos_c, u)
+    xt = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+      rhos_c, u, gaussian_curvature=self.gaussian_curvature)
 
     prefix_embeds = None
     if prefix_tokens is not None:
       p_rhos, p_thetas = model.backbone.get_hyperbolic_polar_embeddings(
         prefix_tokens)
       prefix_embeds = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
-        self._rho_clamp(p_rhos).squeeze(-1), p_thetas)
+        self._rho_clamp(p_rhos).squeeze(-1), p_thetas,
+        gaussian_curvature=self.gaussian_curvature)
       self._project_prefix(xt, prefix_embeds, prefix_lengths)
       start_idx = int(prefix_lengths.min())
     else:
@@ -1058,6 +1061,7 @@ class HFLMSampler(Sampler):
 
     x_new = HyperbolicHeatKernel.geodesic(
       t=dt,
+      gaussian_curvature=self.gaussian_curvature,
       src_cartesian=x,
       cartesian_model=Geometry.POINCARE,
       dest_radial=dest_rhos_c.squeeze(-1),
@@ -1524,7 +1528,8 @@ def get_sampler(config):
       p_nucleus=s.p_nucleus, top_k=s.top_k,
       top_k_velocity=s.top_k_velocity,
       invert_time_convention=config.algo.invert_time_convention,
-      prior_cov=config.algo.prior_cov, rho_max=config.algo.rho_max)
+      prior_cov=config.algo.prior_cov, rho_max=config.algo.rho_max,
+      gaussian_curvature=config.algo.gaussian_curvature)
 
   if s.predictor == 'flm_euler':
     return FLMEulerSampler(

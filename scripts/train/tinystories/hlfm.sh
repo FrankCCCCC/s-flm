@@ -17,6 +17,7 @@ INIT="${INIT:-ngpt}"            # ngpt | custom
 INIT_STD="${INIT_STD:-}"        # required only when INIT=custom
 PRIOR_COV="${PRIOR_COV:-0.25}"
 RHO_MAX="${RHO_MAX:-12}"
+GAUSS_CURV="${GAUSS_CURV:--1.0}"    # Gaussian curvature, restrict to < 0.0 for hyperbolic
 if [ "${INIT}" = "custom" ]; then INIT_ARGS="model.init=custom model.init_std=${INIT_STD}"; else INIT_ARGS="model.init=${INIT}"; fi
 
 cd "${REPO_ROOT}"
@@ -29,6 +30,7 @@ python -u -m main \
     algo=hflm \
     algo.prior_cov=${PRIOR_COV} \
     algo.rho_max=${RHO_MAX} \
+    algo.gaussian_curvature=${GAUSS_CURV} \
     algo.renormalize_weights=False \
     algo.invert_time_convention=false \
     sampler=hflm \
