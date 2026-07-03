@@ -122,6 +122,9 @@ def job_body(site, k, init, init_std, lr, tdir, difficulty='medium', seed='1'):
         export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
         export PATH={site['envbin']}:$PATH
         {offline}cd {site['repo']}
+        if [ -f {tdir}/eval/results.json ]; then
+            echo "[$(date)] cell already completed elsewhere -> no-op"; exit 0
+        fi
         echo "[$(date)] TRAIN on $(hostname)"
         DIFFICULTY={difficulty} GAUSS_CURV={k} INIT={init} INIT_STD={init_std} LR={lr} \\
             SEED={seed} OUTPUT_DIR={tdir} DEVICES=1 \\
