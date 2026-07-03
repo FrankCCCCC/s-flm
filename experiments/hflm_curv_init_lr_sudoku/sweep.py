@@ -134,6 +134,11 @@ def job_body(site, k, init, init_std, lr, tdir, difficulty='medium', seed='1'):
             SEED={seed} CKPT_PATH={tdir}/checkpoints/last.ckpt OUTPUT_DIR={tdir}/eval \\
             DEVICES=1 TOPK_VELOCITY=-1 \\
             bash scripts/sample/sudoku/hflm.sh
+        # checkpoints are transient bulk (~1.8G/cell): once the eval deliverable
+        # exists, drop them to keep /home (ARC) and /share (unicorn) within quota
+        if [ -f {tdir}/eval/results.json ]; then
+            rm -rf {tdir}/checkpoints && echo "[$(date)] checkpoints cleaned"
+        fi
         echo "[$(date)] DONE"
         ''')
 
