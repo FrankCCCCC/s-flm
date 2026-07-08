@@ -16,12 +16,12 @@ import argparse, glob, itertools, json, os, re, sys, types
 from typing import List
 
 import hydra, matplotlib, numpy as np, torch
-import matplotlib.pyplot as plt
-import algo, dataloader, main as main_mod  # main registers omegaconf resolvers
-
 matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, REPO)
+sys.path.insert(0, REPO)  # repo-root imports below need this bootstrap first
+import algo, dataloader, main as main_mod  # main registers omegaconf resolvers
 
 ALGO_CLS = {'eflm': algo.EFLM, 'sfm': algo.SFM, 'hflm': algo.HFLM}
 MODEL_ARGS = {  # mirrors scripts/sample/tinystories/eval.sh MARGS
