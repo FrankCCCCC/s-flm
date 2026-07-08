@@ -1393,14 +1393,48 @@ class LangFlowState(BaseState):
   prefix_tokens: torch.Tensor = None   # (B, P) int64, or None
   prefix_lengths: torch.Tensor = None  # (B,) int64, or None
 
+@torch.compile
+def langflow_compute_zhat(x, E, log_p, mode, eps):
+  probs_window = log_p.exp()
+  if mode == 'exact':
+    # Euclidean log-map is plain subtraction: v = sum_k p_k (e_k - x) = p @ E - x.
+    zhat = 'blv,vd->bld' if E.ndim == 2 else 'blk,blkd->bld'
+    return torch.einsum(ein, p, E)
+  elif mode == 'sample':
+    target_idx = sample_categorical(p)
+    if E.ndim == 2:  # [V, d]
+      target = E[target_idx]
+    else:            # [B, L, k, d]
+      B, L = target_idx.shape
+      target = E[
+        torch.arange(B, device=E.device)[:, None],
+        torch.arange(L, device=E.device)[None, :],
+        target_idx]
+    return target
+  else:
+    raise ValueError(f'Unknown velocity mode: {mode}')
 
 class LangFlowSampler(Sampler):
-  """Euler-on-gamma sampler (LangFlow Algorithm 2), always-on self-conditioning."""
+  """Euler-on-gamma sampler (LangFlow Algorithm 2), always-on self-conditioning.
 
-  def __init__(self, temperature, p_nucleus, top_k):
+  Decode knobs mirror SFMSampler so every model decodes identically in the fair
+  comparison. For LangFlow the "velocity" target IS the predicted-clean embedding
+  zhat = E^T xhat_theta that enters the affine Euler-on-gamma update (no geodesic
+  step): velocity='exact' -> sum_k p_k e_k (paper Alg.2); velocity='sample' ->
+  sampled-token embedding; top_k_velocity=k>0 restricts zhat to the top-k tokens
+  (k=1 => argmax endpoint, the analog of S-FLM top_k_velocity=1); -1 => full vocab.
+  noise_removal='greedy' -> final-step argmax (Alg.2); 'ancestral' -> sample.
+  Embeddings are RAW (Option A), never sphere-normalized. Defaults (exact / -1 /
+  greedy) reproduce paper Algorithm 2 exactly."""
+
+  def __init__(self, noise_removal, velocity, temperature, p_nucleus, top_k,
+               top_k_velocity):
+    self.noise_removal = noise_removal
+    self.velocity = velocity
     self.temperature = temperature
     self.p_nucleus = p_nucleus
     self.top_k = top_k
+    self.top_k_velocity = top_k_velocity
 
   def init_state(self, model, num_samples, *,
                  num_steps=None, eps=1e-5, prefix_tokens=None,
@@ -1432,6 +1466,28 @@ class LangFlowSampler(Sampler):
                          prefix_tokens=prefix_tokens,
                          prefix_lengths=prefix_lengths)
 
+  def _last_step_decode(self, state, log_p):
+    if self.noise_removal == 'greedy':
+      tokens = log_p.argmax(dim=-1)
+    elif self.noise_removal == 'ancestral':
+      tokens = sample_categorical(log_p.exp())
+    else:
+      raise ValueError(self.noise_removal)
+    if state.prefix_tokens is not None:
+      self._project_prefix(tokens, state.prefix_tokens,
+                           state.prefix_lengths)
+    state.xt = tokens  # replace continuous [B, L, d] with int [B, L]
+    state.done = True
+    return state
+
+  def _select_topk(self, log_p, E, k):
+    log_p_k, top_idxs = torch.topk(log_p, k, dim=-1)
+    return torch.log_softmax(log_p_k, dim=-1), F.embedding(top_idxs, E)
+
+  def _compute_zhat(self, x, E, log_p):
+    return langflow_compute_zhat(
+      x, E, log_p, mode=self.velocity, eps=self.eps)
+
   def step(self, model, state):
     import algo
     N = len(state.gammas) - 1
@@ -1446,40 +1502,48 @@ class LangFlowSampler(Sampler):
       sigma=sigma_k.reshape(1, 1).expand(B, 1),
       r=1.0, temperature=self.temperature)
     log_p = model.forward(x0=None, xt=state.xt, sigma=gamma_k, context=ctx)
+    if self.use_float64:
+      log_p = log_p.to(torch.float64)
     state.nfe += 1
 
     if self.p_nucleus != 1.0 or self.top_k != -1:
-      log_p = utils.top_k_top_p_filtering(
-        log_p, top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
+      log_p = utils.top_k_top_p_filtering(log_p, 
+        top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
 
     if is_last:
-      tokens = log_p.argmax(-1)
-      if state.prefix_tokens is not None:
-        self._project_prefix(tokens, state.prefix_tokens,
-                             state.prefix_lengths)
-      state.xt = tokens
-      state.done = True
-      return state
+      return self._last_step_decode(state, log_p)
+    # Arguments to compute the velocity field:
+    log_p_window = log_p[:, state.start_idx:]  # [B, L, V]
+    E = model.backbone.sphere_embed.weight.detach()
+    x = state.xt[:, state.start_idx:].to(E)  # [B, L, d]
 
-    E = model.backbone.sphere_embed.weight
-    zhat = torch.einsum('blv,vd->bld', log_p.exp(), E)
-    state.z_sc = zhat
+    # Self-conditioning carry stays the SOFT predicted-clean (probs_window @ E), matching
+    # training (algo.LangFlow._self_cond_pass), regardless of the decode policy below.
+    if self.top_k_velocity > 0:
+      log_p_v, E = self._select_topk(log_p_window, E, self.top_k_velocity)
+    else:
+      log_p_v = log_p_window
+
+    zhat = self._compute_zhat(x, E, log_p_v)
+    
 
     a_next, s_next = state.alphas[k + 1], state.sigmas[k + 1]
-    state.xt = s_next * (state.xt / sigma_k
+    state.xt[:, state.start_idx:] = s_next * (x / sigma_k
                          + (a_next / s_next - alpha_k / sigma_k) * zhat)
     self._project_prefix(state.xt, state.prefix_embeds,
                          state.prefix_lengths)
     state.step_idx += 1
     return state
 
-
 def get_sampler(config):
   s = config.sampler
 
   if s.predictor == 'langflow':
-    return LangFlowSampler(temperature=s.temperature,
-                           p_nucleus=s.p_nucleus, top_k=s.top_k)
+    return LangFlowSampler(noise_removal=s.noise_removal,
+                           velocity=s.velocity,
+                           temperature=s.temperature,
+                           p_nucleus=s.p_nucleus, top_k=s.top_k,
+                           top_k_velocity=s.top_k_velocity)
 
   if s.predictor == 'ancestral':
     return AncestralSampler(
