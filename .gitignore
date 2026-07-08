@@ -176,10 +176,15 @@ data_cache/
 data_cache
 data_cache_hard/
 data_cache_hard
+outputs
+outputs/
+papers
+papers/
+eval_runs
+eval_runs/
 checkpoints/
 multirun/
 .hydra/
-papers/
 .nfs*
 *.err
 *.out
