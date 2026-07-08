@@ -99,7 +99,7 @@ hy { color: #7B3FA0; }
 
 - Data: Sudoku, **48k train / 2k val** per difficulty (seed {1, 2, 3}) · clues: easy 40 / med 35 / hard 30
 - Model (DiT, *tiny*): Width **512**, Depth **8**, Heads **8** (~28.6M)
-- Algo: {S-FLM naive, S-FLM + trunc, S-FLM + trunc + adaptive, E-FLM Naive, LangFlow + ada sched, LangFlow + ada sched + SC}
+- Algo: {AR, S-FLM naive, S-FLM + trunc, S-FLM + trunc + adaptive, E-FLM Naive, LangFlow + ada sched, LangFlow + ada sched + SC}
 
 ---
 
