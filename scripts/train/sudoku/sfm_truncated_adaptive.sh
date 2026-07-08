@@ -9,6 +9,7 @@ DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/sfm_truncated_adaptive_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
+SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
 
 GLOBAL_BS=256
 BUF_SIZE=$((50 * GLOBAL_BS))
@@ -19,6 +20,7 @@ python -u -m main \
     data=sudoku \
     data.cache_dir="${CACHE_DIR}" \
     data.difficulty="${DIFFICULTY}" \
+    seed="${SEED}" \
     model=tiny-sphere-dit \
     algo=sfm \
     algo.invert_time_convention=false \

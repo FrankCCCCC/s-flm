@@ -19,6 +19,7 @@ VARIANT="${VARIANT:-full}"            # naive / sc / ada_sched / full
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/langflow_${VARIANT}_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
+SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
 MAX_STEPS="${MAX_STEPS:-20_000}"
 CKPT_EVERY="${CKPT_EVERY:-5_000}"
 
@@ -36,6 +37,7 @@ python -u -m main \
     data=sudoku \
     data.cache_dir="${CACHE_DIR}" \
     data.difficulty="${DIFFICULTY}" \
+    seed="${SEED}" \
     strategy=single-device \
     model=tiny-sphere-dit \
     model.init=unit_var \
