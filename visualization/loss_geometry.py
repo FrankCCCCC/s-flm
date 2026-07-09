@@ -12,25 +12,22 @@ t=1 pure noise, so curves read left(clean) -> right(noise), like the paper.
 Writes <out>.json (cached curves), <out>.png (linear y), <out>_log.png (log y).
 GPU forward passes -> run on a compute node (visualization/loss_geometry.sbatch).
 """
-import argparse, glob, itertools, json, os, re, sys, types
+import argparse, glob, itertools, json, math, os, sys, types
 from typing import List
 
-import hydra, matplotlib, numpy as np, torch
+import matplotlib, numpy as np, torch
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from omegaconf import OmegaConf
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)  # repo-root imports below need this bootstrap first
 import algo, dataloader, main as main_mod  # main registers omegaconf resolvers
 
-ALGO_CLS = {'eflm': algo.EFLM, 'sfm': algo.SFM, 'hflm': algo.HFLM}
-MODEL_ARGS = {  # mirrors scripts/sample/tinystories/eval.sh MARGS
-  'eflm': ['model=small-sphere-dit', 'model.init=ngpt', 'algo=eflm'],
-  'sfm':  ['model=small-sphere-dit', 'model.init=ngpt', 'algo=sfm'],
-  'hflm': ['model=small-hyperbolic-dit', 'algo=hflm', 'algo.rho_max=12'],
-}
-# hflm sweep run dirs encode (init, prior_cov): std{init}_pc{pc} or ngpt_pc{pc}
-SWEEP_RE = re.compile(r'^(?:std(?P<init>[\d.]+)|(?P<ngpt>ngpt))_pc(?P<pc>[\d.]+)$')
+# Dispatch on config.algo.name (same mapping main.main() uses).
+ALGO_BY_NAME = {'ar': algo.AR, 'mdlm': algo.MDLM, 'duo_base': algo.DUO_BASE,
+                'sfm': algo.SFM, 'eflm': algo.EFLM, 'langflow': algo.LangFlow,
+                'hflm': algo.HFLM, 'flm': algo.FLM, 'candi': algo.CANDI}
 
 B: int = 1_000_000_000
 M: int = 1_000_000
@@ -45,16 +42,50 @@ def checkpoint_training_step2tag(step: int) -> str:
   return str(step)
 
 
-def _run_overrides(run_name: str):
-  """Model type + hydra overrides, derived from the run dir name."""
-  m = SWEEP_RE.match(run_name)
-  if m:
-    init_args = (['model.init=ngpt'] if m['ngpt'] else
-                 ['model.init=custom', f'model.init_std={m["init"]}'])
-    return 'hflm', MODEL_ARGS['hflm'] + init_args + [f'algo.prior_cov={m["pc"]}']
-  if run_name in MODEL_ARGS:
-    return run_name, MODEL_ARGS[run_name]
-  raise ValueError(f'cannot infer model config from run dir name: {run_name}')
+def _load_config(run_dir: str, ckpt: str, args):
+  """Each run's exact training config (.hydra/config.yaml) + eval overrides.
+
+  Loading the real config is what makes strict checkpoint loading work for the
+  adaptive-spline / truncated / Gumbel-scheduler runs (their noise state lives
+  in the checkpoint and must have a matching module to load into).
+  """
+  cfg = OmegaConf.load(os.path.join(run_dir, '.hydra', 'config.yaml'))
+  OmegaConf.set_struct(cfg, False)
+  cfg.eval.checkpoint_path = ckpt
+  cfg.eval.strict_loading = True
+  cfg.data.cache_dir = args.cache_dir
+  cfg.trainer.devices, cfg.trainer.num_nodes = 1, 1
+  cfg.trainer.accumulate_grad_batches = 1
+  cfg.loader.num_workers = 4
+  for k in ('global_batch_size', 'eval_global_batch_size',
+            'batch_size', 'eval_batch_size'):
+    cfg.loader[k] = args.batch_size
+  return cfg
+
+
+def _pin_time(model, cfg, t, step):
+  """Make the algo evaluate at a single fixed flow-time t (its own schedule).
+
+  SFM/EFLM/HFLM: pin `_sample_t`; the restored noise schedule maps t->alpha_t.
+  LangFlow: it draws gamma=logNSR (not t), so pin `sample_gamma` to the run's
+  own Gumbel quantile gamma(t)=P_mu - P_beta*log(-log t) (in-distribution).
+  """
+  if cfg.algo.name == 'langflow':
+    ns = model.noise
+    tt = min(max(float(t), ns.q_clip), 1 - ns.q_clip)
+    gamma = (ns.P_mu - ns.P_beta * math.log(-math.log(tt))).item()
+    model.noise.sample_gamma = (
+      lambda n, device, antithetic=True, _g=gamma:
+        torch.full((n,), _g, device=device))
+    # Plaid logit-bias ramp uses global_step (0 without a trainer) -> pin to the
+    # checkpoint's real step so r matches training (all our steps >= warmup).
+    w = float(cfg.algo.get('logit_bias_warmup_steps', 0) or 0)
+    r = 1.0 if w <= 0 else min(1.0, step / w)
+    model._logit_bias_r = types.MethodType(lambda self, _r=r: _r, model)
+  else:
+    model._sample_t = types.MethodType(
+      lambda self, n, accum, _t=float(t):
+        torch.full((n,), _t, device=self.device), model)
 
 
 @torch.no_grad()
@@ -62,38 +93,23 @@ def _loss_curve(run_dir: str, step: int, t_grid: np.ndarray, args):
   """L(t) = token-mean denoising CE on val batches, at each fixed t."""
   ckpts = glob.glob(os.path.join(run_dir, 'checkpoints', f'*-{step}.ckpt'))
   assert ckpts, f'no *-{step}.ckpt under {run_dir}/checkpoints'
-  model_type, run_args = _run_overrides(os.path.basename(run_dir))
-  print(f'[{model_type} step={step}] {ckpts[0]}', flush=True)
-  with hydra.initialize_config_dir(config_dir=os.path.join(REPO, 'configs'),
-                                   version_base=None):
-    config = hydra.compose('config', overrides=run_args + [
-      'data=tinystories', f'data.cache_dir={args.cache_dir}',
-      f'model.length={args.length}', 'noise=log-linear',
-      'algo.invert_time_convention=false', 'algo.renormalize_weights=False',
-      'trainer.devices=1', 'trainer.accumulate_grad_batches=1',
-      f'loader.global_batch_size={args.batch_size}',
-      f'loader.eval_global_batch_size={args.batch_size}',
-      f'loader.batch_size={args.batch_size}',
-      f'loader.eval_batch_size={args.batch_size}', 'loader.num_workers=4',
-      f'eval.checkpoint_path={sorted(ckpts)[0]}'])
+  cfg = _load_config(run_dir, sorted(ckpts)[0], args)
+  print(f'[{cfg.algo.name} step={step}] {ckpts[0]}', flush=True)
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-  tokenizer = dataloader.get_tokenizer(config)
+  tokenizer = dataloader.get_tokenizer(cfg)
   model = main_mod._load_from_checkpoint(
-    ALGO_CLS[model_type], config, tokenizer).to(device).eval()
+    ALGO_BY_NAME[cfg.algo.name], cfg, tokenizer).to(device).eval()
   if model.ema:
     model.ema.move_shadow_params_to_device(device)
   model._eval_mode()  # swap in EMA weights, as trainer.validate does
   _, valid_dl = dataloader.get_dataloaders(
-    config, tokenizer, skip_train=True, valid_seed=config.seed)
+    cfg, tokenizer, skip_train=True, valid_seed=cfg.seed)
   batches = [{k: v.to(device) for k, v in b.items()}
              for b in itertools.islice(iter(valid_dl), args.num_batches)]
   curve = []
   for t in t_grid:
-    # Pin t: _loss -> nll -> self._sample_t; everything else is the training loss.
-    model._sample_t = types.MethodType(
-      lambda self, n, accum, _t=float(t):
-        torch.full((n,), _t, device=self.device), model)
-    torch.manual_seed(config.seed)  # same prior-noise draws at every t/ckpt
+    _pin_time(model, cfg, t, step)  # fixed t; rest is the algo's own _loss
+    torch.manual_seed(cfg.seed)  # same prior-noise draws at every t/ckpt
     out = [model._loss(b['input_ids'], b['attention_mask']) for b in batches]
     curve.append(sum(o.nlls.item() for o in out)
                  / sum(o.num_tokens.item() for o in out))
