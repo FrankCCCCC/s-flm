@@ -108,27 +108,85 @@ maps to physical corruption depends on each run's schedule:
 Each curve is valid *in-distribution* for its own model; the point-by-point
 overlay is only apples-to-apples within the log-linear group.
 
-## Sudoku (hard, seed=1) — pending
+## Sudoku (hard, seed=1)
 
-Same tool, applied to `outputs/hflm_curv_init_lr_sudoku` (hard, seed=1) for
-s-flm, s-flm+ada, s-flm+ada+trunc, s-fm+trunc, eflm, langflow+ada,
-langflow+ada+sc. **Blocked on checkpoints** — the original runs retained no
-checkpoints, so these are being **re-trained** (`bl_d-hard_a-*_rs1` jobs). Figures
-will go in [`sudoku_hard/`](sudoku_hard/) once checkpoints at 5K/10K/15K/20K exist.
-The tool is data-agnostic (reads each run's `.hydra/config.yaml`), so no code
-change is needed.
+Same tool applied to the re-trained hard/seed=1 baselines in
+`s-flm/outputs/hflm_curv_init_lr_sudoku/bl_d-hard_a-*_rs1` (non-dev1 tree,
+`claude/curv` branch). Figures in [`sudoku_hard/`](sudoku_hard/); checkpoints at
+5K/10K/15K/20K (`max_steps=20000`).
+
+**6 of the 7 requested** — `s-flm + ada` (pure adaptive, no truncation) was not
+re-trained, so it's omitted. Runs drawn: `sfm`, `sfm_trunc`, `sfm_trunc_ada`
+(= s-flm+ada+trunc), `eflm`, `langflow_ada`, `langflow_full` (= langflow+ada+sc).
+
+> Code provenance: the checkpoints were trained on `claude/curv`; the only
+> `algo.py` diff vs `main` is inside **HFLM** (the `gaussian_curvature` knob).
+> SFM/EFLM/LangFlow classes are byte-identical, so loading with the dev1 tool is
+> exact for all 6 runs (none is HFLM).
+
+### The Sudoku task is *conditional* — read L(t) differently
+
+Each example is `[BOS] puzzle(89) [BOS] solution(89)` (180 tokens); **loss is
+computed only on the solution cells, with the puzzle given as a fixed prefix**
+(`dataloader.py:285,328`). Consequences for the geometry:
+
+- There is **no unigram-entropy ceiling** here. At `t=1` the solution cells are
+  pure noise, but the puzzle is still visible, so `L(1)` = the model's residual
+  **solve-from-clues error** per solution token — not the marginal entropy.
+- `L(1)` should *decrease with training* as the solver improves — and it does
+  (e.g. sfm 0.395→0.287 over 5K→20K). That, not a fixed ceiling, is the validity
+  check for these curves.
+- With any signal left on the solution cells (`t < ~0.75`) completion is trivial,
+  so loss sits at ≈0; **all the structure is in the `t→1` region.** The curves are
+  much flatter/lower than TinyStories — the log-Y figures are the readable ones.
+
+### Per-run geometry (nats; L(1) = solve loss at pure noise)
+
+| Run | L(1): 5K → 20K | Behavior |
+|---|---|---|
+| `sfm` | 0.395 → 0.287 | clean, monotonic improvement; action only at `t→1` |
+| `sfm_trunc` | 0.297 → 0.238 | small rise from `t≈0.75` (truncation caps solution-cell signal); monotonic |
+| `sfm_trunc_ada` | 0.236 → **0.424** | **non-monotonic / unstable** — degrades after 10K, worst at 20K; rise from `t≈0.5` |
+| `eflm` | 0.330 → 0.265 | clean, monotonic; signal only at `t→1` |
+| `langflow_ada` | 0.490 → 0.294 | improves overall, but a **mid-t bump at `t≈0.75` emerges by 20K** (0.147) |
+| `langflow_full` | 0.478 → 0.266 | same as langflow_ada; self-conditioning barely changes it |
+
+### Cross-run observations (Sudoku)
+
+1. **`sfm`, `eflm`, `sfm_trunc` are stable** — L(1) falls monotonically; the model
+   steadily gets better at solving from clues.
+2. **`sfm_trunc_ada` is unstable** — L(1) rises after 10K and the loss spreads to
+   lower t. Same adaptive+truncation instability seen on TinyStories.
+3. **LangFlow develops a late `t≈0.75` bump** (both ada and full) that isn't
+   present early in training — the trainable Gumbel schedule reallocates mass as
+   it learns (nominal-t remap caveat applies). **Self-conditioning (`_full` vs
+   `_ada`) makes essentially no difference**, echoing the TinyStories result.
+4. Every Sudoku curve is flat-≈0 until `t→1`, mirroring EFLM's "naive geometry"
+   on TinyStories — but here it's intrinsic to the conditional task, not a
+   pathology.
 
 ## Reproduce
 
 ```bash
-# one run, steps mode (per-checkpoint curves); writes linear + log-Y + .json
+# TinyStories: one run, steps mode (per-checkpoint curves); linear + log-Y + .json
 sbatch visualization/loss_geometry.sbatch \
   --mode steps \
   --project outputs/adv_geo_tinystories_s256 \
   --run sfm_ada_lr1e-3 \
   --steps 5000 20000 30000 \
   --out experiments/loss_geometry_vis/tinystories/sfm_ada_lr1e-3
+
+# Sudoku: checkpoints live in the non-dev1 tree; --project is absolute, steps 5-20K
+sbatch visualization/loss_geometry.sbatch \
+  --mode steps \
+  --project /share/thickstun/sychou/workspace/research/s-flm/outputs/hflm_curv_init_lr_sudoku \
+  --run bl_d-hard_a-sfm_rs1 \
+  --steps 5000 10000 15000 20000 \
+  --out experiments/loss_geometry_vis/sudoku_hard/sfm
 ```
 
 GPU forward passes → always run on a compute node via
-`visualization/loss_geometry.sbatch` (never the login node).
+`visualization/loss_geometry.sbatch` (never the login node). If desa/thickstun are
+saturated, move a pending job to the shared partition without cancelling:
+`scontrol update jobid=<id> Partition=gpu Features=gpu-high` (gpu-high = a6000/6000ada
+class, 48 GB, sm_86+ — safe for the cu128 build).
