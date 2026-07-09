@@ -75,6 +75,10 @@ Make sure the codebase is easy-understanding, canonical, and concise.
 
 ## Cluster Environment 
 
+### Slurm Usage Guide
+
+1. Use ``nice`` to control the priority
+
 ### Unicorn Slurm
 
 Single Cornell CoECIS SLURM cluster; `sc3379` and `ch2263` are two accounts on it.
@@ -230,11 +234,10 @@ Refer to ``scripts/sample/sudoku/hflm.sh`` (and ``scripts/sample/tinystories/*.s
 
 ### Sweep Script
 
-Under ``experiments/{project_name}``
-
-One experiment project script for one project
-
-Use python and ``simple_slurm`` to submit jobs to slurm
+1. Under ``experiments/{project_name}``
+2. One experiment project script for one project
+3. Use python and ``simple_slurm`` to submit jobs to slurm
+4. Don't assign ``nice`` in the sweep script. The sweep script only submit the jobs
 
 **Orchestration only** — the sweep CALLS the train + sample scripts; it never inlines
 ``python -m main``. It builds the parameter grid, submits one SLURM job per cell (train
