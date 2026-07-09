@@ -181,9 +181,55 @@ The target word embedding is initialized by $\mathcal{N}(0, \text{init}^2)$
 
 ---
 
-## Adavanced Baselines (LangFlow, S-FLM)
+## Adavanced Baselines - GenPPL (LangFlow, S-FLM)
 
-### Still training...
+<style scoped>table { font-size: 0.62em; margin: 0 auto; }</style>
+
+GenPPL ↓ &nbsp;<small>(rows = variant, cols = LR)</small>
+
+| variant | 5e-5 | 1e-4 | 3e-4 | 1e-3 | 5e-3 |
+|:--|--:|--:|--:|--:|--:|
+| sfm_ada | 35.6 | 29.9 | 21.9 | 20.2 | 347 |
+| sfm_trunc | 22.8 | 18.6 | 16.4 | 15.3 | 12.9 |
+| sfm_ada_trunc | 20.5 | 16.3 | 14.4 | 12.3 | <rd>**11.0**</rd> |
+| lf_ada | 42.6 | 31.2 | 35.0 | 20.7 | <ng>1.1\*</ng> |
+| lf_ada_sc | 43.0 | 44.0 | 17.6 | 18.4 | 766 |
+
+- <rd>**sfm_ada_trunc**</rd> wins (GenPPL 11.0); self-cond helps LangFlow (20.7 → 17.6)
+- Without truncation, LR 5e-3 breaks: <ng>collapse\*</ng> / divergence (347, 766)
+
+---
+
+## Adavanced Baselines - Entropy (LangFlow, S-FLM)
+
+<style scoped>table { font-size: 0.62em; margin: 0 auto; }</style>
+
+Sample entropy &nbsp;<small>(diversity check for GenPPL; < 3.0 ⇒ degenerate collapse)</small>
+
+| variant | 5e-5 | 1e-4 | 3e-4 | 1e-3 | 5e-3 |
+|:--|--:|--:|--:|--:|--:|
+| sfm_ada | 3.80 | 3.86 | 3.87 | 3.92 | 4.18 |
+| sfm_trunc | 3.87 | 3.92 | 3.91 | 3.96 | 3.99 |
+| sfm_ada_trunc | 3.90 | 3.90 | 3.94 | 3.94 | 3.90 |
+| lf_ada | 3.44 | 3.53 | 3.44 | 3.68 | <ng>0.00\*</ng> |
+| lf_ada_sc | 3.37 | 3.36 | 3.33 | 3.40 | 3.55 |
+
+- All S-FLM variants hold a healthy 3.80–4.18 band at every LR — no collapse, so their GenPPL wins are real
+- LangFlow is systematically less diverse (3.33–3.68); <ng>lf_ada @ 5e-3 = 0.00\*</ng> confirms its GenPPL 1.1 is full degenerate collapse
+
+---
+
+## Adavanced Baselines - Valid PPL (LangFlow, S-FLM)
+
+<style scoped>table { font-size: 0.62em; margin: 0 auto; }</style>
+
+| variant | 5e-5 | 1e-4 | 3e-4 | 1e-3 | 5e-3 |
+|:--|--:|--:|--:|--:|--:|
+| sfm_ada | 2.9 | 1.7 | 2.0 | <b>1.5</b> | 4.0 |
+| sfm_trunc | 6.0 | 5.7 | 5.5 | 5.4 | 5.7 |
+| sfm_ada_trunc | 11.4 | 12.2 | 12.0 | 12.2 | 10.9 |
+| lf_ada | 12.1 | 10.6 | 12.6 | 35.0 | nan |
+| lf_ada_sc | 11.0 | 11.8 | 13.1 | 38.0 | 470 |
 
 ---
 
@@ -196,7 +242,7 @@ The target word embedding is initialized by $\mathcal{N}(0, \text{init}^2)$
 | Best balanced | std0.02 / 0.04 | 2.0 | 19.5 | 4.29 |
 | Best Valid PPL | std0.001 / 0.001 | **1.03** | 73 | 3.82 |
 
-- 64 / 132 cells complete. 
+- 132 / 132 cells complete (full sweep). 
 - Tiny `prior_cov` → tight bound but **poor** text; the **mid `prior_cov` (0.04–0.5)** band is the generation sweet spot.
 
 ---
@@ -214,9 +260,26 @@ The target word embedding is initialized by $\mathcal{N}(0, \text{init}^2)$
 | 0.01 | 1.04 | 1.33 | 1.58 | 2.09 | 3.55 | 7.42 | 10.7 | 8.48 | 460 | 8.86 | 8.58 |
 | 0.02 | 1.04 | 1.70 | 1.97 | 2.03 | 3.71 | 6.62 | 7.94 | 11.7 | 7.68 | 7.53 | 16.0 |
 | 0.04 | 1.04 | 1.35 | 2.42 | 13.1 | 9.67 | 6.76 | 13.1 | 8.01 | 9.86 | 9.07 | 8.55 |
-| 0.1 | 1.04 | 1.39 | 1.64 | 3.75 | 4.58 | 11.2 | 7.38 | 12.8 | 9.97 | - | - |
 
-- Rows of ``init`` > 0.3–2.0 are still running.
+---
+
+## H-FLM Sweep - Valid PPL, (init × prior_cov), Cont.
+
+**tightest Valid PPL at small `prior_cov` (left), degrading rightward.**
+
+<style scoped>table { font-size: 0.56em; margin: 0 auto; }</style>
+
+| init \\ pc | 0.001 | 0.01 | 0.02 | 0.04 | 0.1 | 0.3 | 0.5 | 0.8 | 1.0 | 1.5 | 2.0 |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 0.1 | 1.04 | 1.39 | 1.64 | 3.75 | 4.58 | 11.2 | 7.38 | 12.8 | 9.97 | 9.25 | 12.6 |
+| 0.3 | 1.04 | 1.45 | 1.64 | 2.51 | 4.04 | 10.3 | 8.07 | 7.36 | 7.93 | 8.63 | 7.74 |
+| 0.5 | 1.04 | 1.55 | 2.12 | 2.33 | 9.56 | 11.8 | 11.3 | 13.9 | 15.4 | 15.4 | 8.27 |
+| 0.8 | 1.04 | 1.55 | 2.22 | 3.40 | 6.04 | 9.16 | 9.20 | 14.0 | 9.85 | 10.3 | 9.13 |
+| 1.0 | 1.04 | 1.55 | 2.22 | 3.41 | 6.10 | 10.2 | 12.0 | 12.9 | 13.2 | 13.5 | 13.7 |
+| 1.5 | 1.04 | 1.55 | 2.23 | 3.41 | 9.41 | 10.2 | 12.0 | 12.7 | 13.0 | 13.3 | 13.4 |
+| 2.0 | 1.04 | 1.55 | 2.23 | 3.42 | 6.05 | 10.2 | 11.8 | 12.8 | 13.2 | 13.5 | 13.4 |
+
+- `init` scale barely matters; `prior_cov` dominates Valid PPL.
 
 ---
 
@@ -233,7 +296,25 @@ The target word embedding is initialized by $\mathcal{N}(0, \text{init}^2)$
 | 0.01 | 109 | 23.8 | 27.5 | 20.1 | 24.1 | 21.1 | 17.9 | 32.5 | <ng>5.5\*</ng> | 31.6 | 45.8 |
 | 0.02 | 112 | <ng>14.4\*</ng> | 21.1 | 19.5 | 19.0 | 23.7 | 29.9 | 22.7 | 37.3 | 70.0 | 54.6 |
 | 0.04 | 102 | 33.7 | 31.7 | <ng>1.0\*</ng> | <ng>1.2\*</ng> | 29.2 | 25.0 | 41.2 | <rd>**17.7**</rd> | 33.9 | 32.7 |
-| 0.1 | 103 | 29.1 | 23.3 | 48.5 | 49.5 | 58.3 | 54.6 | 33.1 | <ng>1.0\*</ng> | · | · |
+
+
+---
+
+## H-FLM Sweep - GenPPL, (init × prior_cov), Cont.
+
+**Generation is best in a mid-`prior_cov` band (≈0.02–0.5); the ≈1 cells (\*) are collapses, not wins.**
+
+<style scoped>table { font-size: 0.56em; margin: 0 auto; }</style>
+
+| init \\ pc | 0.001 | 0.01 | 0.02 | 0.04 | 0.1 | 0.3 | 0.5 | 0.8 | 1.0 | 1.5 | 2.0 |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 0.1 | 103 | 29.1 | 23.3 | 48.5 | 49.5 | 58.3 | 54.6 | 33.1 | <ng>1.0\*</ng> | 41.1 | 24.0 |
+| 0.3 | 121 | 56.3 | 33.7 | 27.1 | 42.7 | 41.2 | 52.7 | 49.3 | 48.1 | 60.7 | 57.6 |
+| 0.5 | 125 | 75.5 | 60.9 | 36.4 | <ng>43.9\*</ng> | 54.7 | 47.9 | 50.2 | 46.4 | 37.1 | 83.2 |
+| 0.8 | 110 | 69.9 | 60.4 | 51.8 | 48.7 | 51.1 | 56.5 | 89.6 | 52.4 | 37.6 | 71.0 |
+| 1.0 | 128 | 73.8 | 62.3 | 51.4 | 52.5 | 53.0 | 55.4 | 56.5 | 56.1 | 57.6 | 60.5 |
+| 1.5 | 128 | 76.5 | 75.9 | 60.5 | 55.1 | 52.8 | 55.5 | 56.6 | 57.6 | 58.6 | 58.1 |
+| 2.0 | 124 | 71.8 | 67.8 | 53.7 | 58.5 | 54.7 | 56.3 | 59.6 | 58.8 | 58.9 | 59.7 |
 
 - <rd>**Bold**</rd> = best non-collapsed (17.7)
 - <ng>**\***</ng> = entropy < 3 → degenerate
@@ -251,7 +332,22 @@ The target word embedding is initialized by $\mathcal{N}(0, \text{init}^2)$
 | 0.01 | 3.9 | 3.8 | 4.0 | 4.0 | 4.0 | 4.1 | 4.1 | 3.5 | <ng>0.0\*</ng> | 3.8 | 3.5 |
 | 0.02 | 3.9 | <ng>1.8\*</ng> | 4.3 | 4.3 | 4.1 | 3.9 | 3.8 | 4.0 | 3.4 | 4.0 | 3.0 |
 | 0.04 | 3.9 | 3.7 | 4.1 | <ng>0.0\*</ng> | <ng>0.1\*</ng> | 4.0 | 4.1 | 3.8 | <rd>**4.0**</rd> | 3.4 | 3.8 |
-| 0.1 | 3.8 | 3.9 | 4.2 | 3.9 | 4.2 | 3.4 | 4.4 | 3.9 | <ng>0.0\*</ng> | · | · |
+
+---
+
+## H-FLM Sweep - Entropy, (init × prior_cov), Cont.
+
+<style scoped>table { font-size: 0.56em; margin: 0 auto; }</style>
+
+| init \\ pc | 0.001 | 0.01 | 0.02 | 0.04 | 0.1 | 0.3 | 0.5 | 0.8 | 1.0 | 1.5 | 2.0 |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 0.1 | 3.8 | 3.9 | 4.2 | 3.9 | 4.2 | 3.4 | 4.4 | 3.9 | <ng>0.0\*</ng> | 3.6 | 4.1 |
+| 0.3 | 3.7 | 3.9 | 4.1 | 4.2 | 4.3 | 4.1 | 4.3 | 3.8 | 3.9 | 4.2 | 3.7 |
+| 0.5 | 3.7 | 3.5 | 3.8 | 3.7 | <ng>2.0\*</ng> | 3.7 | 4.0 | 3.8 | 3.9 | 4.0 | 4.3 |
+| 0.8 | 3.7 | 3.5 | 3.6 | 3.7 | 3.8 | 3.9 | 3.9 | 3.0 | 3.9 | 4.0 | 4.2 |
+| 1.0 | 3.8 | 3.5 | 3.6 | 3.7 | 3.8 | 3.9 | 4.0 | 4.0 | 3.9 | 4.0 | 3.9 |
+| 1.5 | 3.8 | 3.4 | 3.5 | 3.6 | 3.8 | 3.9 | 3.9 | 3.9 | 3.9 | 3.9 | 3.9 |
+| 2.0 | 3.8 | 3.5 | 3.5 | 3.7 | 3.7 | 3.9 | 3.9 | 3.9 | 3.9 | 3.9 | 3.9 |
 
 - Healthy generation ≈ 3.5–4.4
 - <rd>**Bold**</rd> = Best non-degenerated

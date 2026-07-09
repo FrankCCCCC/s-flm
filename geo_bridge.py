@@ -62,25 +62,31 @@ class GeoUtils:
 
     @staticmethod
     def _check_lorentz_rho_bound(
-        rhos: torch.Tensor, d: int, ts: Optional[torch.Tensor] = None
+        rhos: torch.Tensor,
+        d: int,
+        ts: Optional[torch.Tensor] = None,
+        gaussian_curvature: float = -1.0,
     ) -> None:
         """Refuse Lorentz-Cartesian conversion when float64 precision is insufficient.
 
-        The on-manifold defect `|z[0] - sqrt(1 + ||z[1:]||^2)|` floats at order
-        `cosh(rho) * eps`, so for `rho > _LORENTZ_RHO_MAX = 20` the Cartesian image
-        cannot be trusted to better than ~1e-6 even at float64. Polar output is
-        unaffected; callers who need large rho should keep ``output_coord=HYPERBOLIC_POLAR``.
+        The on-manifold defect floats at order `cosh(rho / R) * eps` on the
+        curvature-`K` hyperboloid of radius `R = 1/sqrt(|K|)`, so for
+        `rho / R > _LORENTZ_RHO_MAX = 20` the Cartesian image cannot be trusted to
+        better than ~1e-6 even at float64. Polar output is unaffected; callers who
+        need large rho should keep ``output_coord=HYPERBOLIC_POLAR``.
         """
         if rhos.numel() == 0:
             return
+        R = GeoUtils._curvature_scale(gaussian_curvature)
         rho_max = float(rhos.max().item())
-        if rho_max > _LORENTZ_RHO_MAX:
+        if rho_max > _LORENTZ_RHO_MAX * R:
             t_info = ""
             if ts is not None and ts.numel() > 0:
                 t_info = f"max(ts)={float(ts.max().item()):.3g}, "
             raise ValueError(
-                f"Lorentz-Cartesian output requires rho <= {_LORENTZ_RHO_MAX} for float64 "
-                f"on-manifold precision; got d={d}, {t_info}max(rho)={rho_max:.3f}. "
+                f"Lorentz-Cartesian output requires rho <= {_LORENTZ_RHO_MAX} * R "
+                f"(R={R:.3g}) for float64 on-manifold precision; got d={d}, {t_info}"
+                f"max(rho)={rho_max:.3f}. "
                 f"Use output_coord=HYPERBOLIC_POLAR for these parameters."
             )
 
@@ -221,32 +227,38 @@ class GeoUtils:
 
     @staticmethod
     def _geodesic_kernel(
-        x: torch.Tensor, y: torch.Tensor, t, kappa: int
+        x: torch.Tensor,
+        y: torch.Tensor,
+        t: Union[float, torch.FloatTensor],
+        gaussian_curvature: float,
     ) -> torch.Tensor:
-        """Constant-speed geodesic from x to y at fraction t.
+        """Constant-speed geodesic from x to y at fraction t on the curvature-`K` surface.
 
-        kappa = -1: Lorentz lerp on hyperboloid.  d_H = arccosh(-<x, y>_L).
-        kappa = +1: SLERP on sphere.              d_S = arccos(<x, y>).
+        The sign of `gaussian_curvature` selects the geometry and its magnitude the
+        model radius `R = 1/sqrt(|K|)`:
 
-        The intrinsic distance is computed from the differential form
-        `cosh(d_H) - 1 = <x - y, x - y>_L / 2` (hyperbolic) and
-        `1 - cos(d_S) = ||x - y||^2 / 2`         (spherical), which avoids the
+        K < 0: Lorentz lerp on the radius-`R` hyperboloid.  d_H = R * arccosh(-<x, y>_L / R^2).
+        K > 0: SLERP on the radius-`R` sphere.              d_S = R * arccos(<x, y> / R^2).
+
+        The interpolation angle `theta = d / R` is computed from the differential form
+        `cosh(theta) - 1 = <x - y, x - y>_L / (2 R^2)` (hyperbolic) and
+        `1 - cos(theta) = ||x - y||^2 / (2 R^2)`        (spherical), which avoids the
         catastrophic cancellation that would otherwise plague the inner product at
         high dimensions.
         """
+        R = GeoUtils._curvature_scale(gaussian_curvature)
+        R_sq = R * R
         diff = x - y
-        if kappa == -1:
+        if gaussian_curvature < 0:
             diff_inner = -diff[..., 0] * diff[..., 0] + (diff[..., 1:] * diff[..., 1:]).sum(-1)
-            cosh_d_minus_one = (diff_inner / 2.0).clamp_min(0.0)
+            cosh_d_minus_one = (diff_inner / (2.0 * R_sq)).clamp_min(0.0)
             d = torch.acosh(1.0 + cosh_d_minus_one)
             f = torch.sinh
-        elif kappa == 1:
+        else:
             diff_sq = (diff * diff).sum(-1)
-            one_minus_cos = (diff_sq / 2.0).clamp(0.0, 2.0)
+            one_minus_cos = (diff_sq / (2.0 * R_sq)).clamp(0.0, 2.0)
             d = torch.acos((1.0 - one_minus_cos).clamp(-1.0, 1.0))
             f = torch.sin
-        else:
-            raise ValueError(f"kappa must be -1 or +1; got {kappa}")
 
         if not torch.is_tensor(t):
             t = torch.tensor(t, dtype=x.dtype, device=x.device)
@@ -263,6 +275,23 @@ class GeoUtils:
         coef_y = f(t * d_col) / fd
         gamma = coef_x * x + coef_y * y
         return torch.where(d_col < 1e-6, euclid, gamma)
+
+    @staticmethod
+    def _curvature_scale(gaussian_curvature: float) -> float:
+        """Validate `K != 0` and return the model radius `R = 1/sqrt(|K|)`.
+
+        The curvature-`K` model surfaces are the unit ones scaled by `R`: the
+        hyperboloid `<z,z>_L = -R^2 = 1/K` (`K < 0`, with its Poincare ball) or
+        the sphere of radius `R` (`K > 0`), with intrinsic polar `(rho, u)`
+        unchanged (`rho` = geodesic distance to the origin). Dividing Cartesian
+        coordinates by `R` is the isometry onto the unit surface and maps the
+        intrinsic radial `rho -> rho / R`.
+        """
+        if gaussian_curvature == 0.0:
+            raise ValueError(
+                "gaussian_curvature must be nonzero (K < 0 hyperbolic, K > 0 spherical)"
+            )
+        return 1.0 / math.sqrt(abs(gaussian_curvature))
 
     # ---------------------------------------------------------------------------
     # Random-distribution generators
@@ -356,203 +385,238 @@ class GeoUtils:
     def binary_hyperbolic_polar_to_poincare_cartesian(
         rhos: torch.Tensor,
         thetas: torch.Tensor,
+        gaussian_curvature: float=-1.0,
     ) -> torch.Tensor:
-        """Compute z = tanh(rho/2) * direction inside the open unit disk.
+        """Compute z = R * tanh(rho / 2R) * direction inside the open disk of radius `R = 1/sqrt(|K|)`.
 
-        `tanh(rho/2)` saturates to 1.0 in float64 for `rho >= ~36`. The scale is
-        clamped below 1 by one ulp so the strict invariant `||z|| < 1` holds for
+        `tanh` saturates to 1.0 in float64 for its argument `>= ~36`. The scale is
+        clamped below 1 by one ulp so the strict invariant `||z|| < R` holds for
         arbitrarily large `rho`.
 
         Args:
             rhos (`torch.FloatTensor` of shape `(batch_size,)`): hyperbolic radial.
             thetas (`torch.FloatTensor` of shape `(batch_size,)`): angles.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit disk model.
 
         Returns:
             `torch.FloatTensor` of shape `(batch_size, 2)`: Poincare-disk Cartesian
-            coordinates `(x, y)` with `||z|| < 1`.
+            coordinates `(x, y)` with `||z|| < R` (`< 1` at `K = -1`).
         """
+        R = GeoUtils._curvature_scale(gaussian_curvature)
         direction = GeoUtils._binary_polar_direction(thetas=thetas)
-        scale = torch.tanh(rhos / 2)
+        scale = torch.tanh(rhos / (2.0 * R))
         one_minus_eps = 1.0 - torch.finfo(scale.dtype).eps
-        scale = scale.clamp(max=one_minus_eps)
+        scale = scale.clamp(max=one_minus_eps) * R
         return scale.unsqueeze(-1) * direction
 
     @staticmethod
     def binary_hyperbolic_polar_to_lorentz_cartesian(
         rhos: torch.FloatTensor,
         thetas: torch.FloatTensor,
+        gaussian_curvature: float=-1.0,
     ) -> torch.FloatTensor:
         """Convert `(rho, theta)` on `H^2` to Lorentz-Cartesian coordinates.
 
-        The `d == 2` lift consuming a scalar angle per sample:
-        `z = (cosh rho, sinh rho cos theta, sinh rho sin theta)`.
+        The `d == 2` lift consuming a scalar angle per sample, on the curvature-`K`
+        hyperboloid of radius `R = 1/sqrt(|K|)`:
+        `z = R * (cosh(rho/R), sinh(rho/R) cos theta, sinh(rho/R) sin theta)`.
 
         Args:
             rhos (`torch.FloatTensor` of shape `(batch_size,)`): hyperbolic radial.
             thetas (`torch.FloatTensor` of shape `(batch_size,)`): azimuthal angle.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit hyperboloid.
 
         Returns:
             `torch.FloatTensor` of shape `(batch_size, 3)`: Lorentz-Cartesian
-            coordinates `(cosh rho, sinh rho cos theta, sinh rho sin theta)`,
-            satisfying `<z,z>_L = -1`.
+            coordinates satisfying `<z,z>_L = 1/K` (`= -1` at `K = -1`).
         """
-        sinh_r = torch.sinh(rhos)
+        R = GeoUtils._curvature_scale(gaussian_curvature)
+        unit_rhos = rhos / R
+        sinh_r = torch.sinh(unit_rhos)
         return torch.stack(
-            [torch.cosh(rhos), sinh_r * thetas.cos(), sinh_r * thetas.sin()],
+            [torch.cosh(unit_rhos), sinh_r * thetas.cos(), sinh_r * thetas.sin()],
             dim=-1,
-        )
+        ) * R
 
     @staticmethod
     def hyperbolic_polar_to_poincare_cartesian(
         rhos: torch.Tensor,
         thetas: torch.Tensor,
+        gaussian_curvature: float=-1.0,
     ) -> torch.Tensor:
-        """Compute `z = tanh(rho/2) * u` inside the open unit ball `B^d`.
+        """Compute `z = R * tanh(rho / 2R) * u` inside the open ball of radius `R = 1/sqrt(|K|)`.
 
-        `tanh(rho/2)` saturates to 1.0 in float64 for `rho >= ~36`. The scale is
-        clamped below 1 by one ulp so the strict invariant `||z|| < 1` holds for
+        `tanh` saturates to 1.0 in float64 for its argument `>= ~36`. The scale is
+        clamped below 1 by one ulp so the strict invariant `||z|| < R` holds for
         arbitrarily large `rho`.
 
         Args:
             rhos (`torch.FloatTensor` of shape `(...,)`): hyperbolic radial coordinate.
             thetas (`torch.FloatTensor` of shape `(..., d)`): unit direction on `S^{d-1}`.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit ball model.
 
         Returns:
             `torch.FloatTensor` of shape `(..., d)`: Poincare-ball Cartesian
-            coordinates with `||z|| < 1`.
+            coordinates with `||z|| < R`.
         """
+        R = GeoUtils._curvature_scale(gaussian_curvature)
         direction = GeoUtils._polar_direction(thetas=thetas)
-        scale = torch.tanh(rhos / 2)
+        scale = torch.tanh(rhos / (2.0 * R))
         one_minus_eps = 1.0 - torch.finfo(scale.dtype).eps
-        scale = scale.clamp(max=one_minus_eps)
+        scale = scale.clamp(max=one_minus_eps) * R
         return scale.unsqueeze(-1) * direction
 
     @staticmethod
     def hyperbolic_polar_to_lorentz_cartesian(
         rhos: torch.FloatTensor,
         thetas: torch.FloatTensor,
+        gaussian_curvature: float=-1.0,
     ) -> torch.FloatTensor:
         """Convert `(rho, u)` on `H^d` to Lorentz-Cartesian coordinates.
 
-        Lifts to `z = (cosh rho, sinh rho * u)`. The spatial block is rescaled so its
-        norm-squared equals the algebraic target `cosh^2 rho - 1` exactly, so the
-        Minkowski invariant `-z[0]^2 + sum(z[1:]^2) + 1` cancels at the float
-        precision of `cosh^2` rather than accumulating `sinh * unit-norm` error.
+        Lifts to `z = R * (cosh(rho/R), sinh(rho/R) * u)` on the curvature-`K`
+        hyperboloid of radius `R = 1/sqrt(|K|)`. The spatial block is rescaled so its
+        norm-squared equals the algebraic target `cosh^2 - 1` exactly, so the
+        Minkowski invariant cancels at the float precision of `cosh^2` rather than
+        accumulating `sinh * unit-norm` error.
 
         Args:
             rhos (`torch.FloatTensor` of shape `(...,)`):
                 Hyperbolic radial coordinate.
             thetas (`torch.FloatTensor` of shape `(..., d)`):
                 Unit direction on `S^{d-1}`.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit hyperboloid.
 
         Returns:
             `torch.FloatTensor` of shape `(..., d + 1)`: Lorentz-Cartesian
-            coordinates `(cosh rho, sinh rho * u)`, satisfying `<z,z>_L = -1`.
+            coordinates satisfying `<z,z>_L = 1/K` (`= -1` at `K = -1`).
         """
+        R = GeoUtils._curvature_scale(gaussian_curvature)
         direction = GeoUtils._polar_direction(thetas=thetas)
-        cosh = torch.cosh(rhos)
+        cosh = torch.cosh(rhos / R)
         target_sq = (cosh * cosh - 1.0).clamp_min(0.0)
         current_sq = (direction * direction).sum(-1, keepdim=True).clamp_min(
             torch.finfo(direction.dtype).tiny
         )
         scale = (target_sq.unsqueeze(-1) / current_sq).sqrt()
         spatial = direction * scale
-        return torch.cat([cosh.unsqueeze(-1), spatial], dim=-1)
+        return torch.cat([cosh.unsqueeze(-1), spatial], dim=-1) * R
 
     @staticmethod
     def binary_lorentz_cartesian_to_hyperbolic_polar(
         z: torch.Tensor,
+        gaussian_curvature: float=-1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Convert Lorentz-Cartesian to polar `(rho, thetas)`.
 
-        `rho = arccosh(z[0])` recovers the radial geodesic distance to the origin; the
+        `rho = R * arccosh(z[0] / R)` recovers the radial geodesic distance to the
+        origin on the curvature-`K` hyperboloid of radius `R = 1/sqrt(|K|)`; the
         angular part is `theta = atan2(z[2], z[1])` over the two spatial components in
         `d == 2`.
 
         Args:
             z (`torch.Tensor` of shape `(..., 3)`):
-                Ambient Lorentz-Cartesian coordinates `(cosh rho, sinh rho * cos theta,
-                sinh rho * sin theta)` with `z[0] >= 1`.
+                Ambient Lorentz-Cartesian coordinates on the curvature-`K`
+                hyperboloid with `z[0] >= R`.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit hyperboloid.
 
         Returns:
             `Tuple[torch.Tensor, torch.Tensor]`:
                 - `rhos` of shape `(...)`, `>= 0`.
                 - `thetas` of shape `(...)`, scalar angle in `(-pi, pi]` for `d == 2`.
         """
+        R = GeoUtils._curvature_scale(gaussian_curvature)
         d = z.shape[-1]
         if d != 3:
             raise ValueError(f"Cartesian dimension should be 3, not {d}.")
-        rhos = torch.acosh(z[..., 0].clamp_min(1.0))
+        rhos = R * torch.acosh((z[..., 0] / R).clamp_min(1.0))
         theta = torch.atan2(z[..., 2], z[..., 1])
         return rhos, theta
 
     @staticmethod
     def lorentz_cartesian_to_hyperbolic_polar(
         z: torch.Tensor,
+        gaussian_curvature: float=-1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Convert Lorentz-Cartesian on `H^d` to polar `(rho, u)`.
 
-        `rho = arccosh(z[0])` recovers the radial geodesic distance to the origin;
-        the direction is the normalized spatial block `u = z[1:] / ||z[1:]||` on
+        `rho = R * arccosh(z[0] / R)` recovers the radial geodesic distance to the
+        origin on the curvature-`K` hyperboloid of radius `R = 1/sqrt(|K|)`; the
+        direction is the normalized spatial block `u = z[1:] / ||z[1:]||` on
         `S^{d-1}`. Inverse of [`hyperbolic_polar_to_lorentz_cartesian`].
 
         Args:
             z (`torch.Tensor` of shape `(..., d + 1)`):
-                Ambient Lorentz-Cartesian coordinates `(cosh rho, sinh rho * u)`
-                with `z[0] >= 1`.
+                Ambient Lorentz-Cartesian coordinates on the curvature-`K`
+                hyperboloid with `z[0] >= R`.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit hyperboloid.
 
         Returns:
             `Tuple[torch.Tensor, torch.Tensor]`:
                 - `rhos` of shape `(...)`, `>= 0`.
                 - `u` of shape `(..., d)`, unit direction on `S^{d-1}`.
         """
+        R = GeoUtils._curvature_scale(gaussian_curvature)
         tiny = torch.finfo(z.dtype).tiny
-        rhos = torch.acosh(z[..., 0].clamp_min(1.0))
+        rhos = R * torch.acosh((z[..., 0] / R).clamp_min(1.0))
         spatial = z[..., 1:]
         u = spatial / spatial.norm(dim=-1, keepdim=True).clamp_min(tiny)
         return rhos, u
 
     @staticmethod
-    def poincare_cartesian_to_lorentz_cartesian(z: torch.Tensor) -> torch.Tensor:
+    def poincare_cartesian_to_lorentz_cartesian(
+        z: torch.Tensor,
+        gaussian_curvature: float=-1.0,
+    ) -> torch.Tensor:
         """Convert Poincare-disk Cartesian to Lorentz-Cartesian via stereographic lift.
 
-        The map is `z -> ((1 + ||z||^2) / (1 - ||z||^2), 2 z / (1 - ||z||^2))`, taking
-        `B^d` into the upper hyperboloid in `R^{1, d}`.
+        At curvature `K` the map takes the ball of radius `R = 1/sqrt(|K|)` into the
+        upper hyperboloid of radius `R` in `R^{1, d}`: the unit-model lift
+        `w -> ((1 + ||w||^2) / (1 - ||w||^2), 2 w / (1 - ||w||^2))` applied to
+        `w = z / R`, scaled back by `R`.
 
         Args:
             z (`torch.Tensor` of shape `(..., d)`):
-                Poincare-disk Cartesian coordinates satisfying `||z|| < 1`.
+                Poincare-disk Cartesian coordinates satisfying `||z|| < R`.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit models.
 
         Returns:
             `torch.Tensor` of shape `(..., d + 1)`: ambient Lorentz-Cartesian coordinates
-            satisfying `-z[0]^2 + sum(z[1:]^2) = -1`.
+            satisfying `-z[0]^2 + sum(z[1:]^2) = 1/K` (`= -1` at `K = -1`).
         """
-        norm_sq = (z * z).sum(-1)
+        R = GeoUtils._curvature_scale(gaussian_curvature)
+        norm_sq = (z * z).sum(-1) / (R * R)
         denom = (1.0 - norm_sq).clamp_min(torch.finfo(z.dtype).tiny)
-        t = (1.0 + norm_sq) / denom
+        t = R * (1.0 + norm_sq) / denom
         spatial = 2.0 * z / denom.unsqueeze(-1)
         return torch.cat([t.unsqueeze(-1), spatial], dim=-1)
 
     @staticmethod
-    def lorentz_cartesian_to_poincare_cartesian(z: torch.Tensor) -> torch.Tensor:
+    def lorentz_cartesian_to_poincare_cartesian(
+        z: torch.Tensor,
+        gaussian_curvature: float=-1.0,
+    ) -> torch.Tensor:
         """Convert Lorentz-Cartesian to Poincare-disk-Cartesian via stereographic projection.
 
-        The map is `z -> z[..., 1:] / (1 + z[..., 0])`, the inverse of
-        [`poincare_cartesian_to_lorentz_cartesian`], taking the upper hyperboloid in
-        `R^{1, d}` into the open disk `B^d`.
+        The map is `z -> R * z[..., 1:] / (R + z[..., 0])`, the inverse of
+        [`poincare_cartesian_to_lorentz_cartesian`], taking the upper hyperboloid of
+        radius `R = 1/sqrt(|K|)` in `R^{1, d}` into the open disk of radius `R`.
 
         Args:
             z (`torch.Tensor` of shape `(..., d + 1)`):
-                Lorentz-Cartesian coordinates on the hyperboloid with `z[0] >= 1`.
+                Lorentz-Cartesian coordinates on the curvature-`K` hyperboloid with
+                `z[0] >= R`.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit models.
 
         Returns:
             `torch.Tensor` of shape `(..., d)`: Poincare-disk Cartesian coordinates
-            satisfying `||z|| < 1`.
+            satisfying `||z|| < R`.
         """
+        R = GeoUtils._curvature_scale(gaussian_curvature)
         spatial = z[..., 1:]
         t = z[..., 0]
-        denom = (1.0 + t).unsqueeze(-1).clamp_min(torch.finfo(z.dtype).tiny)
-        return spatial / denom
+        denom = (R + t).unsqueeze(-1).clamp_min(torch.finfo(z.dtype).tiny)
+        return R * spatial / denom
 
 class BinaryHyperbolicHeatKernel(GeoUtils):
     """Closed-form free hyperbolic heat kernel and bridge on `H^2` (d=2).
@@ -732,6 +796,7 @@ class BinaryHyperbolicHeatKernel(GeoUtils):
     @staticmethod
     def geodesic(
         t,
+        gaussian_curvature: float = -1.0,
         src_cartesian: Optional[torch.FloatTensor] = None,
         dest_cartesian: Optional[torch.FloatTensor] = None,
         cartesian_model: Optional[str] = None,
@@ -808,37 +873,50 @@ class BinaryHyperbolicHeatKernel(GeoUtils):
         if output_coord is None:
             output_coord = Coordinate.CARTESIAN if src_cartesian is not None else Coordinate.HYPERBOLIC_POLAR
 
+        if gaussian_curvature >= 0.0:
+            raise ValueError(
+                f"hyperbolic geodesic requires gaussian_curvature < 0; got {gaussian_curvature}"
+            )
         if src_cartesian is not None:
             if cartesian_model == Geometry.POINCARE:
-                x_amb = GeoUtils.poincare_cartesian_to_lorentz_cartesian(z=src_cartesian)
+                x_amb = GeoUtils.poincare_cartesian_to_lorentz_cartesian(
+                    z=src_cartesian, gaussian_curvature=gaussian_curvature)
             elif cartesian_model == Geometry.LORENTZ:
                 x_amb = src_cartesian
             else:
                 raise ValueError(f"cartesian_model should be ({Geometry.POINCARE}, {Geometry.LORENTZ}), not {cartesian_model}.")
         else:
-            GeoUtils._check_lorentz_rho_bound(src_radial, d=2)
-            x_amb = GeoUtils.binary_hyperbolic_polar_to_lorentz_cartesian(rhos=src_radial, thetas=src_angular)
+            GeoUtils._check_lorentz_rho_bound(
+                src_radial, d=2, gaussian_curvature=gaussian_curvature)
+            x_amb = GeoUtils.binary_hyperbolic_polar_to_lorentz_cartesian(
+                rhos=src_radial, thetas=src_angular, gaussian_curvature=gaussian_curvature)
         if dest_cartesian is not None:
             if cartesian_model == Geometry.POINCARE:
-                y_amb = GeoUtils.poincare_cartesian_to_lorentz_cartesian(z=dest_cartesian)
+                y_amb = GeoUtils.poincare_cartesian_to_lorentz_cartesian(
+                    z=dest_cartesian, gaussian_curvature=gaussian_curvature)
             elif cartesian_model == Geometry.LORENTZ:
                 y_amb = dest_cartesian
             else:
                 raise ValueError(f"cartesian_model should be ({Geometry.POINCARE}, {Geometry.LORENTZ}), not {cartesian_model}.")
         else:
-            GeoUtils._check_lorentz_rho_bound(dest_radial, d=2)
-            y_amb = GeoUtils.binary_hyperbolic_polar_to_lorentz_cartesian(rhos=dest_radial, thetas=dest_angular)
+            GeoUtils._check_lorentz_rho_bound(
+                dest_radial, d=2, gaussian_curvature=gaussian_curvature)
+            y_amb = GeoUtils.binary_hyperbolic_polar_to_lorentz_cartesian(
+                rhos=dest_radial, thetas=dest_angular, gaussian_curvature=gaussian_curvature)
 
-        interpolate = BinaryHyperbolicHeatKernel._geodesic_kernel(x_amb, y_amb, t, kappa=-1)
+        interpolate = BinaryHyperbolicHeatKernel._geodesic_kernel(
+            x_amb, y_amb, t, gaussian_curvature=gaussian_curvature)
 
         if output_coord == Coordinate.CARTESIAN:
             if cartesian_model == Geometry.LORENTZ:
                 return interpolate
             elif cartesian_model == Geometry.POINCARE:
-                return GeoUtils.lorentz_cartesian_to_poincare_cartesian(z=interpolate)
+                return GeoUtils.lorentz_cartesian_to_poincare_cartesian(
+                    z=interpolate, gaussian_curvature=gaussian_curvature)
             else:
                 raise ValueError(f"cartesian_model, {cartesian_model}, is not supported, only support ({Geometry.LORENTZ}, {Geometry.POINCARE}).")
-        return GeoUtils.binary_lorentz_cartesian_to_hyperbolic_polar(interpolate)
+        return GeoUtils.binary_lorentz_cartesian_to_hyperbolic_polar(
+            interpolate, gaussian_curvature=gaussian_curvature)
 
 class HyperbolicHeatKernel(GeoUtils):
     """Closed-form free hyperbolic heat kernel and bridge on `H^d` (`d >= 2`).
@@ -1166,6 +1244,7 @@ class HyperbolicHeatKernel(GeoUtils):
     @staticmethod
     def geodesic(
         t,
+        gaussian_curvature: float = -1.0,
         src_cartesian: Optional[torch.FloatTensor] = None,
         dest_cartesian: Optional[torch.FloatTensor] = None,
         cartesian_model: Optional[str] = None,
@@ -1188,8 +1267,15 @@ class HyperbolicHeatKernel(GeoUtils):
             t (`float`, or `torch.Tensor` of shape `()` or `(batch_size, seq_len, 1)`):
                 Fraction along the geodesic (`0` -> source, `1` -> destination).
                 A per-sample column `(batch_size, seq_len, 1)` broadcasts against the
-                `(batch_size, seq_len, embedding_size + 1)` ambient points; 
+                `(batch_size, seq_len, embedding_size + 1)` ambient points;
                 a bare `(batch_size, seq_len)` vector does not and is unsupported.
+            gaussian_curvature (`float`, defaults to `-1.0`):
+                Gaussian (sectional) curvature `K < 0` of the hyperbolic space.
+                Cartesian endpoints/outputs live on the curvature-`K` model surfaces
+                (hyperboloid / Poincare ball of radius `R = 1/sqrt(|K|)`); polar
+                coordinates are intrinsic (`rho` = geodesic distance) and
+                chart-free. Conversions and the interpolation kernel are natively
+                curvature-aware. `-1.0` = unit models.
             src_cartesian (`torch.FloatTensor`, *optional*):
                 Cartesian source, interpreted per `cartesian_model`: shape
                 `(batch_size, seq_len, embedding_size + 1)` Lorentz when 
@@ -1245,37 +1331,52 @@ class HyperbolicHeatKernel(GeoUtils):
         if output_coord is None:
             output_coord = Coordinate.CARTESIAN if src_cartesian is not None else Coordinate.HYPERBOLIC_POLAR
 
+        if gaussian_curvature >= 0.0:
+            raise ValueError(
+                f"hyperbolic geodesic requires gaussian_curvature < 0; got {gaussian_curvature}"
+            )
         if src_cartesian is not None:
             if cartesian_model == Geometry.POINCARE:
-                x_amb = GeoUtils.poincare_cartesian_to_lorentz_cartesian(z=src_cartesian)
+                x_amb = GeoUtils.poincare_cartesian_to_lorentz_cartesian(
+                    z=src_cartesian, gaussian_curvature=gaussian_curvature)
             elif cartesian_model == Geometry.LORENTZ:
                 x_amb = src_cartesian
             else:
                 raise ValueError(f"cartesian_model should be ({Geometry.POINCARE}, {Geometry.LORENTZ}), not {cartesian_model}.")
         else:
-            GeoUtils._check_lorentz_rho_bound(src_radial, d=src_angular.shape[-1])
-            x_amb = GeoUtils.hyperbolic_polar_to_lorentz_cartesian(rhos=src_radial, thetas=src_angular)
+            GeoUtils._check_lorentz_rho_bound(
+                src_radial, d=src_angular.shape[-1],
+                gaussian_curvature=gaussian_curvature)
+            x_amb = GeoUtils.hyperbolic_polar_to_lorentz_cartesian(
+                rhos=src_radial, thetas=src_angular, gaussian_curvature=gaussian_curvature)
         if dest_cartesian is not None:
             if cartesian_model == Geometry.POINCARE:
-                y_amb = GeoUtils.poincare_cartesian_to_lorentz_cartesian(z=dest_cartesian)
+                y_amb = GeoUtils.poincare_cartesian_to_lorentz_cartesian(
+                    z=dest_cartesian, gaussian_curvature=gaussian_curvature)
             elif cartesian_model == Geometry.LORENTZ:
                 y_amb = dest_cartesian
             else:
                 raise ValueError(f"cartesian_model should be ({Geometry.POINCARE}, {Geometry.LORENTZ}), not {cartesian_model}.")
         else:
-            GeoUtils._check_lorentz_rho_bound(dest_radial, d=dest_angular.shape[-1])
-            y_amb = GeoUtils.hyperbolic_polar_to_lorentz_cartesian(rhos=dest_radial, thetas=dest_angular)
+            GeoUtils._check_lorentz_rho_bound(
+                dest_radial, d=dest_angular.shape[-1],
+                gaussian_curvature=gaussian_curvature)
+            y_amb = GeoUtils.hyperbolic_polar_to_lorentz_cartesian(
+                rhos=dest_radial, thetas=dest_angular, gaussian_curvature=gaussian_curvature)
 
-        interpolate = GeoUtils._geodesic_kernel(x_amb, y_amb, t, kappa=-1)
+        interpolate = GeoUtils._geodesic_kernel(
+            x_amb, y_amb, t, gaussian_curvature=gaussian_curvature)
 
         if output_coord == Coordinate.CARTESIAN:
             if cartesian_model == Geometry.LORENTZ:
                 return interpolate
             elif cartesian_model == Geometry.POINCARE:
-                return GeoUtils.lorentz_cartesian_to_poincare_cartesian(z=interpolate)
+                return GeoUtils.lorentz_cartesian_to_poincare_cartesian(
+                    z=interpolate, gaussian_curvature=gaussian_curvature)
             else:
                 raise ValueError(
                     f"cartesian_model, {cartesian_model}, is not supported, only "
                     f"support ({Geometry.LORENTZ}, {Geometry.POINCARE})."
                 )
-        return GeoUtils.lorentz_cartesian_to_hyperbolic_polar(interpolate)
+        return GeoUtils.lorentz_cartesian_to_hyperbolic_polar(
+            interpolate, gaussian_curvature=gaussian_curvature)

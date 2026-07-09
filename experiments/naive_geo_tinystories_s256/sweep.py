@@ -1,11 +1,12 @@
 #!/usr/bin/env python
-"""naive_geo_tinystories (slides jun25_2026) — Naive Geometry baseline.
+"""naive_geo_tinystories_s256 (slides jun25_2026) — Naive Geometry baseline, SEQ LEN 256.
 
-3 runs (S-FLM, E-FLM, H-FLM), identical small DiT (768/12/12), init=ngpt,
-noise=log-linear (NO tricks), 30k steps, batch 512, seq 1024, bf16, EMA 0.9999,
+4 runs (S-FLM, E-FLM, H-FLM ngpt, H-FLM hyperbolic), identical small DiT (768/12/12),
+init=ngpt, noise=log-linear (NO tricks), 30k steps, batch 512, seq 256, bf16, EMA 0.9999,
 AdamW (config defaults). Eval = exact-velocity, top_k_v=1, 180 steps, greedy last.
+Checkpoints every 5k steps, all retained (SAVE_TOPK=-1).
 
-ORCHESTRATION ONLY — calls the single-run shared scripts:
+ORCHESTRATION ONLY — calls the single-run shared scripts (SEQ_LEN=256 knob):
   scripts/train/tinystories/{sfm,eflm,hlfm}.sh
   scripts/sample/tinystories/{sfm,eflm,hflm}.sh
 Idempotent + resumable (skips done/queued cells; resubmits auto-resume).
@@ -21,11 +22,14 @@ from simple_slurm import Slurm
 
 REPO = '/share/thickstun/sychou/workspace/research/s-flm'
 ENVBIN = '/home/sc3379/anaconda3/envs/sfm/bin'
-EXP = f'{REPO}/experiments/naive_geo_tinystories'
+EXP = f'{REPO}/experiments/naive_geo_tinystories_s256'
 LOGS = f'{EXP}/logs'
-OUT = f'{REPO}/outputs/naive_geo_tinystories'
+OUT = f'{REPO}/outputs/naive_geo_tinystories_s256'
 DEVICES = 4
-PER_GPU_BS = 8
+PER_GPU_BS = 32
+SEQ_LEN = 256
+CKPT_EVERY = 5000
+SAVE_TOPK = -1
 
 # tag -> (train_script, sample_script, train_env)   [eval needs no extra env: prior_cov/rho_max default]
 CELLS = {
@@ -60,10 +64,11 @@ def job_body(tag, train_script, sample_script, train_env):
         export PATH={ENVBIN}:$PATH
         cd {REPO}
         echo "[$(date)] TRAIN {tag} on $(hostname)"
-        OUTPUT_DIR={tdir} RUN_NAME=naive_geo_{tag} DEVICES={DEVICES} PER_GPU_BS={PER_GPU_BS} {train_env} \\
+        OUTPUT_DIR={tdir} RUN_NAME=naive_geo_{tag}_s256 DEVICES={DEVICES} PER_GPU_BS={PER_GPU_BS} {train_env} \\
+            SEQ_LEN={SEQ_LEN} CKPT_EVERY={CKPT_EVERY} SAVE_TOPK={SAVE_TOPK} \\
             bash scripts/train/tinystories/{train_script}
         echo "[$(date)] EVAL {tag}"
-        CKPT_PATH={tdir}/checkpoints/last.ckpt OUTPUT_DIR={edir} DEVICES=1 \\
+        CKPT_PATH={tdir}/checkpoints/last.ckpt OUTPUT_DIR={edir} DEVICES=1 SEQ_LEN={SEQ_LEN} \\
             bash scripts/sample/tinystories/{sample_script}
         echo "[$(date)] DONE {tag}"
         ''')
@@ -76,19 +81,19 @@ def main():
     os.makedirs(LOGS, exist_ok=True)
     if args.dry_run:
         for tag, (tr, sa, env) in CELLS.items():
-            print(f'  ngeo_{tag}: train={tr} sample={sa} env="{env}"')
+            print(f'  ngeo256_{tag}: train={tr} sample={sa} env="{env}"')
         ex = next(iter(CELLS))
         print('\n--- example body ---\n' + job_body(ex, *CELLS[ex]))
         return
     active = active_jobnames()
     n_sub = n_skip = 0
     for tag, (tr, sa, env) in CELLS.items():
-        jobname = f'ngeo_{tag}'
+        jobname = f'ngeo256_{tag}'
         if os.path.exists(f'{OUT}/{tag}/eval/ppl.json') or jobname in active:
             n_skip += 1
             continue
         slurm = Slurm(job_name=jobname, partition='thickstun,desa', gres=f'gpu:{DEVICES}',
-                      ntasks=1, cpus_per_task=16, mem='128G', time='10-00:00:00',
+                      ntasks=1, cpus_per_task=16, mem='64G', time='10-00:00:00',
                       exclude='desa-compute-01', output=f'{LOGS}/{tag}_%j.log')
         jid = slurm.sbatch(job_body(tag, tr, sa, env))
         print(f'  submitted {tag}: job {jid}')
