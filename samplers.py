@@ -1393,18 +1393,56 @@ class LangFlowState(BaseState):
   step_idx: int
   nfe: int
   done: bool
+  start_idx: int = 0                   # window start: first non-common-prefix position
   prefix_embeds: torch.Tensor = None   # (B, P, d) clean raw embeds, or None
   prefix_tokens: torch.Tensor = None   # (B, P) int64, or None
   prefix_lengths: torch.Tensor = None  # (B,) int64, or None
 
+@torch.compile
+def langflow_compute_zhat(x, E, log_p, mode):
+  # Predicted-clean point zhat = E^T xhat (paper Alg.2). Unlike the SFM/EFLM
+  # velocity target this is the POINT itself (no `- x`): the LangFlow Euler-on-
+  # gamma update is affine, not a geodesic/straight-line step. `x` is unused and
+  # kept only to mirror the SFM/EFLM *_compute_velocity signature.
+  p = log_p.exp()
+  if mode == 'exact':
+    ein = 'blv,vd->bld' if E.ndim == 2 else 'blk,blkd->bld'
+    return torch.einsum(ein, p, E)
+  elif mode == 'sample':
+    target_idx = sample_categorical(p)
+    if E.ndim == 2:  # [V, d]
+      return E[target_idx]
+    # [B, L, k, d]
+    B, L = target_idx.shape
+    return E[
+      torch.arange(B, device=E.device)[:, None],
+      torch.arange(L, device=E.device)[None, :],
+      target_idx]
+  else:
+    raise ValueError(f'Unknown velocity mode: {mode}')
 
 class LangFlowSampler(Sampler):
-  """Euler-on-gamma sampler (LangFlow Algorithm 2), always-on self-conditioning."""
+  """Euler-on-gamma sampler (LangFlow Algorithm 2), always-on self-conditioning.
 
-  def __init__(self, temperature, p_nucleus, top_k):
+  Decode knobs mirror SFMSampler so every model decodes identically in the fair
+  comparison. For LangFlow the "velocity" target IS the predicted-clean embedding
+  zhat = E^T xhat_theta that enters the affine Euler-on-gamma update (no geodesic
+  step): velocity='exact' -> sum_k p_k e_k (paper Alg.2); velocity='sample' ->
+  sampled-token embedding; top_k_velocity=k>0 restricts zhat to the top-k tokens
+  (k=1 => argmax endpoint, the analog of S-FLM top_k_velocity=1); -1 => full vocab.
+  noise_removal='greedy' -> final-step argmax (Alg.2); 'ancestral' -> sample.
+  Embeddings are RAW (Option A), never sphere-normalized. Defaults (exact / -1 /
+  greedy) reproduce paper Algorithm 2 exactly."""
+
+  def __init__(self, noise_removal, velocity, use_float64, temperature,
+               p_nucleus, top_k, top_k_velocity):
+    self.noise_removal = noise_removal
+    self.velocity = velocity
+    self.use_float64 = use_float64
     self.temperature = temperature
     self.p_nucleus = p_nucleus
     self.top_k = top_k
+    self.top_k_velocity = top_k_velocity
 
   def init_state(self, model, num_samples, *,
                  num_steps=None, eps=1e-5, prefix_tokens=None,
@@ -1428,13 +1466,45 @@ class LangFlowSampler(Sampler):
       prefix_embeds = model.backbone.get_raw_embeddings(
         prefix_tokens).to(xt.dtype)
       self._project_prefix(xt, prefix_embeds, prefix_lengths)
+      # Positions before the shortest prefix are clean for ALL samples, so the
+      # Euler update skips them (matches SFMSampler); _project_prefix re-clamps
+      # the remaining variable-length prefix positions each step.
+      start_idx = int(prefix_lengths.min())
+    else:
+      start_idx = 0
+
+    if num_steps is None:
+      num_steps = model.config.sampler.steps
+
+
     z_sc = torch.zeros_like(xt)
     return LangFlowState(xt=xt, gammas=gammas, alphas=alphas,
                          sigmas=sigmas, z_sc=z_sc, step_idx=0,
-                         nfe=0, done=False,
+                         nfe=0, done=False, start_idx=start_idx,
                          prefix_embeds=prefix_embeds,
                          prefix_tokens=prefix_tokens,
                          prefix_lengths=prefix_lengths)
+
+  def _last_step_decode(self, state, log_p):
+    if self.noise_removal == 'greedy':
+      tokens = log_p.argmax(dim=-1)
+    elif self.noise_removal == 'ancestral':
+      tokens = sample_categorical(log_p.exp())
+    else:
+      raise ValueError(self.noise_removal)
+    if state.prefix_tokens is not None:
+      self._project_prefix(tokens, state.prefix_tokens,
+                           state.prefix_lengths)
+    state.xt = tokens  # replace continuous [B, L, d] with int [B, L]
+    state.done = True
+    return state
+
+  def _select_topk(self, log_p, E, k):
+    log_p_k, top_idxs = torch.topk(log_p, k, dim=-1)
+    return torch.log_softmax(log_p_k, dim=-1), F.embedding(top_idxs, E)
+
+  def _compute_zhat(self, x, E, log_p):
+    return langflow_compute_zhat(x, E, log_p, mode=self.velocity)
 
   def step(self, model, state):
     import algo
@@ -1450,6 +1520,8 @@ class LangFlowSampler(Sampler):
       sigma=sigma_k.reshape(1, 1).expand(B, 1),
       r=1.0, temperature=self.temperature)
     log_p = model.forward(x0=None, xt=state.xt, sigma=gamma_k, context=ctx)
+    if self.use_float64:
+      log_p = log_p.to(torch.float64)
     state.nfe += 1
 
     if self.p_nucleus != 1.0 or self.top_k != -1:
@@ -1457,33 +1529,45 @@ class LangFlowSampler(Sampler):
         log_p, top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
 
     if is_last:
-      tokens = log_p.argmax(-1)
-      if state.prefix_tokens is not None:
-        self._project_prefix(tokens, state.prefix_tokens,
-                             state.prefix_lengths)
-      state.xt = tokens
-      state.done = True
-      return state
+      return self._last_step_decode(state, log_p)
 
-    E = model.backbone.sphere_embed.weight
-    zhat = torch.einsum('blv,vd->bld', log_p.exp(), E)
-    state.z_sc = zhat
+    log_p_window = log_p[:, state.start_idx:]
+    # RAW (Option A) embeddings; match log_p dtype so the float64 path is exact.
+    E = model.backbone.sphere_embed.weight.detach().to(log_p.dtype)
+    # Self-conditioning carry stays the SOFT full-vocab predicted-clean (probs @ E),
+    # matching training (algo.LangFlow._self_cond_pass) -- FULL sequence, since the
+    # next forward attends over all positions and needs a self-cond signal at each.
+    state.z_sc = torch.einsum('blv,vd->bld', log_p.exp(), E).to(state.xt.dtype)
+
+    # The Euler update only touches positions >= start_idx: the common prefix stays
+    # clean (it would be overwritten by _project_prefix anyway). Only the update is
+    # windowed; the forward and z_sc above are full-sequence.
+    x = state.xt[:, state.start_idx:].to(log_p.dtype)
+    # Predicted-clean endpoint for the update honors velocity / top_k_velocity.
+    if self.top_k_velocity > 0:
+      log_p_v, E = self._select_topk(log_p_window, E, self.top_k_velocity)
+    else:
+      log_p_v = log_p_window
+    zhat = self._compute_zhat(x, E, log_p_v)
 
     a_next, s_next = state.alphas[k + 1], state.sigmas[k + 1]
-    state.xt = s_next * (state.xt / sigma_k
-                         + (a_next / s_next - alpha_k / sigma_k) * zhat)
+    state.xt[:, state.start_idx:] = (s_next * (x / sigma_k
+                + (a_next / s_next - alpha_k / sigma_k) * zhat)).to(state.xt.dtype)
     self._project_prefix(state.xt, state.prefix_embeds,
                          state.prefix_lengths)
     state.step_idx += 1
     return state
 
-
 def get_sampler(config):
   s = config.sampler
 
   if s.predictor == 'langflow':
-    return LangFlowSampler(temperature=s.temperature,
-                           p_nucleus=s.p_nucleus, top_k=s.top_k)
+    return LangFlowSampler(noise_removal=s.noise_removal,
+                           velocity=s.velocity,
+                           use_float64=s.use_float64,
+                           temperature=s.temperature,
+                           p_nucleus=s.p_nucleus, top_k=s.top_k,
+                           top_k_velocity=s.top_k_velocity)
 
   if s.predictor == 'ancestral':
     return AncestralSampler(

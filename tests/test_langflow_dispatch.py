@@ -40,6 +40,8 @@ def _sampler_config(*, predictor='langflow', steps=4):
       'use_float64': False,
       'p_nucleus': 1.0,
       'top_k': -1,
+      'velocity': 'exact',
+      'top_k_velocity': -1,
       'temperature': 1.0,
       'num_sample_batches': 2,
       'num_sample_log': 2,
@@ -95,9 +97,11 @@ class _StubModel:
     return logits.log_softmax(-1)
 
 
-def _build_langflow_sampler():
+def _build_langflow_sampler(*, velocity='exact', top_k_velocity=-1,
+                            noise_removal='greedy', use_float64=False):
   return samplers.LangFlowSampler(
-    temperature=1.0, p_nucleus=1.0, top_k=-1)
+    noise_removal=noise_removal, velocity=velocity, use_float64=use_float64,
+    temperature=1.0, p_nucleus=1.0, top_k=-1, top_k_velocity=top_k_velocity)
 
 
 # ---------------------------------------------------------------------------
@@ -115,13 +119,16 @@ def test_langflow_state_importable():
 
 
 def test_langflow_sampler_init_signature():
-  """ARCH §6.4: `LangFlowSampler.__init__` takes temperature/p_nucleus/top_k
-  (no velocity/slerp/invert_time_convention — γ-path Euler needs none)."""
+  """`LangFlowSampler.__init__` carries the shared decode knobs so it can be swept
+  identically to the SFM sampler: temperature/p_nucleus/top_k plus noise_removal/
+  velocity/top_k_velocity (the latter two shape the predicted-clean zhat endpoint
+  fed into the affine Euler-on-γ update; no slerp/invert_time_convention needed)."""
   sig = inspect.signature(samplers.LangFlowSampler.__init__)
-  assert 'temperature' in sig.parameters
-  assert 'p_nucleus' in sig.parameters
-  assert 'top_k' in sig.parameters
-  assert 'velocity' not in sig.parameters
+  for p in ('temperature', 'p_nucleus', 'top_k',
+            'noise_removal', 'velocity', 'top_k_velocity'):
+    assert p in sig.parameters
+  assert 'slerp_float64' not in sig.parameters
+  assert 'invert_time_convention' not in sig.parameters
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +253,30 @@ def test_step_zhat_carry_matches_raw_probs_matmul_E():
   expected_zhat = torch.einsum('blv,vd->bld', log_p.exp(), E)
   state = sampler.step(model, state)  # non-last -> sets z_sc carry
   assert torch.allclose(state.z_sc, expected_zhat, atol=1e-4)
+
+
+def test_top_k_velocity_1_uses_argmax_endpoint_but_keeps_soft_self_cond():
+  """SFM-parity decode knobs: `top_k_velocity=1` makes the Euler update target
+  `zhat` the argmax-token embedding (hard top-1 endpoint), while the self-cond
+  carry `z_sc` stays the SOFT `probs @ E` (matches training). Stub argmax = token
+  0, so the update target is E[0]; z_sc is the softmax-weighted mix."""
+  sampler = _build_langflow_sampler(velocity='exact', top_k_velocity=1)
+  model = _StubModel(d=8, vocab_size=4, length=3, steps=4)
+  state = sampler.init_state(model, 2, num_steps=4)
+  k = state.step_idx
+  alpha_k, sigma_k = state.alphas[k], state.sigmas[k]
+  a_next, s_next = state.alphas[k + 1], state.sigmas[k + 1]
+  z_k = state.xt.clone()
+  E = model.backbone.sphere_embed.weight
+  log_p = model.forward(xt=z_k)
+  zhat_hard = E[log_p.argmax(-1)]                                   # top-1 endpoint
+  zhat_soft = torch.einsum('blv,vd->bld', log_p.exp(), E)           # soft self-cond
+  expected = s_next * (z_k / sigma_k
+                       + (a_next / s_next - alpha_k / sigma_k) * zhat_hard)
+  state = sampler.step(model, state)
+  assert torch.allclose(state.xt, expected, atol=1e-4)             # hard update target
+  assert torch.allclose(state.z_sc, zhat_soft, atol=1e-4)          # soft SC carry
+  assert not torch.allclose(zhat_hard, zhat_soft)                  # they really differ
 
 
 def test_step_advances_index_and_counts_nfe():

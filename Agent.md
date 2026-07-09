@@ -66,6 +66,10 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 Make sure the codebase is easy-understanding, canonical, and concise.
 
+### 6. RUN MODELS ON COMPUTE NODE
+
+If you're on SLURM and the script need to load / compute with model, do it on compute node. DO NOT RUN ANY MODEL ON LOGIN NODE.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

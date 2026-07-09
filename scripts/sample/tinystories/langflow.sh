@@ -11,7 +11,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/langflow}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
 STEPS="${STEPS:-180}"
-TOPK="${TOPK:-1}"
+TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
+VELOCITY="${VELOCITY:-exact}"
 SELF_COND="${SELF_COND:-true}"
 
 cd "${REPO_ROOT}"
@@ -26,8 +27,9 @@ MARGS=(
     noise=gumbel
     noise.trainable=true
     sampler=langflow
+    sampler.velocity=${VELOCITY}
+    sampler.top_k_velocity=${TOPK_VELOCITY}
     sampler.steps=${STEPS}
-    sampler.top_k=${TOPK}
 )
 
 # (1) validation perplexity
