@@ -78,6 +78,7 @@ Make sure the codebase is easy-understanding, canonical, and concise.
 ### Slurm Usage Guide
 
 1. Use ``nice`` to control the priority
+2. Ask before canceling any job, you're only allowed to use ``nice`` to prioritize / de-prioritize jobs.
 
 ### Unicorn Slurm
 
