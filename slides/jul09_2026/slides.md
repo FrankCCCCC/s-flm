@@ -122,6 +122,22 @@ hy { color: #7B3FA0; }
 
 ---
 
+## Baseline: Results — Sudoku (3-Seed Avg)
+
+Full-board solve rate (%), mean ± seed-std over seeds {1, 2, 3}; same eval protocol as the curvature runs.
+
+| Model | easy | medium | hard |
+|---|---|---|---|
+| AR | 14.7 ± 3.5 | 3.4 ± 0.3 | 0.5 ± 0.3 |
+| **S-FLM (naive)** | 78.8 ± 1.1 | 43.8 ± 3.2 | 11.1 ± 1.7 |
+| S-FLM + trunc | 94.4 ± 0.4 | 79.8 ± 1.7 | 42.4 ± 3.4 |
+| S-FLM + trunc + adaptive | 95.0 ± 0.8 | 76.7 ± 7.3 | 42.2 ± 2.8 |
+| **E-FLM (naive)** | 88.2 ± 1.2 | 62.2 ± 2.3 | 19.2 ± 3.3 |
+| LangFlow + ada sched | 81.2 ± 0.9 | 52.4 ± 2.7 | 18.2 ± 2.1 |
+| LangFlow + ada sched + SC | 97.0 ± 0.5 | 87.2 ± 1.9 | 50.4 ± 4.6 |
+
+---
+
 <!-- ---
 
 ## Environment
