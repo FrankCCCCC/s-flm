@@ -1075,6 +1075,159 @@ class HFLMSampler(Sampler):
     return state
 
 # ════════════════════════════════════════════════════════════════
+#  DFLM Samplers
+# ════════════════════════════════════════════════════════════════
+
+class DFLMSampler(Sampler):
+  def __init__(self, noise_removal, velocity, use_float64,
+               slerp_float64, eps, temperature, p_nucleus,
+               top_k,
+               top_k_velocity,
+               invert_time_convention,
+               prior_cov, rho_max, gaussian_curvature=-1.0):
+    self.noise_removal = noise_removal
+    self.velocity = velocity
+    self.use_float64 = use_float64
+    self.slerp_float64 = slerp_float64
+    self.eps = eps
+    self.temperature = temperature
+    self.p_nucleus = p_nucleus
+    self.top_k = top_k
+    self.top_k_velocity = top_k_velocity
+    self.invert_time_convention = invert_time_convention
+    self.prior_cov = prior_cov
+    self.rho_max = rho_max
+    self.gaussian_curvature = gaussian_curvature
+
+  def _rho_clamp(self, rhos):
+    return self.rho_max * torch.tanh(rhos / self.rho_max)
+
+  def init_state(self, model, num_samples, *,
+                 num_steps=None, eps=1e-5, prefix_tokens=None,
+                 prefix_lengths=None):
+    self._validate_prefix_args(prefix_tokens, prefix_lengths)
+    d = model.backbone.embed_dim
+    rhos, u = GeoUtils.wrapped_normal(
+      shape=(num_samples, model.num_tokens, d),
+      mean=0.0, cov=self.prior_cov,
+      dtype=torch.float32, device=model.device)
+    rhos_c = self._rho_clamp(rhos)
+    xt = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+      rhos_c, u, gaussian_curvature=self.gaussian_curvature)
+
+    prefix_embeds = None
+    if prefix_tokens is not None:
+      p_rhos, p_thetas = model.backbone.get_hyperbolic_polar_embeddings(
+        prefix_tokens)
+      prefix_embeds = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+        self._rho_clamp(p_rhos).squeeze(-1), p_thetas,
+        gaussian_curvature=self.gaussian_curvature)
+      self._project_prefix(xt, prefix_embeds, prefix_lengths)
+      start_idx = int(prefix_lengths.min())
+    else:
+      start_idx = 0
+
+    if num_steps is None:
+      num_steps = model.config.sampler.steps
+
+    if self.invert_time_convention:
+      t_schedule = torch.linspace(eps, 1.0, num_steps + 1,
+                                  device=model.device)
+    else:
+      t_schedule = torch.linspace(1.0, eps, num_steps + 1,
+                                  device=model.device)
+    state = SFMState(xt=xt, t_schedule=t_schedule,
+      start_idx=start_idx, step_idx=0, nfe=0, done=False,
+      prefix_lengths=prefix_lengths,
+      prefix_embeds=prefix_embeds,
+      prefix_tokens=prefix_tokens)
+    return state
+
+  def _last_step_decode(self, state, log_p):
+    if self.noise_removal == 'greedy':
+      tokens = log_p.argmax(dim=-1)
+    elif self.noise_removal == 'ancestral':
+      tokens = sample_categorical(log_p.exp())
+    else:
+      raise ValueError(self.noise_removal)
+
+    if state.prefix_embeds is not None:
+      self._project_prefix(tokens, state.prefix_tokens,
+                           state.prefix_lengths)
+    state.xt = tokens  # replace continuous [B,L,d] with int [B,L]
+    state.done = True
+    return state
+
+  def _get_step_size(self, model, state):
+    _, alpha_t = model.noise(state.t_schedule[state.step_idx])
+    _, alpha_s = model.noise(state.t_schedule[state.step_idx + 1])
+    return sfm_step_size(
+      alpha_t, alpha_s, self.invert_time_convention, self.eps)
+
+  def step(self, model, state):
+    num_steps = len(state.t_schedule) - 1
+    is_last_step = (state.step_idx == num_steps - 1)
+
+    _, alpha_t = model.noise(state.t_schedule[state.step_idx])
+    sigma_t = model._sigma_from_alphat(alpha_t).reshape(-1, 1)
+
+    context = SFMContext(temperature=self.temperature)
+    log_p = model.forward(xt=state.xt, sigma=sigma_t,
+                          context=context)
+    if self.use_float64:
+      log_p = log_p.to(torch.float64)
+    state.nfe += 1
+
+    if self.p_nucleus != 1.0 or self.top_k != -1:
+      log_p = utils.top_k_top_p_filtering(log_p,
+        top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
+
+    if is_last_step:
+      return self._last_step_decode(state, log_p)
+
+    # Geodesic-step toward the predicted-clean token e_{v*}.
+    log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
+    if self.velocity == 'sample':
+      v_star = sample_categorical(log_p_window.exp())  # [B, Lw]
+    else:
+      v_star = log_p_window.argmax(dim=-1)  # [B, Lw]
+
+    dest_rhos, dest_thetas = (
+      model.backbone.get_hyperbolic_polar_embeddings(v_star))
+    dest_rhos_c = self._rho_clamp(dest_rhos.detach())
+    dest_thetas = dest_thetas.detach()
+
+    x = state.xt[:, state.start_idx:]  # current Poincaré point [B, Lw, d]
+    # dt is the fraction of the remaining geodesic distance toward predicted-
+    # clean (reused sfm_step_size). The clamp guards against a degenerate
+    # (negative or huge) dt from a misconfigured schedule that would otherwise
+    # drive xt to the Poincaré boundary; it is a no-op for the real log-linear
+    # schedule where dt in (0, 1). It does not make arbitrary schedules safe.
+    dt = self._get_step_size(model, state).clamp(0.0, 1.0)
+    dt = dt.reshape(-1, 1, 1)
+
+    if self.slerp_float64:
+      x = x.to(torch.float64)
+      dest_rhos_c = dest_rhos_c.to(torch.float64)
+      dest_thetas = dest_thetas.to(torch.float64)
+      dt = dt.to(torch.float64)
+
+    x_new = HyperbolicHeatKernel.geodesic(
+      t=dt,
+      gaussian_curvature=self.gaussian_curvature,
+      src_cartesian=x,
+      cartesian_model=Geometry.POINCARE,
+      dest_radial=dest_rhos_c.squeeze(-1),
+      dest_angular=dest_thetas,
+      output_coord=Coordinate.CARTESIAN)
+
+    state.xt[:, state.start_idx:] = x_new.to(state.xt.dtype)
+    self._project_prefix(
+      state.xt, state.prefix_embeds, state.prefix_lengths)
+    state.step_idx += 1
+    return state
+
+# ════════════════════════════════════════════════════════════════
 #  FLM Samplers
 # ════════════════════════════════════════════════════════════════
 

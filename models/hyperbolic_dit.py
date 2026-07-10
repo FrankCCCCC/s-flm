@@ -191,6 +191,17 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     thetas = utils.sphere_normalize(emb)
     return rhos, thetas
 
+  def get_poincare_disk_embeddings(self, token_ids: torch.Tensor, gaussian_curvature: float=-1.0) -> torch.Tensor:
+    emb = self.sphere_embed(token_ids)  # [B, L, d]
+    rhos = emb.norm(p=2, dim=-1, keepdim=True)
+    thetas = utils.sphere_normalize(emb)
+    disk_cart = GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+      rhos=rhos,
+      thetas=thetas,
+      gaussian_curvature=gaussian_curvature,
+    )
+    return disk_cart
+
   def reset_kv_cache(self):
     self.ctx_cached_len = 0
 
