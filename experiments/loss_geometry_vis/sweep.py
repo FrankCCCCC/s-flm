@@ -34,13 +34,19 @@ import subprocess
 from simple_slurm import Slurm
 
 DEV1 = '/share/thickstun/sychou/workspace/research/s-flm-dev1/s-flm'   # dev1 (main) tool
-SFLM = '/share/thickstun/sychou/workspace/research/s-flm'              # claude/curv tool + all checkpoints
+SFLM = '/share/thickstun/sychou/workspace/research/s-flm'              # all checkpoints live here
+# HFLM-curvature runs need the claude/curv code (gaussian_curvature; no cartesian_model
+# requirement). The main SFLM tree has since moved to claude/dflm, so we pin a detached
+# git worktree at the figure-drawing commit f3949a3:
+#   git -C s-flm worktree add --detach ../s-flm-curv f3949a3
+#   cp visualization/loss_geometry.py ../s-flm-curv/visualization/loss_geometry_curv.py
+SFLM_CURV = '/share/thickstun/sychou/workspace/research/s-flm-curv'
 OUTD = f'{DEV1}/experiments/loss_geometry_vis'
 LOGS = f'{OUTD}/logs'
 OUT_TS = f'{SFLM}/outputs'                          # tinystories project dirs
 SUD = f'{SFLM}/outputs/hflm_curv_init_lr_sudoku'    # sudoku baselines + curvature
 
-CONDA_SH, CONDA_ENV = '/home/sc3379/anaconda3/etc/profile.d/conda.sh', 'sfm'
+ENV_BIN = '/home/sc3379/anaconda3/envs/sfm/bin'     # prepend to PATH (robust: no `source`/`conda init`)
 PARTITION, CONSTRAINT = 'gpu', 'gpu-high'           # 48GB, sm_86+ (safe for the cu128 build)
 
 TS_STEPS = '5000 20000 30000'          # tinystories: max_steps 30k
@@ -80,14 +86,13 @@ def out_prefix(dataset, out):
 
 
 def job_body(dataset, out, proj, run, steps, tool):
-  repo = DEV1 if tool == 'main' else SFLM
+  repo = DEV1 if tool == 'main' else SFLM_CURV
   script = ('visualization/loss_geometry.py' if tool == 'main'
             else 'visualization/loss_geometry_curv.py')
   out_abs = out_prefix(dataset, out)
   return f'''export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export TMPDIR=/tmp
-source {CONDA_SH}
-conda activate {CONDA_ENV}
+export PATH={ENV_BIN}:$PATH
 cd {repo}
 for XAXIS in t xt_norm; do
   python {script} --mode steps --project {proj} --run {run} \\
