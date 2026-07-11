@@ -1,8 +1,9 @@
 # TinyStories loss-geometry — checkpoints & hyperparameters
 
-Documents the exact checkpoint path and hyperparameters behind each figure in
-this directory. For the analysis/findings see [`../RESULT.md`](../RESULT.md)
-(§ "TinyStories runs").
+Documents the exact checkpoint path and hyperparameters behind each figure. Each
+run's figures + `.json` live in their own `<run>/` subfolder here (e.g.
+`eflm_naive_geo/eflm_naive_geo.png`). For the analysis/findings see
+[`../RESULT.md`](../RESULT.md) (§ "TinyStories runs").
 
 ## Common to all 7 figures
 

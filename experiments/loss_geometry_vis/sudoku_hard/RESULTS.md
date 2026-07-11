@@ -1,7 +1,9 @@
 # Sudoku-hard baselines loss-geometry — checkpoints & hyperparameters
 
-Documents the exact checkpoint path and hyperparameters behind each figure in
-this directory. For the analysis/findings see [`../RESULT.md`](../RESULT.md)
+Documents the exact checkpoint path and hyperparameters behind each figure. Each
+run's figures + `.json` live in their own `<run>/` subfolder here (e.g.
+`langflow_ada/langflow_ada.png`); the HFLM-curvature runs are `hflm_K*/` (see
+`hflm_curv_RESULTS.md`). For the analysis/findings see [`../RESULT.md`](../RESULT.md)
 (§ "Sudoku (hard, seed=1)").
 
 ## Common to all 6 figures

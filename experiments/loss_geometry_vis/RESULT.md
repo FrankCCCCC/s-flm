@@ -30,8 +30,10 @@ faithful.
 > checkpoints of a learned schedule.** See [Caveat](#caveat-what-t-means) — read
 > this before comparing runs point-by-point.
 
-Figures live in [`tinystories/`](tinystories/); each run has a linear-Y (`.png`)
-and log-Y (`_log.png`) figure plus a cached `.json` of the raw curves.
+Figures are organized as `{dataset}/{run}/` — each run folder holds its linear-Y
+(`.png`), log-Y (`_log.png`) and `‖x_t‖`-axis (`_xtnorm.png`, `_xtnorm_log.png`)
+figures plus a cached `.json`. Datasets: `tinystories/` and `sudoku_hard/` (the
+HFLM-curvature runs are `sudoku_hard/hflm_K*/`).
 
 ## TinyStories runs
 
@@ -171,7 +173,7 @@ One curve per Gaussian curvature `K`, using the **best `(init, lr)`** config of
 each curvature from the Sudoku-hard sweep `outputs/hflm_curv_init_lr_sudoku`
 (`prior_cov` is **fixed at 0.25**; only `gaussian_curvature = −K` varies).
 "Best" = highest `eval/results.json` sudoku accuracy (num_correct / 2000).
-Figures in [`hflm_curv/`](hflm_curv/). **HFLM must be drawn with the non-dev1
+Figures in [`sudoku_hard/hflm_K*/`](sudoku_hard/). **HFLM must be drawn with the non-dev1
 `claude/curv` code** (the `gaussian_curvature` knob is absent on `main`; dev1
 would silently use K=−1) — done via `s-flm/visualization/loss_geometry_curv.py`.
 
@@ -205,7 +207,7 @@ same-step (20K) comparison across all six curvatures.
 - The **2-hour poll is now retired** (cron `81ebad32` deleted) — all 6 best-config
   rs1 runs are finished, so no further checkpoints are coming. To upgrade to the
   higher-scoring **rs2/rs3** seeds would require retrieving them from `ch2263`
-  (needs your authorization); recipe in `hflm_curv/POLL_STATE.md`.
+  (needs your authorization); recipe in `sudoku_hard/hflm_curv_POLL_STATE.md`.
 
 ## Reproduce
 

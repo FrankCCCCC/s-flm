@@ -60,6 +60,8 @@ def _load_config(run_dir: str, ckpt: str, args):
   for k in ('global_batch_size', 'eval_global_batch_size',
             'batch_size', 'eval_batch_size'):
     cfg.loader[k] = args.batch_size
+  if cfg.algo.name == 'hflm' and cfg.algo.get('gaussian_curvature') is None:
+    cfg.algo.gaussian_curvature = -1.0  # pre-knob HFLM configs = unit hyperboloid
   return cfg
 
 
@@ -88,6 +90,27 @@ def _pin_time(model, cfg, t, step):
         torch.full((n,), _t, device=self.device), model)
 
 
+def _install_xt_norm_hook(model):
+  """Wrap q_xt to accumulate the per-token L2 norm of the corrupted sample x_t
+  (over valid/corrupted tokens) into model._xt_sum / _xt_cnt. Reset both before
+  each t; the mean per-token norm is _xt_sum / _xt_cnt. Note: for SFM the slerp
+  keeps x_t on the sphere, so this norm is ~constant."""
+  orig = model.q_xt
+  def wrapped(*a, **k):
+    xt = orig(*a, **k)
+    vt = k.get('valid_tokens')
+    if vt is None and len(a) >= 4:  # LangFlow passes valid_tokens positionally
+      vt = a[3]
+    norm = xt.float().norm(dim=-1)  # [B, L] L2 norm over the embedding dim
+    if vt is not None:
+      m = vt.bool()
+      model._xt_sum += (norm * m).sum().item(); model._xt_cnt += int(m.sum())
+    else:
+      model._xt_sum += norm.sum().item(); model._xt_cnt += norm.numel()
+    return xt
+  model.q_xt = wrapped
+
+
 @torch.no_grad()
 def _loss_curve(run_dir: str, step: int, t_grid: np.ndarray, args):
   """L(t) = token-mean denoising CE on val batches, at each fixed t."""
@@ -106,15 +129,32 @@ def _loss_curve(run_dir: str, step: int, t_grid: np.ndarray, args):
     cfg, tokenizer, skip_train=True, valid_seed=cfg.seed)
   batches = [{k: v.to(device) for k, v in b.items()}
              for b in itertools.islice(iter(valid_dl), args.num_batches)]
-  curve = []
+  _install_xt_norm_hook(model)  # records mean per-token |x_t| per t
+  curve, norms = [], []
   for t in t_grid:
     _pin_time(model, cfg, t, step)  # fixed t; rest is the algo's own _loss
     torch.manual_seed(cfg.seed)  # same prior-noise draws at every t/ckpt
+    model._xt_sum, model._xt_cnt = 0.0, 0
     out = [model._loss(b['input_ids'], b['attention_mask']) for b in batches]
     curve.append(sum(o.nlls.item() for o in out)
                  / sum(o.num_tokens.item() for o in out))
-    print(f'  t={t:.4f}  loss={curve[-1]:.4f}', flush=True)
-  return curve
+    norms.append(model._xt_sum / max(model._xt_cnt, 1))
+    print(f'  t={t:.4f}  loss={curve[-1]:.4f}  |x_t|={norms[-1]:.4f}', flush=True)
+  return curve, norms
+
+
+def _add_arrows(ax, x, y, color, log_y=False):
+  """Single arrowhead pointing to the generative target (t=0, clean): sampling
+  runs noise (t=1) -> clean (t=0), so the arrow points at the smallest-t point.
+  Skips non-positive y on a log axis."""
+  x = np.asarray(x, float); y = np.asarray(y, float)
+  ok = np.arange(len(x)) if not log_y else np.where(y > 0)[0]
+  if len(ok) < 2:
+    return
+  a, b = ok[1], ok[0]  # head at the smallest-t (clean) point = target destination
+  ax.annotate('', xy=(x[b], y[b]), xytext=(x[a], y[a]),
+              arrowprops=dict(arrowstyle='-|>', color=color, lw=1.2,
+                              mutation_scale=18))
 
 
 def plot(paths: List[str], loaded_steps: List[int], tags: List[str],
@@ -124,33 +164,42 @@ def plot(paths: List[str], loaded_steps: List[int], tags: List[str],
   Curves are computed once via the eval pipeline and cached in <out>.json;
   a second call (e.g. for the log-y figure) redraws from the cache.
   """
+  x_axis = getattr(args, 'x_axis', 't')  # 't' or 'xt_norm' (|x_t| on the x-axis)
   cache = args.out + '.json'
   if os.path.isfile(cache):
     saved = json.load(open(cache))
     t_grid, curves = np.array(saved['t']), saved['curves']
+    norms = saved.get('norms', {})
   else:
     t_grid = np.linspace(args.t_min, 1.0, args.t_points)
-    curves = {}
+    curves, norms = {}, {}
     for path in paths:
       for step, tag in zip(loaded_steps, tags):
         label = tag if len(paths) == 1 else f'{os.path.basename(path)}, {tag}'
-        curves[label] = _loss_curve(path, step, t_grid, args)
+        curves[label], norms[label] = _loss_curve(path, step, t_grid, args)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(cache, 'w') as f:
-      json.dump(dict(t=t_grid.tolist(), curves=curves, title=title,
+      json.dump(dict(t=t_grid.tolist(), curves=curves, norms=norms, title=title,
                      paths=paths, loaded_steps=loaded_steps,
                      num_batches=args.num_batches,
                      batch_size=args.batch_size), f, indent=2)
     print(f'wrote {cache}')
 
+  if x_axis == 'xt_norm' and not norms:
+    raise SystemExit(f'{cache} predates the xt_norm feature (no cached norms); '
+                     'delete it and rerun to recompute.')
   fig, ax = plt.subplots(figsize=(6, 4.5))
   for label, c in curves.items():
-    ax.plot(t_grid, c, marker='o', markersize=3, label=label)
-  ax.set(xlabel='t', ylabel='Loss', title=title)
+    x = t_grid if x_axis == 't' else np.array(norms[label])
+    line, = ax.plot(x, c, marker='o', markersize=3, label=label)
+    _add_arrows(ax, x, c, line.get_color(), log_y=log_y_axis)  # increasing-t
+  ax.set(xlabel=('t' if x_axis == 't' else r'$\|x_t\|_2$ (mean per corrupted token)'),
+         ylabel='Loss', title=title)
   if log_y_axis:
     ax.set_yscale('log')
   ax.grid(alpha=0.3); ax.legend(); fig.tight_layout()
-  out_png = args.out + ('_log.png' if log_y_axis else '.png')
+  suffix = ('_xtnorm' if x_axis == 'xt_norm' else '') + ('_log' if log_y_axis else '')
+  out_png = args.out + suffix + '.png'
   fig.savefig(out_png, dpi=150); plt.close(fig)
   print(f'wrote {out_png}')
 
@@ -213,6 +262,8 @@ def main():
   p.add_argument('--inits', nargs='+', default=['0.04'])
   p.add_argument('--prior-covs', nargs='+', default=['1.0'])
   p.add_argument('--out', required=True, help='output prefix (no extension)')
+  p.add_argument('--x-axis', choices=['t', 'xt_norm'], default='t',
+                 help="x-axis: flow-time t, or L2 norm of the corrupted sample x_t")
   p.add_argument('--t-min', type=float, default=0.001)
   p.add_argument('--t-points', type=int, default=33)
   p.add_argument('--num-batches', type=int, default=8)
