@@ -2,8 +2,10 @@ predictor: langflow
 steps: 1024                # match sfm.yaml for equal-NFE H4 comparison
 noise_removal: greedy      # final argmax (Algorithm 2); 'greedy' is the argmax decode
 use_float64: false
+velocity: exact            # exact = sum_k p_k e_k (paper Alg.2); sample = sampled-token embedding
 p_nucleus: 1.0
 top_k: -1
+top_k_velocity: -1         # -1 = full vocab (paper Alg.2); k>0 restricts zhat to top-k (1 = argmax endpoint)
 temperature: 1.0
 num_sample_batches: 2
 num_sample_log: 2
