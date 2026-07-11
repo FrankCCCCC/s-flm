@@ -70,6 +70,8 @@ Make sure the codebase is easy-understanding, canonical, and concise.
 
 If you're on SLURM and the script need to load / compute with model, do it on compute node. DO NOT RUN ANY MODEL ON LOGIN NODE.
 
+### 7. NO GIT OPERATIOn WITHOUT USERS' APPROVAL
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
