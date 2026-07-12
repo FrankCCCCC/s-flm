@@ -1,5 +1,10 @@
 #!/bin/bash
-
+# H-FLM with truncated noise schedule. ALPHA_MAX default is the hyperbolic
+# analog of the paper's Eq. 17 bound: alpha_star_hyperbolic(V=12, d=512) =
+# 0.624 (noise_schedules.py; init=hyperbolic std 0.3, prior_cov=0.25,
+# rho_max=12, delta=0.1). NOT the sphere bound 0.093 — that collapses HFLM
+# (experiments/hflm/RESULTS.md). Recompute ALPHA_MAX if INIT/PRIOR_COV/
+# RHO_MAX change (embed_std for INIT=ngpt is 1/sqrt(512)).
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
@@ -11,7 +16,8 @@ INIT="${INIT:-hyperbolic}"           # embedding init: hyperbolic / ngpt / rando
 INIT_STD="${INIT_STD:-null}"         # std for INIT=custom; ignored otherwise
 LR="${LR:-3e-4}"                     # AdamW learning rate
 SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/hflm_${DIFFICULTY}}"
+ALPHA_MAX="${ALPHA_MAX:-0.624}"      # alpha_star_hyperbolic(12, 512); null = no truncation
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/hflm_truncated_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 
@@ -28,11 +34,12 @@ python -u -m main \
     seed="${SEED}" \
     algo=hflm \
     algo.invert_time_convention=false \
-    algo.prior_cov=0.25 \
+    algo.prior_cov="${PRIOR_COV:-0.25}" \
     algo.rho_max=12 \
     algo.gaussian_curvature="${GAUSS_CURV}" \
     sampler=hflm \
-    noise=log-linear \
+    noise="${NOISE:-log-linear}" \
+    noise.alpha_max="${ALPHA_MAX}" \
     loader.global_batch_size=256 \
     loader.batch_size=256 \
     loader.eval_batch_size=256 \

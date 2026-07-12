@@ -1,15 +1,21 @@
 #!/bin/bash
-
+# E-FLM with truncated + adaptive noise schedule. ALPHA_MAX default is the
+# Euclidean analog of the paper's Eq. 17 bound: alpha_star_euclidean(V=12)
+# = 0.767 (noise_schedules.py; ngpt init ||e||~=1, N(0,I) prior, delta=0.1).
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/sfm_${DIFFICULTY}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/eflm_truncated_adaptive_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
+ALPHA_MAX="${ALPHA_MAX:-0.767}"      # alpha_star_euclidean(12); null = no truncation
+
+GLOBAL_BS=256
+BUF_SIZE=$((50 * GLOBAL_BS))
 
 cd "${REPO_ROOT}"
 
@@ -21,8 +27,13 @@ python -u -m main \
     model=tiny-sphere-dit \
     algo=eflm \
     algo.invert_time_convention=false \
-    noise=log-linear \
-    loader.global_batch_size=256 \
+    noise=log-linear-adaptive \
+    noise.alpha_max="${ALPHA_MAX}" \
+    noise.adaptive_refit_every=50 \
+    noise.adaptive_buffer_size=${BUF_SIZE} \
+    noise.adaptive_ema=0.9 \
+    noise.adaptive_uniform_mix=1e-3 \
+    loader.global_batch_size=${GLOBAL_BS} \
     loader.batch_size=256 \
     loader.eval_batch_size=256 \
     loader.num_workers=8 \

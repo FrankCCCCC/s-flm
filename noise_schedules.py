@@ -65,6 +65,74 @@ class LogLinear(NoiseSchedule):
     return -(1 - self.eps) * torch.ones_like(t)
 
 
+def alpha_star_sphere(vocab_size, dim, delta=0.1):
+  """Truncation bound for S-FLM (Eq. 17, hyperspherical-flows paper).
+
+  Tractable model: embeddings i.i.d. uniform on S^{d-1}, z_a =
+  SLERP(noise, e_k, a). Smallest signal level a at which e_k is the
+  nearest neighbor of z_a w.p. >= 1-delta (union bound over the
+  |V|-1 impostors; impostor similarity is sub-Gaussian with
+  parameter 1/sqrt(d), target similarity ~ sin(pi*a/2)).
+  Use as noise.alpha_max (MDLM convention, invert_time_convention
+  =false: alpha_t is the signal level).
+  """
+  t = math.sqrt(2 * math.log(2 * (vocab_size - 1) / delta) / dim)
+  return (2 / math.pi) * math.asin(t)
+
+
+def alpha_star_euclidean(vocab_size, delta=0.1, noise_std=1.0,
+                         embed_norm=1.0):
+  """Truncation bound for EFLM (flat-space analog of Eq. 17).
+
+  Tractable model: embeddings i.i.d. uniform on the sphere of
+  radius embed_norm (ngpt init: ||e_v|| ~= 1), noise ~ N(0,
+  noise_std^2 I_d), z_a = a*e_k + (1-a)*z_0. Nearest neighbor
+  (= max inner product, all ||e_v|| equal) analysis:
+    target   <z_a, e_k> ~= a*r^2
+    impostor max_v <z_a, e_v> <= ||z_a|| * r * t,
+             t = sqrt(2*log(2(|V|-1)/delta)/d),
+  with ||z_a||^2 ~= a^2 r^2 + (1-a)^2 s^2 d. Solving gives
+    a/(1-a) >= (s/r) * sqrt(2*log(2(|V|-1)/delta)) =: z
+  (dimension-free: the sqrt(d) of the noise norm cancels the
+  1/sqrt(d) impostor concentration). Much larger than the sphere
+  bound because the N(0, I) noise norm (sqrt(d)) dwarfs the
+  unit-norm embeddings.
+  """
+  z = (noise_std / embed_norm) * math.sqrt(
+    2 * math.log(2 * (vocab_size - 1) / delta))
+  return z / (1 + z)
+
+
+def alpha_star_hyperbolic(vocab_size, dim, delta=0.1, prior_cov=0.25,
+                          embed_std=0.3, rho_max=12.0):
+  """Truncation bound for HFLM (hyperbolic analog of Eq. 17, K=-1).
+
+  Tractable model: clean embeddings at radius rho_1 = clamp(
+  embed_std*sqrt(d)) with i.i.d. uniform directions, origin
+  wrapped-normal noise at radius rho_0 = clamp(sqrt(prior_cov*d));
+  clamp(r) = rho_max*tanh(r/rho_max) mirrors HFLM._rho_clamp. z_a
+  sits at arc-length fraction a along the geodesic noise -> e_k of
+  length D ~= rho_0 + rho_1 - log(2) (high-d directions are nearly
+  orthogonal, so geodesics pass within O(1) of the origin and
+  distances are tree-like: d(x,y) ~= r_x + r_y - log 2). e_k
+  becomes the nearest neighbor once z_a crosses onto the outward
+  leg toward e_k:
+    (1-a)*D <= (a*D - rho_0) + rho_1 - log2 - t
+  (impostor angles fluctuate by cos(theta) ~ t, entering only
+  additively at scale t = sqrt(2*log(2(|V|-1)/delta)/d)), giving
+    a >= (rho_0 + t/2) / (rho_0 + rho_1 - log 2).
+  The sphere bound (0.093 at d=512) collapses HFLM (see
+  experiments/hflm/RESULTS.md); this bound is much larger because
+  the noise radius far exceeds the clean-embedding radius.
+  """
+  def clamp(r):
+    return rho_max * math.tanh(r / rho_max)
+  rho_noise = clamp(math.sqrt(prior_cov * dim))
+  rho_clean = clamp(embed_std * math.sqrt(dim))
+  t = math.sqrt(2 * math.log(2 * (vocab_size - 1) / delta) / dim)
+  return (rho_noise + t / 2) / (rho_noise + rho_clean - math.log(2))
+
+
 class TruncatedScheduleWrapper(NoiseSchedule):
   """Rescale a base schedule to be in [alpha_min, alpha_max]."""
   def __init__(self, base_schedule, alpha_min, alpha_max, eps):
@@ -99,7 +167,8 @@ class AdaptiveSchedule(NoiseSchedule):
                refit_every, n_grid, n_knots, spline_degree,
                ridge_alpha, uniform_mix, max_steps, warmup_steps,
                ema, plot_profile=False,
-               plot_dir='adaptive_noise_plots'):
+               plot_dir='adaptive_noise_plots',
+               log_importance=False):
     super().__init__()
     self.base_schedule = base_schedule
     self.buffer_size = buffer_size
@@ -110,6 +179,7 @@ class AdaptiveSchedule(NoiseSchedule):
     self.uniform_mix = uniform_mix
     self.warmup_steps = warmup_steps
     self.ema = ema
+    self.log_importance = log_importance
     self.plot_profile = plot_profile
     self.plot_dir = plot_dir
     self._step_fmt = f'0{len(str(max_steps))}d'
@@ -128,6 +198,12 @@ class AdaptiveSchedule(NoiseSchedule):
       torch.zeros(n_grid, dtype=torch.float64))
     self.register_buffer('refit_count',
       torch.tensor(0, dtype=torch.long))
+    # persistent=False: keeps old/new checkpoints interchangeable
+    # (strict load). On resume n_seen restarts at 0 — harmless: runs
+    # with a schedule keep refitting via has_schedule; runs without
+    # one simply refill the buffer first.
+    self.register_buffer('n_seen',
+      torch.tensor(0, dtype=torch.long), persistent=False)
 
     self._grid = np.linspace(0, 1, n_grid)
     self._alpha_spline = None
@@ -152,8 +228,14 @@ class AdaptiveSchedule(NoiseSchedule):
       self.t_buf[:n - first] = t_val[first:]
       self.loss_buf[:n - first] = l_val[first:]
     self.buf_pos.fill_(end % self.buffer_size)
-    # Refit once the buffer has been filled at least once
-    buffer_full = end >= self.buffer_size or self.has_schedule.item()
+    self.n_seen += n
+    # Refit once the buffer has been filled at least once. n_seen (not
+    # `end >= buffer_size`, which only holds on the exact wrap-around
+    # step) so the first refit fires: with buffer_size a multiple of
+    # the batch size, the wrap step is `filled-1 (mod fill_steps)` and
+    # never coincides with `step % refit_every == 0`.
+    buffer_full = (self.n_seen.item() >= self.buffer_size
+                   or self.has_schedule.item())
     if (buffer_full and step % self.refit_every == 0):
       self._refit()
       if self.plot_profile:
@@ -172,6 +254,12 @@ class AdaptiveSchedule(NoiseSchedule):
 
     # 2. Smoothed loss on grid -> gradient -> CDF
     loss_smooth = model.predict(self._grid.reshape(-1, 1))
+    if self.log_importance:
+      # Slope of log-loss: an exponentially decaying profile (HFLM's
+      # ramp-shaped geometry) has near-constant |d log L/dt|, so the
+      # remap spreads samples across the whole ramp instead of piling
+      # onto the linear-scale band edge.
+      loss_smooth = np.log(np.maximum(loss_smooth, 1e-12))
     dloss_dt = np.gradient(loss_smooth, self._grid)
     # Loss should be always increasing with more noise.
     #  If it is decreasing, it is an artifact -> remove
@@ -184,8 +272,11 @@ class AdaptiveSchedule(NoiseSchedule):
     cdf = cdf / cdf[-1]
 
     # 3. Inverse CDF to get t -> alpha map with high density
-    #  on regions where the loss has high derivative.
-    t_remapped = PchipInterpolator(cdf, self._grid)(self._grid)
+    #  on regions where the loss has high derivative. Clip: queries
+    #  below cdf[0] extrapolate to t < 0, which would push alpha
+    #  above the base range (past alpha_max under truncation).
+    t_remapped = np.clip(
+      PchipInterpolator(cdf, self._grid)(self._grid), 0.0, 1.0)
     t_torch = torch.as_tensor(t_remapped, dtype=torch.float32)
     av = self.base_schedule.alpha_t(t_torch).numpy()
 
@@ -399,6 +490,7 @@ def get_noise(config):
       warmup_steps=noise_config.adaptive_warmup_steps,
       ema=noise_config.adaptive_ema,
       plot_profile=noise_config.adaptive_plot_profile,
-      plot_dir=noise_config.adaptive_plot_dir)
+      plot_dir=noise_config.adaptive_plot_dir,
+      log_importance=noise_config.get('adaptive_log_importance', False))
 
   return noise

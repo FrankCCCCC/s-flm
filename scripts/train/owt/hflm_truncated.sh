@@ -1,22 +1,25 @@
 #!/bin/bash
-# Hyperbolic-FLM on OpenWebText — mirrors scripts/train/owt/sfm.sh (same model size
-# 768/12/12, batch 512, optimizer, EMA) for a fair geometry comparison.
-# NECESSARY change vs sfm.sh: noise=log-linear (NO truncation / NO adaptive). The
-# sphere-tuned truncation (alpha_max) collapses HFLM (see Sudoku RESULTS.md), so the
-# hyperbolic model uses the full schedule. Run a matched naive S-FLM (also plain
-# log-linear) as the controlled-geometry baseline.
+# H-FLM on OpenWebText with truncated noise schedule — mirrors
+# scripts/train/owt/hflm.sh (model size 768/12/12, batch 512). ALPHA_MAX
+# default is the hyperbolic analog of the paper's Eq. 17 bound:
+# alpha_star_hyperbolic(V=50257, d=768) = 0.608 (noise_schedules.py;
+# init=hyperbolic std 0.3 — the small-hyperbolic-dit default — prior_cov
+# =0.25, rho_max=12, delta=0.1). NOT the sphere bound 0.121 — that
+# collapses HFLM (experiments/hflm/RESULTS.md). Recompute ALPHA_MAX if
+# the init/PRIOR_COV/RHO_MAX change.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/owt/hflm}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/owt/hflm_truncated}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-8}"
 MAX_STEPS="${MAX_STEPS:-1000000}"
 GLOBAL_BS="${GLOBAL_BS:-512}"
 PER_GPU_BS="${PER_GPU_BS:-32}"
 GAUSS_CURV="${GAUSS_CURV:--1.0}"    # Gaussian curvature, restrict to < 0.0 for hyperbolic
+ALPHA_MAX="${ALPHA_MAX:-0.608}"     # alpha_star_hyperbolic(50257, 768); null = no truncation
 
 cd "${REPO_ROOT}"
 
@@ -32,6 +35,7 @@ python -u -m main \
     algo.invert_time_convention=false \
     sampler=hflm \
     noise=log-linear \
+    noise.alpha_max=${ALPHA_MAX} \
     loader.global_batch_size=${GLOBAL_BS} \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \
