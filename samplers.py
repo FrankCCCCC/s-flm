@@ -16,8 +16,7 @@ import torch.nn.functional as F
 from dataclass_patch import dataclass
 import candi_utils
 import utils
-from geo_bridge import (
-  GeoUtils, HyperbolicHeatKernel, Coordinate, Geometry)
+from geo_bridge import GeoUtils
 
 
 def sample_categorical(categorical_probs, gumbel_noise=None):
@@ -925,6 +924,86 @@ class EFLMSampler(Sampler):
 #  HFLM Samplers
 # ════════════════════════════════════════════════════════════════
 
+@torch.compile
+def hflm_compute_velocity(x, E, log_p, mode, eps,
+                          gaussian_curvature=-1.0):
+  """Factored velocity v = sum_k p_k * log_x(e_k) = w - s*x on the
+  curvature-K hyperboloid; returns `(w, s)`, NOT the ambient vector.
+
+  Everything is Lorentz-Cartesian: `x` [B, L, D] (D = d + 1) current
+  points, `E` a shared [V, D] endpoint table or per-position
+  [B, L, k, D] top-k endpoints, `log_p` [B, L, V] / [B, L, k] log-probs
+  over those endpoints. The hyperbolic log map is
+  log_x(y) = c * (y - b * x) with b = -<x, y>_L / R^2 and
+  c = arccosh(b) / sqrt(b^2 - 1) (-> 1 as b -> 1), giving
+  ||log_x(y)||_L = R * arccosh(b) = d(x, y). The expectation ('exact',
+  the VFM marginal field) is w = sum_k p_k c_k e_k, s = sum_k p_k c_k
+  b_k; 'sample' uses one endpoint drawn from p. The factored form is
+  kept because materializing v = w - s*x cancels e^{d}-sized ambient
+  components down to a norm-d tangent vector, which loses precision at
+  the large x<->e_k distances a trained model reaches (see
+  hflm_exp_step for the matching stable Euler step).
+  """
+  R = GeoUtils._curvature_scale(gaussian_curvature)
+  p = log_p.to(x.dtype).exp()
+  # Lorentz inner products via the signature flip on the time coordinate.
+  x_metric = torch.cat([-x[..., :1], x[..., 1:]], dim=-1)
+  if E.ndim == 2:  # [V, D]
+    ein_fwd = 'bld,vd->blv'
+    ein_bwd = 'blv,vd->bld'
+  else:           # [B, L, k, D]
+    ein_fwd = 'bld,blkd->blk'
+    ein_bwd = 'blk,blkd->bld'
+  b = -torch.einsum(ein_fwd, x_metric, E) / (R * R)
+  u = (b - 1.0).clamp_min(0.0)
+  # c = arccosh(1 + u) / sqrt(u * (u + 2)), with its exact u -> 0 limit of 1.
+  c = torch.where(
+    u > eps,
+    torch.acosh(1.0 + u) / (u * (u + 2.0)).clamp_min(eps * eps).sqrt(),
+    torch.ones_like(u))
+  if mode == 'exact':
+    p_scale = p * c
+    w = torch.einsum(ein_bwd, p_scale, E)
+    s = (p_scale * b).sum(dim=-1, keepdim=True)
+    return w, s
+  elif mode == 'sample':
+    target_idx = sample_categorical(p)
+    if E.ndim == 2:  # [V, D]
+      target = E[target_idx]
+    else:            # [B, L, k, D]
+      B, L = target_idx.shape
+      target = E[
+        torch.arange(B, device=E.device)[:, None],
+        torch.arange(L, device=E.device)[None, :],
+        target_idx]
+    b_y = torch.gather(b, -1, target_idx.unsqueeze(-1))
+    c_y = torch.gather(c, -1, target_idx.unsqueeze(-1))
+    return c_y * target, c_y * b_y
+  else:
+    raise ValueError(f'Unknown velocity mode: {mode}')
+
+
+@torch.compile
+def hflm_exp_step(x, w, s, dt, gaussian_curvature=-1.0):
+  """Euler step x_new = exp_x(dt * (w - s*x)) in cancellation-free form.
+
+  For the factored tangent v = w - s*x (from [`hflm_compute_velocity`]),
+  <w, x>_L = -R^2 s gives the exact identity
+  ||v||_L^2 = <w, w>_L + R^2 s^2, so with n = ||v||_L and h = dt * n / R:
+  exp_x(dt*v) = (cosh(h) - (R*s/n) * sinh(h)) * x + (R * sinh(h) / n) * w.
+  Neither v nor its norm is ever formed from e^{d}-sized cancelling
+  ambient components; all coefficients are O(1). n ~ 0 returns x.
+  """
+  R = GeoUtils._curvature_scale(gaussian_curvature)
+  ww = (-w[..., :1] * w[..., :1]
+        + (w[..., 1:] * w[..., 1:]).sum(-1, keepdim=True))
+  n = (ww + (R * s) ** 2).clamp_min(0.0).sqrt()
+  tiny = torch.finfo(x.dtype).tiny
+  h = dt * n / R
+  coef_x = torch.cosh(h) - (R * s / n.clamp_min(tiny)) * torch.sinh(h)
+  coef_w = R * torch.sinh(h) / n.clamp_min(tiny)
+  return torch.where(n > tiny, coef_x * x + coef_w * w, x)
+
 class HFLMSampler(Sampler):
   def __init__(self, noise_removal, velocity, use_float64,
                slerp_float64, eps, temperature, p_nucleus,
@@ -1005,6 +1084,30 @@ class HFLMSampler(Sampler):
     state.done = True
     return state
 
+  def _select_topk(self, log_p, E, k):
+    log_p_k, top_idxs = torch.topk(log_p, k, dim=-1)
+    return torch.log_softmax(log_p_k, dim=-1), F.embedding(top_idxs, E)
+
+  def _compute_velocity(self, x, E, log_p):
+    return hflm_compute_velocity(
+      x, E, log_p, mode=self.velocity, eps=self.eps,
+      gaussian_curvature=self.gaussian_curvature)
+
+  def _lorentz_vocab_embeddings(self, model, dtype=None):
+    # Vocab table as Lorentz-Cartesian endpoints, with the same soft radial
+    # clamp the training bridge applies to clean embeddings. The lift must
+    # happen IN the target dtype: lifting in float32 and casting after puts
+    # points cosh(rho)-far off the hyperboloid (<e,e>_L != -R^2 by O(100) at
+    # trained embedding norms), which silently corrupts every log/exp map.
+    W = model.backbone.sphere_embed.weight.detach()  # [V, d]
+    if dtype is not None:
+      W = W.to(dtype)
+    rhos = self._rho_clamp(W.norm(p=2, dim=-1))  # [V]
+    thetas = utils.sphere_normalize(W)  # [V, d]
+    return GeoUtils.hyperbolic_polar_to_lorentz_cartesian(
+      rhos=rhos, thetas=thetas,
+      gaussian_curvature=self.gaussian_curvature)
+
   def _get_step_size(self, model, state):
     _, alpha_t = model.noise(state.t_schedule[state.step_idx])
     _, alpha_s = model.noise(state.t_schedule[state.step_idx + 1])
@@ -1031,42 +1134,37 @@ class HFLMSampler(Sampler):
 
     if is_last_step:
       return self._last_step_decode(state, log_p)
-
-    # Geodesic-step toward the predicted-clean token e_{v*}.
+    # Arguments to compute the velocity field:
+    #  v = sum_k p_k * log_{x}(e_k).
     log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
-    if self.velocity == 'sample':
-      v_star = sample_categorical(log_p_window.exp())  # [B, Lw]
-    else:
-      v_star = log_p_window.argmax(dim=-1)  # [B, Lw]
-
-    dest_rhos, dest_thetas = (
-      model.backbone.get_hyperbolic_polar_embeddings(v_star))
-    dest_rhos_c = self._rho_clamp(dest_rhos.detach())
-    dest_thetas = dest_thetas.detach()
-
+    slerp_dtype = torch.float64 if self.slerp_float64 else None
+    E = self._lorentz_vocab_embeddings(model, slerp_dtype)  # [V, d+1]
     x = state.xt[:, state.start_idx:]  # current Poincaré point [B, Lw, d]
-    # dt is the fraction of the remaining geodesic distance toward predicted-
-    # clean (reused sfm_step_size). The clamp guards against a degenerate
-    # (negative or huge) dt from a misconfigured schedule that would otherwise
-    # drive xt to the Poincaré boundary; it is a no-op for the real log-linear
-    # schedule where dt in (0, 1). It does not make arbitrary schedules safe.
+    if slerp_dtype is not None:
+      x = x.to(slerp_dtype)
+
+    if self.top_k_velocity > 0:
+      log_p_v, E = self._select_topk(log_p_window, E, self.top_k_velocity)
+    else:
+      log_p_v = log_p_window
+
+    x_amb = GeoUtils.poincare_cartesian_to_lorentz_cartesian(
+      z=x, gaussian_curvature=self.gaussian_curvature)
+    w, s = self._compute_velocity(x_amb, E, log_p_v)
+
+    # dt is the fraction of the remaining geodesic distance toward the
+    # posterior endpoint(s) (reused sfm_step_size). The clamp guards against
+    # a degenerate (negative or huge) dt from a misconfigured schedule that
+    # would otherwise drive xt to the Poincaré boundary; it is a no-op for
+    # the real log-linear schedule where dt in (0, 1). It does not make
+    # arbitrary schedules safe.
     dt = self._get_step_size(model, state).clamp(0.0, 1.0)
-    dt = dt.reshape(-1, 1, 1)
+    dt = dt.reshape(-1, 1, 1).to(x_amb.dtype)
 
-    if self.slerp_float64:
-      x = x.to(torch.float64)
-      dest_rhos_c = dest_rhos_c.to(torch.float64)
-      dest_thetas = dest_thetas.to(torch.float64)
-      dt = dt.to(torch.float64)
-
-    x_new = HyperbolicHeatKernel.geodesic(
-      t=dt,
-      gaussian_curvature=self.gaussian_curvature,
-      src_cartesian=x,
-      cartesian_model=Geometry.POINCARE,
-      dest_radial=dest_rhos_c.squeeze(-1),
-      dest_angular=dest_thetas,
-      output_coord=Coordinate.CARTESIAN)
+    x_new_amb = hflm_exp_step(
+      x_amb, w, s, dt, gaussian_curvature=self.gaussian_curvature)
+    x_new = GeoUtils.lorentz_cartesian_to_poincare_cartesian(
+      z=x_new_amb, gaussian_curvature=self.gaussian_curvature)
 
     state.xt[:, state.start_idx:] = x_new.to(state.xt.dtype)
     self._project_prefix(

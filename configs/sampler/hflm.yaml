@@ -2,10 +2,10 @@ predictor: hflm
 steps: 180
 noise_removal: greedy  # 'ancestral' (sample) or 'greedy' (argmax) at the final step
 use_float64: true
-velocity: exact  # exact / sample (geodesic-step-toward-predicted-clean; see ARCH §4.3)
+velocity: exact  # exact = expected velocity sum_v p_v log_x(e_v) (VFM marginal field); sample = log map toward a sampled endpoint
 p_nucleus: 1.0
 top_k: -1
-top_k_velocity: 1  # 1 = top-1 predicted-clean endpoint
+top_k_velocity: 1  # truncate + renormalize the endpoint posterior to top-k; -1 = full vocab. top-1 == the old argmax-endpoint step
 temperature: 1.0
 num_sample_batches: 2
 num_sample_log: 2
