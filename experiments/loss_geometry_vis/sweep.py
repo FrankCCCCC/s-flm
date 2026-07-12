@@ -2,24 +2,27 @@
 """Reproduce every figure under experiments/loss_geometry_vis/.
 
 One SLURM job per config (via simple_slurm). Each job runs the loss-geometry
-tool twice -- once per x-axis (`t` and `xt_norm`) -- producing the linear + log
-figures (with the target-direction arrow) and the cached `.json`, written to
-`experiments/loss_geometry_vis/{dataset}/{run_folder}/`.
+tool three times -- once per x-axis (`t`, `xt_norm`, and `riem_dist`) --
+producing the linear + log figures (with the target-direction arrow) and the
+cached `.json`, written to `experiments/loss_geometry_vis/{dataset}/{run_folder}/`.
 
 The heavy work (pin flow-time t on a grid, then evaluate the algo's own `_loss`
 on the val split at each t) lives in `visualization/loss_geometry.py`; this file
 only builds the grid of configs and submits. The first `--x-axis t` invocation
-computes the curves + |x_t| norms from the checkpoints and caches them; the
-`--x-axis xt_norm` invocation reuses that cache. So a run against a clean output
-dir reproduces the results from the checkpoints.
+computes the curves + |x_t| norms + Riemannian distances d(x_t, x_0) from the
+checkpoints and caches them; the `--x-axis xt_norm` / `--x-axis riem_dist`
+invocations reuse that cache. So a run against a clean output dir reproduces the
+results from the checkpoints.
 
 Orchestration only -- it never inlines `python -m main`. Idempotent: a config
 whose final figure (`<out>_xtnorm_log.png` + `<out>.json`) already exists, or
 whose job name is already in `squeue`, is skipped unless --force.
 
-HFLM-curvature runs must load with the `claude/curv` code (the `gaussian_curvature`
-knob), so they use the non-dev1 copy `loss_geometry_curv.py` run from the s-flm
-tree; every other config uses the dev1 `loss_geometry.py`.
+Every config uses the dev1 `loss_geometry.py`: dev1's `main` now carries the
+`gaussian_curvature` knob (its HFLM class + `geo_bridge.py` are byte-identical to
+the `claude/curv` worktree), so it loads the HFLM-curvature checkpoints exactly
+and computes their hyperbolic d(x_t, x_0) at each run's config curvature. The
+`curv` tool path below is retained for provenance but no config selects it.
 
 Usage:
   python experiments/loss_geometry_vis/sweep.py             # submit missing configs
@@ -72,12 +75,12 @@ CONFIGS = [
   ('langflow_ada',  'sudoku_hard', 'langflow_ada/langflow_ada',   SUD, 'bl_d-hard_a-langflow_ada_rs1',  SUD_STEPS, 'main'),
   ('langflow_full', 'sudoku_hard', 'langflow_full/langflow_full', SUD, 'bl_d-hard_a-langflow_full_rs1', SUD_STEPS, 'main'),
   # ---- Sudoku-hard HFLM curvature (tiny-hyperbolic-dit; best init/lr per K; curv tool) ----
-  ('hflm_K0.25', 'sudoku_hard', 'hflm_K0.25/K0.25', SUD, 'd-hard_k-0.25_i-c0.04_lr5e-4_rs1', SUD_STEPS, 'curv'),
-  ('hflm_K0.3',  'sudoku_hard', 'hflm_K0.3/K0.3',   SUD, 'd-hard_k-0.3_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'curv'),
-  ('hflm_K0.5',  'sudoku_hard', 'hflm_K0.5/K0.5',   SUD, 'd-hard_k-0.5_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'curv'),
-  ('hflm_K0.7',  'sudoku_hard', 'hflm_K0.7/K0.7',   SUD, 'd-hard_k-0.7_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'curv'),
-  ('hflm_K1.0',  'sudoku_hard', 'hflm_K1.0/K1.0',   SUD, 'd-hard_k-1.0_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'curv'),
-  ('hflm_K1.5',  'sudoku_hard', 'hflm_K1.5/K1.5',   SUD, 'd-hard_k-1.5_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'curv'),
+  ('hflm_K0.25', 'sudoku_hard', 'hflm_K0.25/K0.25', SUD, 'd-hard_k-0.25_i-c0.04_lr5e-4_rs1', SUD_STEPS, 'main'),
+  ('hflm_K0.3',  'sudoku_hard', 'hflm_K0.3/K0.3',   SUD, 'd-hard_k-0.3_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'main'),
+  ('hflm_K0.5',  'sudoku_hard', 'hflm_K0.5/K0.5',   SUD, 'd-hard_k-0.5_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'main'),
+  ('hflm_K0.7',  'sudoku_hard', 'hflm_K0.7/K0.7',   SUD, 'd-hard_k-0.7_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'main'),
+  ('hflm_K1.0',  'sudoku_hard', 'hflm_K1.0/K1.0',   SUD, 'd-hard_k-1.0_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'main'),
+  ('hflm_K1.5',  'sudoku_hard', 'hflm_K1.5/K1.5',   SUD, 'd-hard_k-1.5_i-c0.01_lr3e-4_rs1',  SUD_STEPS, 'main'),
 ]
 
 
@@ -94,7 +97,7 @@ def job_body(dataset, out, proj, run, steps, tool):
 export TMPDIR=/tmp
 export PATH={ENV_BIN}:$PATH
 cd {repo}
-for XAXIS in t xt_norm; do
+for XAXIS in t xt_norm riem_dist; do
   python {script} --mode steps --project {proj} --run {run} \\
     --steps {steps} --x-axis $XAXIS --out {out_abs}
 done
@@ -103,7 +106,7 @@ echo LOSS_GEOMETRY_DONE'''
 
 def is_done(dataset, out):
   p = out_prefix(dataset, out)
-  return os.path.exists(f'{p}_xtnorm_log.png') and os.path.exists(f'{p}.json')
+  return os.path.exists(f'{p}_riemdist_log.png') and os.path.exists(f'{p}.json')
 
 
 def is_queued(job_name):
@@ -114,7 +117,8 @@ def is_queued(job_name):
 
 def clear(dataset, out):
   p = out_prefix(dataset, out)
-  for suf in ('.json', '.png', '_log.png', '_xtnorm.png', '_xtnorm_log.png'):
+  for suf in ('.json', '.png', '_log.png', '_xtnorm.png', '_xtnorm_log.png',
+              '_riemdist.png', '_riemdist_log.png'):
     try:
       os.remove(f'{p}{suf}')
     except FileNotFoundError:

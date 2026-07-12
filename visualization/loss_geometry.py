@@ -23,6 +23,7 @@ from omegaconf import OmegaConf
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)  # repo-root imports below need this bootstrap first
 import algo, dataloader, main as main_mod  # main registers omegaconf resolvers
+from geo_bridge import GeoUtils  # curvature-aware manifold coordinate converters
 
 # Dispatch on config.algo.name (same mapping main.main() uses).
 ALGO_BY_NAME = {'ar': algo.AR, 'mdlm': algo.MDLM, 'duo_base': algo.DUO_BASE,
@@ -90,23 +91,59 @@ def _pin_time(model, cfg, t, step):
         torch.full((n,), _t, device=self.device), model)
 
 
-def _install_xt_norm_hook(model):
-  """Wrap q_xt to accumulate the per-token L2 norm of the corrupted sample x_t
-  (over valid/corrupted tokens) into model._xt_sum / _xt_cnt. Reset both before
-  each t; the mean per-token norm is _xt_sum / _xt_cnt. Note: for SFM the slerp
-  keeps x_t on the sphere, so this norm is ~constant."""
+def _riemannian_dist(model, algo_name, a0, xt):
+  """Per-token geodesic distance from the corrupted sample x_t to its clean
+  target x_0 on the algo's own manifold, as [B, L]. `a0` is q_xt's first
+  positional arg: the token ids for SFM/EFLM/HFLM (x_0 = the clean embedding),
+  or the clean embedding z itself for LangFlow. HFLM uses the hyperbolic
+  distance at the config's Gaussian curvature K; SFM the unit-sphere arc length;
+  EFLM/LangFlow the Euclidean norm (their x_t is a Euclidean lerp toward x_0)."""
+  if algo_name == 'langflow':                       # Euclidean VP latent; a0 = z
+    return (xt - a0).norm(dim=-1)
+  if algo_name == 'eflm':                            # Euclidean raw-embedding lerp
+    x0 = model.backbone.get_raw_embeddings(a0)
+    return (xt - x0).norm(dim=-1)
+  if algo_name == 'sfm':                             # unit-sphere geodesic
+    x0 = model.backbone.get_sphere_embeddings(a0)
+    cos = (xt * x0).sum(-1) / (xt.norm(dim=-1) * x0.norm(dim=-1)).clamp_min(1e-12)
+    return torch.arccos(cos.clamp(-1.0, 1.0))
+  if algo_name == 'hflm':                            # hyperbolic distance at K
+    K = model.gaussian_curvature  # loaded from the run's config (< 0)
+    R = 1.0 / math.sqrt(abs(K))   # model radius = 1/sqrt(|K|)
+    rhos, thetas = model.backbone.get_hyperbolic_polar_embeddings(a0)
+    rhos_c = model._rho_clamp(rhos).squeeze(-1)      # same soft radial clamp as q_xt
+    X0 = GeoUtils.hyperbolic_polar_to_lorentz_cartesian(rhos_c, thetas, K).double()
+    Xt = GeoUtils.poincare_cartesian_to_lorentz_cartesian(xt.double(), K)  # x_t is Poincaré
+    diff = Xt - X0  # Minkowski differential form d = R*arccosh(-<X_t,X_0>_L/R^2)
+    inner = -diff[..., 0] * diff[..., 0] + (diff[..., 1:] * diff[..., 1:]).sum(-1)
+    return R * torch.arccosh((1.0 + inner / (2.0 * R * R)).clamp_min(1.0))
+  raise ValueError(f'riem_dist x-axis unsupported for algo {algo_name!r}')
+
+
+def _install_xt_hook(model, cfg):
+  """Wrap q_xt to accumulate, over valid/corrupted tokens, both the per-token L2
+  norm of the corrupted sample x_t and the Riemannian distance from x_t to the
+  clean target x_0 (see `_riemannian_dist`). Reset _xt_sum/_dist_sum/_xt_cnt
+  before each t; the means are _xt_sum/_xt_cnt and _dist_sum/_xt_cnt (one shared
+  count -- both reduce over the same valid-token mask)."""
   orig = model.q_xt
+  name = cfg.algo.name
   def wrapped(*a, **k):
     xt = orig(*a, **k)
     vt = k.get('valid_tokens')
     if vt is None and len(a) >= 4:  # LangFlow passes valid_tokens positionally
       vt = a[3]
-    norm = xt.float().norm(dim=-1)  # [B, L] L2 norm over the embedding dim
+    norm = xt.float().norm(dim=-1)                   # [B, L] over the embedding dim
+    dist = _riemannian_dist(model, name, a[0], xt)   # [B, L] on the algo manifold
     if vt is not None:
       m = vt.bool()
-      model._xt_sum += (norm * m).sum().item(); model._xt_cnt += int(m.sum())
+      model._xt_sum += (norm * m).sum().item()
+      model._dist_sum += (dist * m).sum().item()
+      model._xt_cnt += int(m.sum())
     else:
-      model._xt_sum += norm.sum().item(); model._xt_cnt += norm.numel()
+      model._xt_sum += norm.sum().item()
+      model._dist_sum += dist.sum().item()
+      model._xt_cnt += norm.numel()
     return xt
   model.q_xt = wrapped
 
@@ -129,18 +166,20 @@ def _loss_curve(run_dir: str, step: int, t_grid: np.ndarray, args):
     cfg, tokenizer, skip_train=True, valid_seed=cfg.seed)
   batches = [{k: v.to(device) for k, v in b.items()}
              for b in itertools.islice(iter(valid_dl), args.num_batches)]
-  _install_xt_norm_hook(model)  # records mean per-token |x_t| per t
-  curve, norms = [], []
+  _install_xt_hook(model, cfg)  # records mean per-token |x_t| and d(x_t, x_0) per t
+  curve, norms, dists = [], [], []
   for t in t_grid:
     _pin_time(model, cfg, t, step)  # fixed t; rest is the algo's own _loss
     torch.manual_seed(cfg.seed)  # same prior-noise draws at every t/ckpt
-    model._xt_sum, model._xt_cnt = 0.0, 0
+    model._xt_sum, model._dist_sum, model._xt_cnt = 0.0, 0.0, 0
     out = [model._loss(b['input_ids'], b['attention_mask']) for b in batches]
     curve.append(sum(o.nlls.item() for o in out)
                  / sum(o.num_tokens.item() for o in out))
     norms.append(model._xt_sum / max(model._xt_cnt, 1))
-    print(f'  t={t:.4f}  loss={curve[-1]:.4f}  |x_t|={norms[-1]:.4f}', flush=True)
-  return curve, norms
+    dists.append(model._dist_sum / max(model._xt_cnt, 1))
+    print(f'  t={t:.4f}  loss={curve[-1]:.4f}  |x_t|={norms[-1]:.4f}'
+          f'  d={dists[-1]:.4f}', flush=True)
+  return curve, norms, dists
 
 
 def _add_arrows(ax, x, y, color, log_y=False):
@@ -164,23 +203,25 @@ def plot(paths: List[str], loaded_steps: List[int], tags: List[str],
   Curves are computed once via the eval pipeline and cached in <out>.json;
   a second call (e.g. for the log-y figure) redraws from the cache.
   """
-  x_axis = getattr(args, 'x_axis', 't')  # 't' or 'xt_norm' (|x_t| on the x-axis)
+  x_axis = getattr(args, 'x_axis', 't')  # 't', 'xt_norm' (|x_t|), or 'riem_dist'
   cache = args.out + '.json'
   if os.path.isfile(cache):
     saved = json.load(open(cache))
     t_grid, curves = np.array(saved['t']), saved['curves']
     norms = saved.get('norms', {})
+    dists = saved.get('dists', {})
   else:
     t_grid = np.linspace(args.t_min, 1.0, args.t_points)
-    curves, norms = {}, {}
+    curves, norms, dists = {}, {}, {}
     for path in paths:
       for step, tag in zip(loaded_steps, tags):
         label = tag if len(paths) == 1 else f'{os.path.basename(path)}, {tag}'
-        curves[label], norms[label] = _loss_curve(path, step, t_grid, args)
+        curves[label], norms[label], dists[label] = _loss_curve(
+          path, step, t_grid, args)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(cache, 'w') as f:
-      json.dump(dict(t=t_grid.tolist(), curves=curves, norms=norms, title=title,
-                     paths=paths, loaded_steps=loaded_steps,
+      json.dump(dict(t=t_grid.tolist(), curves=curves, norms=norms, dists=dists,
+                     title=title, paths=paths, loaded_steps=loaded_steps,
                      num_batches=args.num_batches,
                      batch_size=args.batch_size), f, indent=2)
     print(f'wrote {cache}')
@@ -188,17 +229,27 @@ def plot(paths: List[str], loaded_steps: List[int], tags: List[str],
   if x_axis == 'xt_norm' and not norms:
     raise SystemExit(f'{cache} predates the xt_norm feature (no cached norms); '
                      'delete it and rerun to recompute.')
+  if x_axis == 'riem_dist' and not dists:
+    raise SystemExit(f'{cache} predates the riem_dist feature (no cached dists); '
+                     'delete it and rerun to recompute.')
+  xlabels = {'t': 't', 'xt_norm': r'$\|x_t\|_2$ (mean per corrupted token)',
+             'riem_dist': r'$d(x_t,\,x_0)$ (mean per corrupted token)'}
   fig, ax = plt.subplots(figsize=(6, 4.5))
   for label, c in curves.items():
-    x = t_grid if x_axis == 't' else np.array(norms[label])
+    if x_axis == 't':
+      x = t_grid
+    elif x_axis == 'xt_norm':
+      x = np.array(norms[label])
+    else:
+      x = np.array(dists[label])
     line, = ax.plot(x, c, marker='o', markersize=3, label=label)
     _add_arrows(ax, x, c, line.get_color(), log_y=log_y_axis)  # increasing-t
-  ax.set(xlabel=('t' if x_axis == 't' else r'$\|x_t\|_2$ (mean per corrupted token)'),
-         ylabel='Loss', title=title)
+  ax.set(xlabel=xlabels[x_axis], ylabel='Loss', title=title)
   if log_y_axis:
     ax.set_yscale('log')
   ax.grid(alpha=0.3); ax.legend(); fig.tight_layout()
-  suffix = ('_xtnorm' if x_axis == 'xt_norm' else '') + ('_log' if log_y_axis else '')
+  axis_suffix = {'t': '', 'xt_norm': '_xtnorm', 'riem_dist': '_riemdist'}[x_axis]
+  suffix = axis_suffix + ('_log' if log_y_axis else '')
   out_png = args.out + suffix + '.png'
   fig.savefig(out_png, dpi=150); plt.close(fig)
   print(f'wrote {out_png}')
@@ -262,8 +313,9 @@ def main():
   p.add_argument('--inits', nargs='+', default=['0.04'])
   p.add_argument('--prior-covs', nargs='+', default=['1.0'])
   p.add_argument('--out', required=True, help='output prefix (no extension)')
-  p.add_argument('--x-axis', choices=['t', 'xt_norm'], default='t',
-                 help="x-axis: flow-time t, or L2 norm of the corrupted sample x_t")
+  p.add_argument('--x-axis', choices=['t', 'xt_norm', 'riem_dist'], default='t',
+                 help="x-axis: flow-time t, |x_t| (xt_norm), or the Riemannian "
+                      "distance d(x_t, x_0) on the algo's manifold (riem_dist)")
   p.add_argument('--t-min', type=float, default=0.001)
   p.add_argument('--t-points', type=int, default=33)
   p.add_argument('--num-batches', type=int, default=8)
