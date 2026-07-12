@@ -107,7 +107,7 @@ However, it doesn't provide optimal guarantee.
 - Model (DiT, *tiny*): Width **512**, Depth **8**, Heads **8** (~28.6M)
 
 - Model Initialization Choice ($\mathcal{N}(mean, var)$)
-  - ``ngpt``: $\mathcal{N}(0, \frac{1}{d})$, ``random``: $\mathcal{N}(0, 4e-4)$
+  - ``ngpt``: $\mathcal{N}(0, \frac{1}{d}) (= custom 0.0442)$, ``random``: $\mathcal{N}(0, 4e-4) (= custom 0.02)$
   - ``custom``: std: {0.01, 0.04, 0.06, 0.08}
 
 - Geometry Curvature: {-0.25, -0.3, -0.5, -0.7, -1.0, -1.5}
@@ -143,92 +143,94 @@ However, it doesn't provide optimal guarantee.
 
 ---
 
-# H-FLM Curvature + Init on Sudoku (3 Seeds Avg)
 
-<br>
+## Recall Baselines
 
-**1008 runs** — 6 curvatures × 7 inits × 4 LRs × {medium, hard} × **3 seeds**, averaged.
+| Model | easy | medium | hard |
+|---|---|---|---|
+| AR | 14.7 ± 3.5 (n=3) | 3.4 ± 0.3 (n=3) | 0.5 ± 0.3 (n=3) |
+| S-FLM (naive) | 78.8 ± 1.1 (n=3) | 43.8 ± 3.2 (n=3) | 11.1 ± 1.7 (n=3) |
+| S-FLM + trunc | 94.4 ± 0.4 (n=3) | 79.8 ± 1.7 (n=3) | 42.4 ± 3.4 (n=3) |
+| S-FLM + trunc + adaptive | 95.0 ± 0.8 (n=3) | 76.7 ± 7.3 (n=3) | 42.2 ± 2.8 (n=3) |
+| E-FLM (naive) | 88.2 ± 1.2 (n=3) | 62.2 ± 2.3 (n=3) | 19.2 ± 3.3 (n=3) |
+| LangFlow + ada sched | 81.2 ± 0.9 (n=3) | 52.4 ± 2.7 (n=3) | 18.2 ± 2.1 (n=3) |
+| LangFlow + ada sched + SC | 97.0 ± 0.5 (n=3) | 87.2 ± 1.9 (n=3) | 50.4 ± 4.6 (n=3) |
+| HFLM (tuned) | - | 83.23 ± 5.46 | 46.22 ± 13.13 |
 
-Color legend: <rd>red = K = −1.0 baseline to beat</rd> (the standard unit hyperboloid).
-
----
-
-## Mild curvature beats the unit hyperboloid — a robust, distribution-wide lift
-
-<style scoped>table { font-size: 0.8em; margin: 0 auto; } td, th { text-align: center; }</style>
-
-Seed-averaged accuracy over the full 84-run init×LR×seed grid per K (**bold** = peak):
-
-| K → | −0.25 | −0.3 | −0.5 | −0.7 | <rd>−1.0</rd> | −1.5 |
-|:--|--:|--:|--:|--:|--:|--:|
-| **Medium** | 74.2 | **76.7** | 75.3 | 74.5 | <rd>71.8</rd> | 67.4 |
-| **Hard** | 30.4 | 32.5 | **34.2** | 32.9 | <rd>27.8</rd> | 24.1 |
-
-- Inverted-U (grid mean, *n*=84/K): peaks at **K=−0.3** (medium, **+4.9 pt** vs baseline, *p*=1.7e-7) and **K=−0.5** (hard, **+6.4 pt**, *p*=2.8e-7)
-- Holds within **every** LR and under a paired test → not an LR confound. High curvature <rd>K=−1.5 is reliably worst</rd> (>2σ)
+HFLM (tuned) only grid search on word embedding initialization, LR, and global curvature.
 
 ---
 
-## But no single configuration provably beats the baseline
+## LangFlow Relies on Self Conditioning Heavily
 
-<style scoped>table { font-size: 0.78em; margin: 0 auto; } td, th { text-align: center; }</style>
+![alt text](image.png)
 
-Best *individual cell* per curvature vs its seed noise (pooled 2·SE ≈ **9 pt** medium / **11 pt** hard):
-
-| | best cell (init@lr) | acc ± seed-std | Δ vs <rd>K=−1.0</rd> best (2·SE bar) |
-|:--|:--|--:|--:|
-| **Medium** peak −0.3 | c0.01 @ 5e-4 | 83.2 ± 4.5 | +2.3 &nbsp;(2·SE ≈ 9) |
-| **Hard** peak −0.5 | c0.01 @ 3e-4 | 46.2 ± 10.7 | +5.8 &nbsp;(2·SE ≈ 11) |
-
-- Every per-K best cell's edge over baseline is **smaller than its own seed spread** → within noise
-- The curvature win is real **only on average**; report the *aggregate* effect, never a "winning" config
+- LangFlowPaper claims their biggest contribution is ``Information-uniform Scheduler``, but it helps limited.
 
 ---
 
-## Three seeds overturned the single-seed story: +20 pt → +10 pt → n.s.
+## Best Over {Init * LR} per Curvature
 
-<style scoped>table { font-size: 0.82em; margin: 0 auto; } td, th { text-align: center; }</style>
+### Medium
 
-The prior "K=−0.5 beats K=−1.0 by ~20 pt" (medium, random @ 1e-3) was **one unlucky baseline seed**:
-
-| medium, random@1e-3 | seed 1 | seed 2 | seed 3 | mean |
-|:--|--:|--:|--:|--:|
-| K = −0.5 | 84.2 | 80.8 | 83.0 | 82.7 |
-| <rd>K = −1.0 (baseline)</rd> | <rd>64.4</rd> | 78.3 | 74.6 | <rd>72.4</rd> |
-
-- Single-seed gap **84.2 − 64.4 = +19.8 pt** → seed-averaged **+10.3 pt** → best-cell-vs-best-cell **+1.8 pt (n.s.)**
-- The entire "effect" lived in one <rd>64.4%</rd> outlier — the case *for* running multiple seeds
-
----
-
-## Init and LR are second-order — the init winner even flips by difficulty
-
-<style scoped>table { font-size: 0.72em; margin: 0 auto; } td, th { text-align: center; }</style>
-
-Init strength (mean over all K, LR, seed) — spread ~2 pt, **within** cross-cell noise:
-
-| | ngpt | random | c0.01 | c0.02 | c0.04 | c0.06 | c0.08 |
-|:--|--:|--:|--:|--:|--:|--:|--:|
-| Medium | 73.6 | 73.9 | 73.4 | **75.3** | 73.4 | 71.2 | 72.4 |
-| Hard | 30.8 | 28.6 | **32.9** | 28.7 | 30.8 | 30.5 | 29.9 |
-
-LR strength (mean over all K, init, seed) — the one clear knob:
-
-| | 1e-4 | 3e-4 | 5e-4 | 1e-3 |
-|:--|--:|--:|--:|--:|
-| Medium | <rd>67.8</rd> | 74.6 | **75.5** | 75.3 |
-| Hard | <rd>25.9</rd> | **33.5** | 32.9 | 29.0 |
-
-- Init winner flips (**c0.02** medium / **c0.01** hard); large inits weakest; **ngpt does not collapse** here (unlike TinyStories)
-- <rd>LR=1e-4 is clearly too low</rd> (−7 pt); 3e-4/5e-4 best; 1e-3 fades on hard
+| K | best init@lr | acc % ± seed-std | n |
+|---|---|---|---|
+| −0.25 | c0.01 @ 1e-3 | 80.78 ± 2.82 | 3 |
+| **−0.30** | c0.01 @ 5e-4 | 83.23 ± 5.46 | 3 |
+| −0.50 | random @ 1e-3 | 82.68 ± 1.75 | 3 |
+| −0.70 | c0.02 @ 5e-4 | 81.20 ± 1.08 | 3 |
+| −1.00 (baseline) | c0.01 @ 5e-4 | 80.88 ± 0.63 | 3 |
+| −1.50 | c0.02 @ 1e-3 | 75.87 ± 1.90 | 3 |
 
 ---
 
-## Takeaways
+## Best Over {Init * LR} per Curvature
 
-- **Curvature is a real, free hyperparameter for H-FLM** — a ~+5 pt aggregate lift over the K=−1.0 default, larger as the task gets harder
-- **Operating region:** curvature <uv>K ∈ [−0.3, −0.7]</uv>, LR ∈ {3e-4, 5e-4}, small init (c0.01/c0.02); avoid the <rd>K=−1.0 default</rd> and K ≤ −1.5
-- **Methodological:** single-seed sudoku accuracy is noisy (σ≈6 pt on hard) — the curvature effect is only trustworthy seed- and grid-averaged, not per-config
+### Hard
+
+| K | best init@lr | acc % ± seed-std | n |
+|---|---|---|---|
+| −0.25 | c0.01 @ 5e-4 | 39.87 ± 1.18 | 3 |
+| −0.30 | c0.01 @ 3e-4 | 42.07 ± 9.92 | 3 |
+| **−0.50** | c0.01 @ 3e-4 | 46.22 ± 13.13 | 3 |
+| −0.70 | c0.04 @ 1e-3 | 40.43 ± 4.93 | 3 |
+| −1.00 (baseline) | c0.01 @ 3e-4 | 40.37 ± 5.28 | 3 |
+| −1.50 | c0.01 @ 3e-4 | 34.98 ± 9.02 | 3 |
 
 ---
 
+## Conclusion
+
+
+### For HFLM
+
+- HFLM has relatively higher variance than baselines in accuracy, especially for {K: −0.50, c0.01@3e-4, hard}, accuracy std is 13.33
+- The single best run of HFLM in hard {K: −0.50, c0.01@3e-4} is **58%** which beats all baselines
+- Can we stabalize the training loss for HFLM? 
+
+### For LangFlow
+
+- Self-conditioning brings more imrpovement than ``Information-uniform Scheduler``, but it's a wel-known trick applicable to any DLMs
+- What if we apply SC on EFLM and S-FLM and trunc+ada on EFLM?
+
+---
+
+
+
+# Loss Geometry of Euclidean and Hyperbolic FLM
+
+---
+
+### Loss Geometry of E-FLM on Tinystories, Seq Len: 256
+
+![width:700px](image-4.png)
+
+---
+
+### Loss Geometry of H-FLM on Tinystories, Seq Len: 256
+
+- Curvature = -1.0
+
+![width:700px](image-5.png)
+
+---
