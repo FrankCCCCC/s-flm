@@ -2,14 +2,14 @@
 """Reproduce every figure under experiments/loss_geometry_vis/.
 
 One SLURM job per config (via simple_slurm). Each job runs the loss-geometry
-tool over the 3 x-axes (`t`, `xt_norm`, `riem_dist`) x 2 y-metrics -- the
-token-mean denoising `loss` and `word_loss_std` (across vocab words of each
-word's mean loss: mean line + std band + min/max whiskers) -- producing the
-linear + log figures (with the target-direction arrow) and the cached `.json`,
-written to `experiments/loss_geometry_vis/{dataset}/{run_folder}/`. word_loss_std
-figures carry a `_wordstd` suffix. A cached `.json` from before the word_loss_std
-feature (no `word_stats` key) is deleted at job start so the curves are
-recomputed once.
+tool over the 3 x-axes (`t`, `xt_norm`, `riem_dist`), producing the linear + log
+figures (with the target-direction arrow) and the cached `.json`, written to
+`experiments/loss_geometry_vis/{dataset}/{run_folder}/`. HFLM configs add a
+second y-metric, `word_loss_std` (across-vocab distribution of each word's mean
+denoising loss, the per-token NLL bucketed by clean target x_0: mean line + std
+band + min/max whiskers; `_wordstd` figure suffix; the metric is HFLM-only). An
+HFLM cache without per-word stats (no `word_stats` key) is deleted at job start
+so the curves are recomputed once.
 
 The heavy work (pin flow-time t on a grid, then evaluate the algo's own `_loss`
 on the val split at each t) lives in `visualization/loss_geometry.py`; this file
@@ -94,20 +94,23 @@ def out_prefix(dataset, out):
   return f'{OUTD}/{dataset}/{out}'
 
 
-def job_body(dataset, out, proj, run, steps, tool):
+def job_body(name, dataset, out, proj, run, steps, tool):
   repo = DEV1 if tool == 'main' else SFLM_CURV
   script = ('visualization/loss_geometry.py' if tool == 'main'
             else 'visualization/loss_geometry_curv.py')
   out_abs = out_prefix(dataset, out)
-  # A pre-word_loss_std cache lacks the 'word_stats' key -> delete it so the first
-  # (x-axis t, y-metric loss) call recomputes the curves once (word_stats come free).
+  wordstd = name.startswith('hflm')  # per-word loss y-metric: HFLM only
+  # HFLM: a cache without per-word stats lacks 'word_stats' -> delete it so the
+  # first (x-axis t, y-metric loss) call recomputes the curves once (the
+  # per-word stats come free).
+  stale = (f'''python -c "import json, os; p = '{out_abs}.json'; os.path.exists(p) and 'word_stats' not in json.load(open(p)) and os.remove(p)"
+''' if wordstd else '')
   return f'''export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export TMPDIR=/tmp
 export PATH={ENV_BIN}:$PATH
 cd {repo}
-python -c "import json, os; p = '{out_abs}.json'; os.path.exists(p) and 'word_stats' not in json.load(open(p)) and os.remove(p)"
-for XAXIS in t xt_norm riem_dist; do
-  for YMETRIC in loss word_loss_std; do
+{stale}for XAXIS in t xt_norm riem_dist; do
+  for YMETRIC in {'loss word_loss_std' if wordstd else 'loss'}; do
     python {script} --mode steps --project {proj} --run {run} \\
       --steps {steps} --x-axis $XAXIS --out {out_abs} --y-metric $YMETRIC
   done
@@ -115,11 +118,13 @@ done
 echo LOSS_GEOMETRY_DONE'''
 
 
-def is_done(dataset, out):
+def is_done(name, dataset, out):
   p = out_prefix(dataset, out)
-  return (os.path.exists(f'{p}_riemdist_log.png')
-          and os.path.exists(f'{p}_wordstd_riemdist_log.png')  # word_loss_std figures too
+  done = (os.path.exists(f'{p}_riemdist_log.png')
           and os.path.exists(f'{p}.json'))
+  if name.startswith('hflm'):  # word_loss_std figures required for HFLM only
+    done = done and os.path.exists(f'{p}_wordstd_riemdist_log.png')
+  return done
 
 
 def is_queued(job_name):
@@ -159,12 +164,12 @@ def main():
   submitted = skipped = 0
   for name, dataset, out, proj, run, steps, tool in cfgs:
     job_name = f'lossgeo_{dataset}_{name}'
-    body = job_body(dataset, out, proj, run, steps, tool)
+    body = job_body(name, dataset, out, proj, run, steps, tool)
     if args.dry_run:  # print only -- never touch files or the queue
       print(f'\n=== {job_name} ===\n{body}'); submitted += 1; continue
     if args.force:
       clear(dataset, out)
-    elif is_done(dataset, out):
+    elif is_done(name, dataset, out):
       print(f'skip (done):   {name}'); skipped += 1; continue
     if args.local:  # same body sbatch would run, on this machine's GPU
       log = f'{LOGS}/{dataset}_{name}_local.log'
