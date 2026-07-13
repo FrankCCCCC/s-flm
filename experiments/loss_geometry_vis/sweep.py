@@ -2,9 +2,14 @@
 """Reproduce every figure under experiments/loss_geometry_vis/.
 
 One SLURM job per config (via simple_slurm). Each job runs the loss-geometry
-tool three times -- once per x-axis (`t`, `xt_norm`, and `riem_dist`) --
-producing the linear + log figures (with the target-direction arrow) and the
-cached `.json`, written to `experiments/loss_geometry_vis/{dataset}/{run_folder}/`.
+tool over the 3 x-axes (`t`, `xt_norm`, `riem_dist`) x 2 y-metrics -- the
+token-mean denoising `loss` and `word_loss_std` (across vocab words of each
+word's mean loss: mean line + std band + min/max whiskers) -- producing the
+linear + log figures (with the target-direction arrow) and the cached `.json`,
+written to `experiments/loss_geometry_vis/{dataset}/{run_folder}/`. word_loss_std
+figures carry a `_wordstd` suffix. A cached `.json` from before the word_loss_std
+feature (no `word_stats` key) is deleted at job start so the curves are
+recomputed once.
 
 The heavy work (pin flow-time t on a grid, then evaluate the algo's own `_loss`
 on the val split at each t) lives in `visualization/loss_geometry.py`; this file
@@ -29,6 +34,7 @@ Usage:
   python experiments/loss_geometry_vis/sweep.py --force     # recompute all (clear caches)
   python experiments/loss_geometry_vis/sweep.py --dry-run   # print, do not submit
   python experiments/loss_geometry_vis/sweep.py --only hflm_K0.5 eflm
+  python experiments/loss_geometry_vis/sweep.py --local     # run job bodies here (needs a GPU)
 """
 import argparse
 import os
@@ -93,20 +99,27 @@ def job_body(dataset, out, proj, run, steps, tool):
   script = ('visualization/loss_geometry.py' if tool == 'main'
             else 'visualization/loss_geometry_curv.py')
   out_abs = out_prefix(dataset, out)
+  # A pre-word_loss_std cache lacks the 'word_stats' key -> delete it so the first
+  # (x-axis t, y-metric loss) call recomputes the curves once (word_stats come free).
   return f'''export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export TMPDIR=/tmp
 export PATH={ENV_BIN}:$PATH
 cd {repo}
+python -c "import json, os; p = '{out_abs}.json'; os.path.exists(p) and 'word_stats' not in json.load(open(p)) and os.remove(p)"
 for XAXIS in t xt_norm riem_dist; do
-  python {script} --mode steps --project {proj} --run {run} \\
-    --steps {steps} --x-axis $XAXIS --out {out_abs}
+  for YMETRIC in loss word_loss_std; do
+    python {script} --mode steps --project {proj} --run {run} \\
+      --steps {steps} --x-axis $XAXIS --out {out_abs} --y-metric $YMETRIC
+  done
 done
 echo LOSS_GEOMETRY_DONE'''
 
 
 def is_done(dataset, out):
   p = out_prefix(dataset, out)
-  return os.path.exists(f'{p}_riemdist_log.png') and os.path.exists(f'{p}.json')
+  return (os.path.exists(f'{p}_riemdist_log.png')
+          and os.path.exists(f'{p}_wordstd_riemdist_log.png')  # word_loss_std figures too
+          and os.path.exists(f'{p}.json'))
 
 
 def is_queued(job_name):
@@ -118,7 +131,10 @@ def is_queued(job_name):
 def clear(dataset, out):
   p = out_prefix(dataset, out)
   for suf in ('.json', '.png', '_log.png', '_xtnorm.png', '_xtnorm_log.png',
-              '_riemdist.png', '_riemdist_log.png'):
+              '_riemdist.png', '_riemdist_log.png',
+              '_wordstd.png', '_wordstd_log.png', '_wordstd_xtnorm.png',
+              '_wordstd_xtnorm_log.png', '_wordstd_riemdist.png',
+              '_wordstd_riemdist_log.png'):
     try:
       os.remove(f'{p}{suf}')
     except FileNotFoundError:
@@ -132,6 +148,9 @@ def main():
                   help='clear cached json + figures and recompute all selected configs')
   ap.add_argument('--dry-run', action='store_true', help='print jobs, do not submit')
   ap.add_argument('--only', nargs='+', default=None, help='subset of config names')
+  ap.add_argument('--local', action='store_true',
+                  help='run each job body sequentially on this machine '
+                       '(compute node with a GPU) instead of sbatch')
   args = ap.parse_args()
 
   os.makedirs(LOGS, exist_ok=True)
@@ -147,6 +166,14 @@ def main():
       clear(dataset, out)
     elif is_done(dataset, out):
       print(f'skip (done):   {name}'); skipped += 1; continue
+    if args.local:  # same body sbatch would run, on this machine's GPU
+      log = f'{LOGS}/{dataset}_{name}_local.log'
+      print(f'running locally: {name} (log: {log})', flush=True)
+      with open(log, 'w') as f:
+        rc = subprocess.run(['bash', '-c', body], stdout=f,
+                            stderr=subprocess.STDOUT).returncode
+      print('done:' if rc == 0 else f'FAILED (rc={rc}):', name)
+      submitted += 1; continue
     if is_queued(job_name):
       print(f'skip (queued): {name}'); skipped += 1; continue
     slurm = Slurm(job_name=job_name, partition=PARTITION, constraint=CONSTRAINT,
@@ -155,7 +182,9 @@ def main():
     jid = slurm.sbatch(body)
     print(f'submitted {name} -> job {jid}'); submitted += 1
 
-  print(f'\n{submitted} {"planned" if args.dry_run else "submitted"}, {skipped} skipped')
+  print(f'\n{submitted} '
+        f'{"planned" if args.dry_run else "ran" if args.local else "submitted"}, '
+        f'{skipped} skipped')
 
 
 if __name__ == '__main__':

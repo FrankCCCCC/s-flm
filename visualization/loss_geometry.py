@@ -10,6 +10,9 @@ t=1 pure noise, so curves read left(clean) -> right(noise), like the paper.
                        dirs are std{init}_pc{pc} / ngpt_pc{pc}, literal strings
 
 Writes <out>.json (cached curves), <out>.png (linear y), <out>_log.png (log y).
+--y-metric word_loss_std plots the across-vocab distribution of each word's mean
+denoising loss (targets bucketed by clean token x_0): solid line = mean over
+words, shaded band = +-std, whiskers = min/max; suffix _wordstd.
 GPU forward passes -> run on a compute node (visualization/loss_geometry.sbatch).
 """
 import argparse, glob, itertools, json, math, os, sys, types
@@ -148,6 +151,31 @@ def _install_xt_hook(model, cfg):
   model.q_xt = wrapped
 
 
+def _install_word_loss_hook(model):
+  """Wrap `nll` to bucket the per-token denoising NLL by clean target word x_0.
+
+  For each valid/corrupted token it adds the per-token NLL into a per-vocabulary
+  sum/count ([V] each). The clean target token id per position is `output_tokens`
+  (AR) or, when that is None, `x0` (the diffusion/FLM algos delete `output_tokens`
+  and treat x_0 as the target). Reset _word_sum/_word_cnt before each t; the
+  per-word mean loss is _word_sum/_word_cnt over words that occur; y-metric
+  'word_loss_std' plots mean/std/min/max of those per-word means across V."""
+  orig = model.nll
+  def wrapped(*a, **k):
+    per_token_nll, t = orig(*a, **k)
+    tgt = a[1] if (len(a) > 1 and a[1] is not None) else a[0]  # target word ids [B,L]
+    vt = k.get('valid_tokens')
+    if vt is None and len(a) >= 6:  # valid_tokens can arrive positionally
+      vt = a[5]
+    m = vt.bool() if vt is not None else torch.ones_like(tgt, dtype=torch.bool)
+    ids = tgt[m].long().reshape(-1)                        # [N] over valid tokens
+    vals = per_token_nll.detach().float()[m].reshape(-1)   # [N] matching per-token NLL
+    model._word_sum.scatter_add_(0, ids, vals)
+    model._word_cnt.scatter_add_(0, ids, torch.ones_like(vals))
+    return per_token_nll, t
+  model.nll = wrapped
+
+
 @torch.no_grad()
 def _loss_curve(run_dir: str, step: int, t_grid: np.ndarray, args):
   """L(t) = token-mean denoising CE on val batches, at each fixed t."""
@@ -167,19 +195,32 @@ def _loss_curve(run_dir: str, step: int, t_grid: np.ndarray, args):
   batches = [{k: v.to(device) for k, v in b.items()}
              for b in itertools.islice(iter(valid_dl), args.num_batches)]
   _install_xt_hook(model, cfg)  # records mean per-token |x_t| and d(x_t, x_0) per t
+  _install_word_loss_hook(model)  # buckets per-token NLL by clean target word (x_0)
+  model._word_sum = torch.zeros(model.vocab_size, device=device)
+  model._word_cnt = torch.zeros(model.vocab_size, device=device)
   curve, norms, dists = [], [], []
+  wstats = {k: [] for k in ('mean', 'std', 'min', 'max')}  # across per-word means
   for t in t_grid:
     _pin_time(model, cfg, t, step)  # fixed t; rest is the algo's own _loss
     torch.manual_seed(cfg.seed)  # same prior-noise draws at every t/ckpt
     model._xt_sum, model._dist_sum, model._xt_cnt = 0.0, 0.0, 0
+    model._word_sum.zero_(); model._word_cnt.zero_()
     out = [model._loss(b['input_ids'], b['attention_mask']) for b in batches]
     curve.append(sum(o.nlls.item() for o in out)
                  / sum(o.num_tokens.item() for o in out))
     norms.append(model._xt_sum / max(model._xt_cnt, 1))
     dists.append(model._dist_sum / max(model._xt_cnt, 1))
+    occ = model._word_cnt > 0  # vocab words that occur as a target at this t
+    wm = model._word_sum[occ] / model._word_cnt[occ]  # per-word mean loss [n_occ]
+    wstats['mean'].append(wm.mean().item() if wm.numel() else 0.0)
+    wstats['std'].append(wm.std().item() if wm.numel() > 1 else 0.0)
+    wstats['min'].append(wm.min().item() if wm.numel() else 0.0)
+    wstats['max'].append(wm.max().item() if wm.numel() else 0.0)
     print(f'  t={t:.4f}  loss={curve[-1]:.4f}  |x_t|={norms[-1]:.4f}'
-          f'  d={dists[-1]:.4f}', flush=True)
-  return curve, norms, dists
+          f'  d={dists[-1]:.4f}  word={wstats["mean"][-1]:.4f}'
+          f'+-{wstats["std"][-1]:.4f} [{wstats["min"][-1]:.4f},'
+          f' {wstats["max"][-1]:.4f}]', flush=True)
+  return curve, norms, dists, wstats
 
 
 def _add_arrows(ax, x, y, color, log_y=False):
@@ -204,23 +245,26 @@ def plot(paths: List[str], loaded_steps: List[int], tags: List[str],
   a second call (e.g. for the log-y figure) redraws from the cache.
   """
   x_axis = getattr(args, 'x_axis', 't')  # 't', 'xt_norm' (|x_t|), or 'riem_dist'
+  y_metric = getattr(args, 'y_metric', 'loss')  # 'loss' or 'word_loss_std'
   cache = args.out + '.json'
   if os.path.isfile(cache):
     saved = json.load(open(cache))
     t_grid, curves = np.array(saved['t']), saved['curves']
     norms = saved.get('norms', {})
     dists = saved.get('dists', {})
+    word_stats = saved.get('word_stats', {})
   else:
     t_grid = np.linspace(args.t_min, 1.0, args.t_points)
-    curves, norms, dists = {}, {}, {}
+    curves, norms, dists, word_stats = {}, {}, {}, {}
     for path in paths:
       for step, tag in zip(loaded_steps, tags):
         label = tag if len(paths) == 1 else f'{os.path.basename(path)}, {tag}'
-        curves[label], norms[label], dists[label] = _loss_curve(
-          path, step, t_grid, args)
+        (curves[label], norms[label], dists[label],
+         word_stats[label]) = _loss_curve(path, step, t_grid, args)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(cache, 'w') as f:
       json.dump(dict(t=t_grid.tolist(), curves=curves, norms=norms, dists=dists,
+                     word_stats=word_stats,
                      title=title, paths=paths, loaded_steps=loaded_steps,
                      num_batches=args.num_batches,
                      batch_size=args.batch_size), f, indent=2)
@@ -232,24 +276,38 @@ def plot(paths: List[str], loaded_steps: List[int], tags: List[str],
   if x_axis == 'riem_dist' and not dists:
     raise SystemExit(f'{cache} predates the riem_dist feature (no cached dists); '
                      'delete it and rerun to recompute.')
+  if y_metric == 'word_loss_std' and not word_stats:
+    raise SystemExit(f'{cache} predates the word_loss_std feature (no cached '
+                     'word_stats); delete it and rerun to recompute.')
   xlabels = {'t': 't', 'xt_norm': r'$\|x_t\|_2$ (mean per corrupted token)',
              'riem_dist': r'$d(x_t,\,x_0)$ (mean per corrupted token)'}
+  ylabels = {'loss': 'Loss',
+             'word_loss_std': 'Per-word mean loss (mean $\\pm$ std; min/max)'}
   fig, ax = plt.subplots(figsize=(6, 4.5))
-  for label, c in curves.items():
+  for label in curves:
+    ws = word_stats[label] if y_metric == 'word_loss_std' else None
+    y = np.array(curves[label] if ws is None else ws['mean'])
     if x_axis == 't':
       x = t_grid
     elif x_axis == 'xt_norm':
       x = np.array(norms[label])
     else:
       x = np.array(dists[label])
-    line, = ax.plot(x, c, marker='o', markersize=3, label=label)
-    _add_arrows(ax, x, c, line.get_color(), log_y=log_y_axis)  # increasing-t
-  ax.set(xlabel=xlabels[x_axis], ylabel='Loss', title=title)
+    line, = ax.plot(x, y, marker='o', markersize=3, label=label)
+    if ws is not None:  # across-word mean +- std band, min/max whiskers
+      s, mn, mx = (np.array(ws[k]) for k in ('std', 'min', 'max'))
+      lo = np.maximum(y - s, y * 1e-3) if log_y_axis else y - s  # log-drawable
+      ax.fill_between(x, lo, y + s, color=line.get_color(), alpha=0.2, lw=0)
+      ax.errorbar(x, y, yerr=(y - mn, mx - y), fmt='none',
+                  ecolor=line.get_color(), elinewidth=0.8, capsize=2, alpha=0.5)
+    _add_arrows(ax, x, y, line.get_color(), log_y=log_y_axis)  # increasing-t
+  ax.set(xlabel=xlabels[x_axis], ylabel=ylabels[y_metric], title=title)
   if log_y_axis:
     ax.set_yscale('log')
   ax.grid(alpha=0.3); ax.legend(); fig.tight_layout()
+  y_suffix = {'loss': '', 'word_loss_std': '_wordstd'}[y_metric]
   axis_suffix = {'t': '', 'xt_norm': '_xtnorm', 'riem_dist': '_riemdist'}[x_axis]
-  suffix = axis_suffix + ('_log' if log_y_axis else '')
+  suffix = y_suffix + axis_suffix + ('_log' if log_y_axis else '')
   out_png = args.out + suffix + '.png'
   fig.savefig(out_png, dpi=150); plt.close(fig)
   print(f'wrote {out_png}')
@@ -316,6 +374,11 @@ def main():
   p.add_argument('--x-axis', choices=['t', 'xt_norm', 'riem_dist'], default='t',
                  help="x-axis: flow-time t, |x_t| (xt_norm), or the Riemannian "
                       "distance d(x_t, x_0) on the algo's manifold (riem_dist)")
+  p.add_argument('--y-metric', choices=['loss', 'word_loss_std'], default='loss',
+                 help="y-axis: token-mean denoising loss (loss), or the across-vocab "
+                      "distribution of each word's mean loss as mean line + std band "
+                      "+ min/max whiskers (word_loss_std). Both are always computed "
+                      "and cached; this only selects what is plotted.")
   p.add_argument('--t-min', type=float, default=0.001)
   p.add_argument('--t-points', type=int, default=33)
   p.add_argument('--num-batches', type=int, default=8)
