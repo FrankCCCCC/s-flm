@@ -14,6 +14,9 @@ loss_geometry.py) and its <out>_perword_{step}.npz cache. Two figures:
                               bins {1, 2-4, 5-9, 10-49, 50-199, >=200} over
                               ALL occurring words. Log y.
 
+Each figure is also written with a linear y axis (suffix _linear), same
+settings otherwise.
+
 Example:
   python visualization/perword_loss_geo_by_len_freq.py \
     --project outputs/hflm_sweep_tinystories_s256 --run std0.04_pc1.0 \
@@ -40,7 +43,7 @@ def _crossing(t, fv, q):
   return t[i-1] + (q - fv[i-1]) / max(fv[i] - fv[i-1], 1e-9) * (t[i] - t[i-1])
 
 
-def plot_by_length(t, sums, cnts, eucl, out, min_count, tag, run):
+def plot_by_length(t, sums, cnts, eucl, out, min_count, tag, run, logy=True):
   cnt = cnts[0]
   sel = np.where(cnt >= min_count)[0]
   L = sums[:, sel] / cnts[:, sel]
@@ -58,14 +61,16 @@ def plot_by_length(t, sums, cnts, eucl, out, min_count, tag, run):
                   f'(n={int(m.sum())}, t50={np.median(t50[m]):.2f})')
   ax.set(xlabel='t', ylabel='Loss',
          title=f'HFLM {run} {tag}: per-word loss timing by length quintile')
-  ax.set_yscale('log'); ax.grid(alpha=0.3); ax.legend(fontsize=7)
+  if logy:
+    ax.set_yscale('log')
+  ax.grid(alpha=0.3); ax.legend(fontsize=7)
   fig.tight_layout()
-  path = f'{out}_timing_by_length.png'
+  path = f'{out}_timing_by_length{"" if logy else "_linear"}.png'
   fig.savefig(path, dpi=150); plt.close(fig)
   print(f'wrote {path}')
 
 
-def plot_by_freq(t, sums, cnts, out, tag, run):
+def plot_by_freq(t, sums, cnts, out, tag, run, logy=True):
   cnt = cnts[0]
   fig, ax = plt.subplots(figsize=(6.5, 4.5))
   for lo, hi in COUNT_BINS:
@@ -76,9 +81,11 @@ def plot_by_freq(t, sums, cnts, out, tag, run):
             label=f'cnt {lo}-{hi if hi < 10**9 else "max"} (n={int(m.sum())})')
   ax.set(xlabel='t', ylabel='Loss',
          title=f'HFLM {run} {tag}: group curves by word count (frequency)')
-  ax.set_yscale('log'); ax.grid(alpha=0.3); ax.legend(fontsize=7)
+  if logy:
+    ax.set_yscale('log')
+  ax.grid(alpha=0.3); ax.legend(fontsize=7)
   fig.tight_layout()
-  path = f'{out}_timing_by_freq.png'
+  path = f'{out}_timing_by_freq{"" if logy else "_linear"}.png'
   fig.savefig(path, dpi=150); plt.close(fig)
   print(f'wrote {path}')
 
@@ -112,7 +119,10 @@ def main():
     print(f'wrote {cache}')
 
   plot_by_length(t, sums, cnts, eucl, args.out, args.min_count, tag, args.run)
+  plot_by_length(t, sums, cnts, eucl, args.out, args.min_count, tag, args.run,
+                 logy=False)
   plot_by_freq(t, sums, cnts, args.out, tag, args.run)
+  plot_by_freq(t, sums, cnts, args.out, tag, args.run, logy=False)
 
 
 if __name__ == '__main__':
