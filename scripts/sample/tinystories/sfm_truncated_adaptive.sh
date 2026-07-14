@@ -14,6 +14,7 @@ STEPS="${STEPS:-180}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
 ALPHA_MAX="${ALPHA_MAX:-0.121}"
+SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -23,6 +24,7 @@ MARGS=(
     model.length=${SEQ_LEN:-1024}
     model.init=ngpt
     algo=sfm
+    algo.self_conditioning=${SELF_COND}
     algo.renormalize_weights=False
     noise=log-linear-adaptive
     noise.alpha_max=${ALPHA_MAX}

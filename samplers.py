@@ -552,11 +552,23 @@ class SFMState(BaseState):
   prefix_lengths: torch.Tensor = None  # [B] per-sample lengths
   prefix_tokens: torch.Tensor = None  # [B, L]
   prefix_embeds: torch.Tensor = None  # [B, P, d] sphere embeddings of prefix
+  z_sc: torch.Tensor = None  # [B, L, d] self-cond carry (None when off / at k=0)
 
 
 @dataclass
 class SFMContext:
   temperature: float = 0.0
+  z_sc: torch.Tensor | None = None
+
+
+def flow_self_cond_carry(model, log_p, out_dtype):
+  """Next-step self-cond carry: the SOFT full-vocab predicted-clean embedding
+  in the model-input space, matching training (algo.SelfConditioning). None
+  when the model was trained without self-conditioning."""
+  if not getattr(model, 'self_conditioning', False):
+    return None
+  E = model._sc_embed_table().detach().to(log_p.dtype)
+  return torch.einsum('blv,vd->bld', log_p.exp(), E).to(out_dtype)
 
 @torch.compile
 def sfm_compute_velocity(x, E, log_p, mode, eps):
@@ -687,7 +699,7 @@ class SFMSampler(Sampler):
     _, alpha_t = model.noise(state.t_schedule[state.step_idx])
     sigma_t = model._sigma_from_alphat(alpha_t).reshape(-1, 1)
 
-    context = SFMContext(temperature=self.temperature)
+    context = SFMContext(temperature=self.temperature, z_sc=state.z_sc)
     log_p = model.forward(xt=state.xt, sigma=sigma_t,
                           context=context)
     if self.use_float64:
@@ -700,6 +712,7 @@ class SFMSampler(Sampler):
 
     if is_last_step:
       return self._last_step_decode(state, log_p)
+    state.z_sc = flow_self_cond_carry(model, log_p, state.xt.dtype)
     # Arguments to compute the velocity field:
     #  v = sum_k p_k * log_{x}(e_k).
     log_p_window = log_p[:, state.start_idx:]  # [B, L, V]
@@ -733,6 +746,7 @@ class SFMSampler(Sampler):
 @dataclass
 class EFLMContext:
   temperature: float = 0.0
+  z_sc: torch.Tensor | None = None
 
 @torch.compile
 def elfm_compute_velocity(x, E, log_p, mode, eps):
@@ -883,7 +897,7 @@ class EFLMSampler(Sampler):
     _, alpha_t = model.noise(state.t_schedule[state.step_idx])
     sigma_t = model._sigma_from_alphat(alpha_t).reshape(-1, 1)
 
-    context = EFLMContext(temperature=self.temperature)
+    context = EFLMContext(temperature=self.temperature, z_sc=state.z_sc)
     log_p = model.forward(xt=state.xt, sigma=sigma_t,
                           context=context)
     if self.use_float64:
@@ -896,6 +910,7 @@ class EFLMSampler(Sampler):
 
     if is_last_step:
       return self._last_step_decode(state, log_p)
+    state.z_sc = flow_self_cond_carry(model, log_p, state.xt.dtype)
     # Arguments to compute the velocity field:
     #  v = sum_k p_k * log_{x}(e_k).
     log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
@@ -1018,7 +1033,7 @@ class HFLMSampler(Sampler):
     _, alpha_t = model.noise(state.t_schedule[state.step_idx])
     sigma_t = model._sigma_from_alphat(alpha_t).reshape(-1, 1)
 
-    context = SFMContext(temperature=self.temperature)
+    context = SFMContext(temperature=self.temperature, z_sc=state.z_sc)
     log_p = model.forward(xt=state.xt, sigma=sigma_t,
                           context=context)
     if self.use_float64:
@@ -1031,6 +1046,7 @@ class HFLMSampler(Sampler):
 
     if is_last_step:
       return self._last_step_decode(state, log_p)
+    state.z_sc = flow_self_cond_carry(model, log_p, state.xt.dtype)
 
     # Geodesic-step toward the predicted-clean token e_{v*}.
     log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
