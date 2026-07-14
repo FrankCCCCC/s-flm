@@ -12,3 +12,6 @@ eps: 1e-6
 
 invert_time_convention: true  # true: alpha_t=1 is noisy (original SFM). false: alpha_t=1 is clean (MDLM-like, required for adaptive noise schedule).
 renormalize_weights: False
+
+self_conditioning: false      # LangFlow-style self-conditioning (2-pass, zero-init W_in/W_sc)
+p_self_cond: 0.25             # train-time self-cond probability
