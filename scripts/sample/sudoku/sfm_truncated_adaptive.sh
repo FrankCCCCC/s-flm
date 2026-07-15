@@ -13,6 +13,7 @@ DEVICES="${DEVICES:-1}"
 STEPS="${STEPS:-180}"
 VELOCITY="${VELOCITY:-exact}"         # sample / exact
 TOPK_VELOCITY="${TOPK_VELOCITY:--1}"  # 1 = top-1, -1 = full vocab (no top-k)
+SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 
 GLOBAL_BS=256
 BUF_SIZE=$((50 * GLOBAL_BS))
@@ -29,6 +30,7 @@ python -u -m main \
     model=tiny-sphere-dit \
     algo=sfm \
     algo.invert_time_convention=false \
+    algo.self_conditioning="${SELF_COND}" \
     noise=log-linear-adaptive \
     noise.alpha_max=0.093 \
     noise.adaptive_refit_every=50 \

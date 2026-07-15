@@ -13,6 +13,7 @@ EVAL_BS="${EVAL_BS:-16}"
 STEPS="${STEPS:-180}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
+SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -22,6 +23,7 @@ MARGS=(
     model.length=${SEQ_LEN:-1024}
     model.init=ngpt
     algo=eflm
+    algo.self_conditioning=${SELF_COND}
     algo.renormalize_weights=False
     noise=log-linear
     sampler=eflm

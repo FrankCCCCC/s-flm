@@ -52,6 +52,14 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     else:
       raise ValueError(self.init_mode)
 
+    self.self_conditioning = getattr(
+      config.algo, 'self_conditioning', False)
+    if self.self_conditioning:
+      self.W_in = nn.Linear(dim, dim, bias=False)
+      self.W_sc = nn.Linear(dim, dim, bias=False)
+      self.W_in.weight.data.zero_()
+      self.W_sc.weight.data.zero_()
+
     if self.adaLN:
       self.sigma_map = TimestepEmbedder(cond_dim)
 
@@ -196,9 +204,14 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
 
   def forward(self, x0, xt: torch.Tensor, sigma: torch.Tensor,
               context=None) -> torch.Tensor:
-    del x0, context
+    del x0
 
     x = xt  # [B, L, d], a Poincaré-ball point consumed as-is
+    lf = context if hasattr(context, 'z_sc') else None
+
+    if self.self_conditioning and lf is not None:
+      z_sc = lf.z_sc if lf.z_sc is not None else torch.zeros_like(x)
+      x = x + self.W_in(x) + self.W_sc(z_sc)
 
     if self.adaLN:
       t_cond = F.silu(self.sigma_map(sigma))

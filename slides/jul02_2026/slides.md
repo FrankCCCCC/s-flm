@@ -107,7 +107,7 @@ However, it doesn't provide optimal guarantee.
 - Model (DiT, *tiny*): Width **512**, Depth **8**, Heads **8** (~28.6M)
 
 - Model Initialization Choice ($\mathcal{N}(mean, var)$)
-  - ``ngpt``: $\mathcal{N}(0, \frac{1}{d}) (= custom 0.0442)$, ``random``: $\mathcal{N}(0, 4e-4) (= custom 0.02)$
+  - ``ngpt``: $\mathcal{N}(0, \frac{1}{d})$(= custom 0.0442), ``random``: $\mathcal{N}(0, 4e-4)$ (= custom 0.02)
   - ``custom``: std: {0.01, 0.04, 0.06, 0.08}
 
 - Geometry Curvature: {-0.25, -0.3, -0.5, -0.7, -1.0, -1.5}
@@ -146,16 +146,20 @@ However, it doesn't provide optimal guarantee.
 
 ## Recall Baselines
 
+<div style="font-size: 0.7em;">
+
 | Model | easy | medium | hard |
 |---|---|---|---|
-| AR | 14.7 ± 3.5 (n=3) | 3.4 ± 0.3 (n=3) | 0.5 ± 0.3 (n=3) |
-| S-FLM (naive) | 78.8 ± 1.1 (n=3) | 43.8 ± 3.2 (n=3) | 11.1 ± 1.7 (n=3) |
-| S-FLM + trunc | 94.4 ± 0.4 (n=3) | 79.8 ± 1.7 (n=3) | 42.4 ± 3.4 (n=3) |
-| S-FLM + trunc + adaptive | 95.0 ± 0.8 (n=3) | 76.7 ± 7.3 (n=3) | 42.2 ± 2.8 (n=3) |
-| E-FLM (naive) | 88.2 ± 1.2 (n=3) | 62.2 ± 2.3 (n=3) | 19.2 ± 3.3 (n=3) |
-| LangFlow + ada sched | 81.2 ± 0.9 (n=3) | 52.4 ± 2.7 (n=3) | 18.2 ± 2.1 (n=3) |
-| LangFlow + ada sched + SC | 97.0 ± 0.5 (n=3) | 87.2 ± 1.9 (n=3) | 50.4 ± 4.6 (n=3) |
+| AR | 14.7 ± 3.5 | 3.4 ± 0.3 | 0.5 ± 0.3 |
+| S-FLM (naive) | 78.8 ± 1.1 | 43.8 ± 3.2 | 11.1 ± 1.7 |
+| S-FLM + trunc | 94.4 ± 0.4 | 79.8 ± 1.7 | 42.4 ± 3.4 |
+| S-FLM + trunc + ada | 95.0 ± 0.8 | 76.7 ± 7.3 | 42.2 ± 2.8 |
+| E-FLM (naive) | 88.2 ± 1.2 | 62.2 ± 2.3 | 19.2 ± 3.3 |
+| LangFlow + ada | 81.2 ± 0.9 | 52.4 ± 2.7 | 18.2 ± 2.1 |
+| LangFlow + ada + SC | 97.0 ± 0.5 | 87.2 ± 1.9 | 50.4 ± 4.6 |
 | HFLM (tuned) | - | 83.23 ± 5.46 | 46.22 ± 13.13 |
+
+</div>
 
 HFLM (tuned) only grid search on word embedding initialization, LR, and global curvature.
 
@@ -163,7 +167,7 @@ HFLM (tuned) only grid search on word embedding initialization, LR, and global c
 
 ## LangFlow Relies on Self Conditioning Heavily
 
-![alt text](image.png)
+![alt text](image-9.png)
 
 - LangFlowPaper claims their biggest contribution is ``Information-uniform Scheduler``, but it helps limited.
 
@@ -201,12 +205,16 @@ HFLM (tuned) only grid search on word embedding initialization, LR, and global c
 
 ## Conclusion
 
-
 ### For HFLM
 
+- Curvature does help the accuracy
 - HFLM has relatively higher variance than baselines in accuracy, especially for {K: −0.50, c0.01@3e-4, hard}, accuracy std is 13.33
 - The single best run of HFLM in hard {K: −0.50, c0.01@3e-4} is **58%** which beats all baselines
 - Can we stabalize the training loss for HFLM? 
+
+---
+
+## Conclusion
 
 ### For LangFlow
 
@@ -215,22 +223,239 @@ HFLM (tuned) only grid search on word embedding initialization, LR, and global c
 
 ---
 
+## Conclusion: Next Step
 
-
-# Loss Geometry of Euclidean and Hyperbolic FLM
-
----
-
-### Loss Geometry of E-FLM on Tinystories, Seq Len: 256
-
-![width:700px](image-4.png)
+- Visualize the loss geometry (Loss vs timestep)
+- Try trunc + ada sched on EFLM, HFLM, and SFLM
 
 ---
 
-### Loss Geometry of H-FLM on Tinystories, Seq Len: 256
+# Loss Geometry of FLMs
+
+---
+
+
+
+## Sudoku Hard
+
+---
+
+### Loss Geometry of S-FLM(naive) on Sudoku Hard, Acc: 11.1%
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/sudoku_hard/sfm/sfm.png" width="400"/>
+  <img src="loss_geometry_vis/sudoku_hard/sfm/sfm_log.png" width="400"/>
+</div>
+
+---
+
+### Loss Geometry of S-FLM(+trunc) on Sudoku Hard, Acc: 42.2%
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/sudoku_hard/sfm_trunc/sfm_trunc.png" width="400"/>
+  <img src="loss_geometry_vis/sudoku_hard/sfm_trunc/sfm_trunc_log.png" width="400"/>
+</div>
+
+- Truncation mitigates [0.0, 0.8] and the tail, makes it smoother
+
+---
+
+### Loss Geometry of S-FLM(+trunc+ada) on Sudoku Hard, Acc: 42.2%
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/sudoku_hard/sfm_trunc_ada/sfm_trunc_ada.png" width="400"/>
+  <img src="loss_geometry_vis/sudoku_hard/sfm_trunc_ada/sfm_trunc_ada_log.png" width="400"/>
+</div>
+
+- Trunc+Ada is the smoothest loss geometry across all DLMs
+
+---
+
+### Loss Geometry of E-FLM on Sudoku Hard, Acc: 19.2%
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/sudoku_hard/eflm/eflm.png" width="400"/>
+  <img src="loss_geometry_vis/sudoku_hard/eflm/eflm_log.png" width="400"/>
+</div>
+
+---
+
+### Loss Geometry of E-FLM on Sudoku Hard, Vary Curvature
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/sudoku_hard/hflm_curv_overlay.png" width="400"/>
+  <img src="loss_geometry_vis/sudoku_hard/hflm_curv_overlay_log.png" width="400"/>
+</div>
+
+---
+
+### Loss Geometry of H-FLM on Sudoku Hard, Acc: 46.2%
+
+- Curvature = -0.5
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/sudoku_hard/hflm_K0.5/K0.5.png" width="400"/>
+  <img src="loss_geometry_vis/sudoku_hard/hflm_K0.5/K0.5_log.png" width="400"/>
+</div>
+
+---
+
+### Loss Geometry of LangFlow(+ada+SC) on Sudoku Hard, Acc: 50.4%
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/sudoku_hard/langflow_full/langflow_full.png" width="400"/>
+  <img src="loss_geometry_vis/sudoku_hard/langflow_full/langflow_full_log.png" width="400"/>
+</div>
+
+---
+
+# Conclusion
+
+- Curvature helps acc because it shapes the cliff of loss geometry of EFLM and SFLM (naive) to expontential decading through timestep.
+- SFLM (trunc + ada) has truncated the tail, which has the most smooth slope across all FLMs.
+- What if HFLM + Adaptive sched?
+- Does linear decading sched perform better than exponential decsding?
+
+---
+
+## Appendix: Tinystories
+
+---
+
+### Loss Geometry of S-FLM(+ada) on Tinystories, Seq Len: 256, GenPPL: 11.0
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/tinystories/sfm_ada_lr1e-3/sfm_ada_lr1e-3.png" width="400"/>
+  <img src="loss_geometry_vis/tinystories/sfm_ada_lr1e-3/sfm_ada_lr1e-3_log.png" width="400"/>
+</div>
+
+---
+
+### Loss Geometry of S-FLM(+trunc) on Tinystories, Seq Len: 256, GenPPL: 11.0
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/tinystories/sfm_trunc_lr1e-3/sfm_trunc_lr1e-3.png" width="400"/>
+  <img src="loss_geometry_vis/tinystories/sfm_trunc_lr1e-3/sfm_trunc_lr1e-3_log.png" width="400"/>
+</div>
+
+---
+
+### Loss Geometry of S-FLM(+trunc+ada) on Tinystories, Seq Len: 256, GenPPL: 11.0
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/tinystories/sfm_ada_trunc_lr1e-3/sfm_ada_trunc_lr1e-3.png" width="400"/>
+  <img src="loss_geometry_vis/tinystories/sfm_ada_trunc_lr1e-3/sfm_ada_trunc_lr1e-3_log.png" width="400"/>
+</div>
+
+---
+
+### Loss Geometry of E-FLM on Tinystories, Seq Len: 256, GenPPL: 34.6
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/tinystories/eflm_naive_geo/eflm_naive_geo.png" width="400"/>
+  <img src="loss_geometry_vis/tinystories/eflm_naive_geo/eflm_naive_geo_log.png" width="400"/>
+</div>
+
+---
+
+### Loss Geometry of H-FLM on Tinystories, Seq Len: 256, GenPPL: 17.7
 
 - Curvature = -1.0
 
-![width:700px](image-5.png)
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/tinystories/hflm_std0.04_pc1.0/hflm_std0.04_pc1.0.png" width="400"/>
+  <img src="loss_geometry_vis/tinystories/hflm_std0.04_pc1.0/hflm_std0.04_pc1.0_log.png" width="400"/>
+</div>
 
 ---
+
+### Loss Geometry of LangFlow(+ada+SC) on Tinystories, Seq Len: 256, GenPPL: 17.6
+
+<div style="display:flex; justify-content:center; align-items:center; gap:20px;">
+  <img src="loss_geometry_vis/tinystories/lf_ada_sc_lr1e-3/lf_ada_sc_lr1e-3.png" width="400"/>
+  <img src="loss_geometry_vis/tinystories/lf_ada_sc_lr1e-3/lf_ada_sc_lr1e-3_log.png" width="400"/>
+</div>
+
+---
+
+---
+
+## EFLM, HFLM + trunc + Ada Exp: Setting Up
+
+- Data: Sudoku, **48k train / 2k val** per difficulty (seed 42)
+  - Difficulties: {med 35 / hard 30}
+- Model (DiT, *tiny*): Width **512**, Depth **8**, Heads **8** (~28.6M)
+
+- Model Initialization Choice ($\mathcal{N}(mean, var)$)
+  - EFLM:
+    - ``ngpt``: $\mathcal{N}(0, \frac{1}{\sqrt{d}})$ (= custom 0.0441)
+  - HFLM:
+    - ``random``: $\mathcal{N}(0, 4e-4)$ (= custom 0.02)
+    - ``custom``: std: {0.01, 0.04}
+
+- Geometry Curvature: 
+  - EFLM: No
+  - HFLM:
+    - {-0.3, -0.5}
+
+---
+
+## Curvature * Init * LR Exp: Setting Up
+
+- Training
+  - Training Steps: **20k**, Batch Size: **256**, Max Seq Len: **180**, bf16, EMA 0.9999
+  - Optimizer: AdamW
+    - LR: {3e‑4, 5e‑4, 1e‑3}
+    - Weight Decay: 0.0, Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
+  - All use cross entropy loss
+  - 3 radom seeds: {1, 2, 3}, take averge
+
+---
+
+## Curvature * Init * LR Exp: Setting Up
+
+- Evaluation
+  - Exact-velocity, top_k_v = -1 (avg across vocab), 180 sampling steps
+  - Greedy decoding for last sampling step
+
+---
+
+## SFLM, EFLM, HFLM + Self Cond Exp: Setting Up
+
+- Data: Sudoku, **48k train / 2k val** per difficulty (seed 42)
+  - Difficulties: {med 35 / hard 30}
+- Model (DiT, *tiny*): Width **512**, Depth **8**, Heads **8** (~28.6M)
+
+- Model Initialization Choice ($\mathcal{N}(mean, var)$)
+  - SFLM, EFLM:
+    - ``ngpt``: $\mathcal{N}(0, \frac{1}{\sqrt{d}})$ (= custom 0.0441)
+  - HFLM:
+    - ``custom``: std: {0.01}
+
+- Geometry Curvature: 
+  - EFLM: No
+  - HFLM:
+    - -0.5
+
+- Self Conditioning
+  - {on, off}
+
+---
+
+## Curvature * Init * LR Exp: Setting Up
+
+- Training
+  - Training Steps: **20k**, Batch Size: **256**, Max Seq Len: **180**, bf16, EMA 0.9999
+  - Optimizer: AdamW
+    - LR: {3e‑4, 5e‑4, 1e‑3}
+    - Weight Decay: 0.0, Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
+  - All use cross entropy loss
+  - 3 radom seeds: {1, 2, 3}, take averge
+
+---
+
+## Curvature * Init * LR Exp: Setting Up
+
+- Evaluation
+  - Exact-velocity, top_k_v = -1 (avg across vocab), 180 sampling steps
+  - Greedy decoding for last sampling step

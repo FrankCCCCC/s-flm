@@ -14,6 +14,10 @@ SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/hflm_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
+SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
+# self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
+# default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
+if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
 
 cd "${REPO_ROOT}"
 
@@ -28,6 +32,7 @@ python -u -m main \
     seed="${SEED}" \
     algo=hflm \
     algo.invert_time_convention=false \
+    algo.self_conditioning="${SELF_COND}" \
     algo.prior_cov=0.25 \
     algo.rho_max=12 \
     algo.gaussian_curvature="${GAUSS_CURV}" \
@@ -40,6 +45,7 @@ python -u -m main \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \
+    ${SC_STRAT} \
     trainer.val_check_interval=20_000 \
     trainer.limit_val_batches=0 \
     trainer.max_steps=20_000 \

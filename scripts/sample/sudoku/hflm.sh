@@ -17,6 +17,7 @@ DEVICES="${DEVICES:-1}"
 STEPS="${STEPS:-180}"
 VELOCITY="${VELOCITY:-exact}"         # sample / exact
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"   # 1 = top-1 predicted-clean endpoint
+SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 
 cd "${REPO_ROOT}"
 
@@ -33,6 +34,7 @@ python -u -m main \
     seed="${SEED}" \
     algo=hflm \
     algo.invert_time_convention=false \
+    algo.self_conditioning="${SELF_COND}" \
     algo.prior_cov=0.25 \
     algo.rho_max=12 \
     algo.gaussian_curvature="${GAUSS_CURV}" \
