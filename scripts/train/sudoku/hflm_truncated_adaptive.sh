@@ -41,7 +41,7 @@ python -u -m main \
     algo.rho_max=12 \
     algo.gaussian_curvature="${GAUSS_CURV}" \
     sampler=hflm \
-    noise="${NOISE:-log-linear-adaptive}" \
+    noise=log-linear-adaptive \
     noise.alpha_max="${ALPHA_MAX}" \
     noise.adaptive_refit_every=50 \
     noise.adaptive_buffer_size=${BUF_SIZE} \
