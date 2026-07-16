@@ -9,8 +9,13 @@ rho_max and gaussian_curvature K are loaded from the run's own config
 (.hydra/config.yaml), never hard-coded.
 
 Outputs (one checkpoint load per step):
-  <out>_{eucl,hyp}[_log].png   histograms, one outline per step (dashed line =
-                               that step's median; dotted green = rho_max)
+  <out>_{allvocab,trainonly}_{eucl,hyp}[_log].png
+                               length histograms, one outline per step (dashed
+                               line = that step's median; dotted green =
+                               rho_max). Two coverage modes tagged in the file
+                               name: `allvocab` = every row of the embedding
+                               matrix; `trainonly` = only words that appeared in
+                               the sampled training batches (freq > 0).
   <out>_rank_{step}.json       all words ranked by length (descending), each
                                entry {token_id, word, eucl_len, riem_len}; the
                                tanh clamp is monotone so both lengths rank alike
@@ -114,9 +119,18 @@ def _word_str(tokenizer, i: int) -> str:
 
 @torch.no_grad()
 def _train_freq(emb: RunEmbeddings, num_batches: int) -> np.ndarray:
-  """Empirical per-word token ratio over `num_batches` training batches."""
-  train_dl, _ = dataloader.get_dataloaders(
-    emb.cfg, emb.tokenizer, valid_seed=emb.cfg.seed)
+  """Empirical per-word token ratio over `num_batches` training batches.
+
+  Builds the train loader straight from the dataset instead of
+  dataloader.get_dataloaders, whose DDP global-batch assert divides by
+  torch.cuda.device_count() and so needs a live GPU; a frequency count is
+  single-process and runs fine on a CPU node.
+  """
+  train_set = dataloader.get_dataset(emb.cfg, emb.tokenizer, mode='train')
+  train_dl = torch.utils.data.DataLoader(
+    train_set, batch_size=emb.cfg.loader.batch_size,
+    num_workers=emb.cfg.loader.num_workers,
+    shuffle=not emb.cfg.data.streaming)
   cnt = torch.zeros(emb.vocab_size)
   for b in itertools.islice(iter(train_dl), num_batches):
     ids = b['input_ids'].reshape(-1)
@@ -145,33 +159,42 @@ def write_rankings(emb: RunEmbeddings, out: str):
     print(f'wrote {path}')
 
 
-def plot_histograms(emb: RunEmbeddings, out: str, bins: int):
-  """<out>_{eucl,hyp}[_log].png: per-step length histograms."""
+def plot_histograms(emb: RunEmbeddings, out: str, bins: int, freq: np.ndarray):
+  """<out>_{allvocab,trainonly}_{eucl,hyp}[_log].png: per-step length histograms.
+
+  Two coverage modes (tagged in the file name): `allvocab` = every row of the
+  embedding matrix; `trainonly` = only words with freq > 0 (appeared in the
+  sampled training batches). The bin range is shared across modes so the two
+  figures are directly comparable.
+  """
+  covers = {'allvocab': np.ones(emb.vocab_size, dtype=bool),
+            'trainonly': freq > 0}
   for kind in ('eucl', 'hyp'):
     vals = emb.lengths(kind)
     hi = max(max(v.max() for v in vals.values()), emb.rho_max) * 1.02
     edges = np.linspace(0.0, hi, bins + 1)
-    for log_y in (False, True):
-      fig, ax = plt.subplots(figsize=(6, 4.5))
-      for tag, v in vals.items():
-        _, _, patches = ax.hist(v, bins=edges, histtype='step', lw=1.5, label=tag)
-        ax.axvline(np.median(v), color=patches[0].get_edgecolor(),
-                   ls='--', lw=1.0)
-      ax.axvline(emb.rho_max, color='green', ls=':', lw=1.5,
-                 label=f'rho_max={emb.rho_max:g}')
-      ax.set(xlabel=XLABELS[kind], ylabel='# words',
-             title=f'{emb.run_name} word-embedding lengths ({emb.const_label})')
-      if log_y:
-        ax.set_yscale('log')
-      _save(fig, ax, f'{out}_{kind}{"_log" if log_y else ""}.png')
+    for cov, mask in covers.items():
+      for log_y in (False, True):
+        fig, ax = plt.subplots(figsize=(6, 4.5))
+        for tag, v in vals.items():
+          vm = v[mask]
+          _, _, patches = ax.hist(vm, bins=edges, histtype='step', lw=1.5,
+                                  label=tag)
+          ax.axvline(np.median(vm), color=patches[0].get_edgecolor(),
+                     ls='--', lw=1.0)
+        ax.axvline(emb.rho_max, color='green', ls=':', lw=1.5,
+                   label=f'rho_max={emb.rho_max:g}')
+        ax.set(xlabel=XLABELS[kind], ylabel='# words',
+               title=f'{emb.run_name} word-embedding lengths '
+                     f'[{cov}: n={int(mask.sum())}] ({emb.const_label})')
+        if log_y:
+          ax.set_yscale('log')
+        _save(fig, ax, f'{out}_{cov}_{kind}{"_log" if log_y else ""}.png')
 
 
-def plot_freq_scatter(emb: RunEmbeddings, out: str, num_batches: int):
+def plot_freq_scatter(emb: RunEmbeddings, out: str, freq: np.ndarray):
   """<out>_freq_{eucl,hyp}.png: length vs train-set frequency (log x)."""
-  freq = _train_freq(emb, num_batches)
   pos = freq > 0
-  print(f'frequency over {num_batches} train batches: '
-        f'{int(pos.sum())} words with nonzero count', flush=True)
   for kind in ('eucl', 'hyp'):
     vals = emb.lengths(kind)
     fig, ax = plt.subplots(figsize=(6, 4.5))
@@ -203,9 +226,12 @@ def main():
 
   emb = RunEmbeddings.load(args.project, args.run, args.steps, args)
   os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+  freq = _train_freq(emb, args.freq_batches)
+  print(f'frequency over {args.freq_batches} train batches: '
+        f'{int((freq > 0).sum())} words appeared in training', flush=True)
   write_rankings(emb, args.out)
-  plot_histograms(emb, args.out, args.bins)
-  plot_freq_scatter(emb, args.out, args.freq_batches)
+  plot_histograms(emb, args.out, args.bins, freq)
+  plot_freq_scatter(emb, args.out, freq)
 
 
 if __name__ == '__main__':
