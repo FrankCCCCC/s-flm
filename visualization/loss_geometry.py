@@ -71,6 +71,10 @@ def _load_config(run_dir: str, ckpt: str, args):
     cfg.loader[k] = args.batch_size
   if cfg.algo.name == 'hflm' and cfg.algo.get('gaussian_curvature') is None:
     cfg.algo.gaussian_curvature = -1.0  # pre-knob HFLM configs = unit hyperboloid
+  if cfg.algo.get('self_conditioning') is None:
+    cfg.algo.self_conditioning = False  # pre-knob configs: no self-conditioning
+  if cfg.algo.get('p_self_cond') is None:
+    cfg.algo.p_self_cond = 0.0
   return cfg
 
 
