@@ -59,7 +59,6 @@ def compute_perword(run_dir: str, step: int, args):
   ckpts = glob.glob(os.path.join(run_dir, 'checkpoints', f'*-{step}.ckpt'))
   assert ckpts, f'no *-{step}.ckpt under {run_dir}/checkpoints'
   cfg = _load_config(run_dir, sorted(ckpts)[0], args)
-  assert cfg.algo.name == 'hflm', 'per-word TV expects an HFLM run'
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
   tokenizer = dataloader.get_tokenizer(cfg)
   model = main_mod._load_from_checkpoint(
@@ -74,9 +73,12 @@ def compute_perword(run_dir: str, step: int, args):
   _install_word_loss_hook(model)
   model._word_sum = torch.zeros(model.vocab_size, device=device)
   model._word_cnt = torch.zeros(model.vocab_size, device=device)
-  ids = torch.arange(model.vocab_size, device=device).unsqueeze(0)
-  rhos, _ = model.backbone.get_hyperbolic_polar_embeddings(ids)
-  eucl = rhos.detach().reshape(-1).float().cpu().numpy()
+  if cfg.algo.name == 'hflm':
+    ids = torch.arange(model.vocab_size, device=device).unsqueeze(0)
+    rhos, _ = model.backbone.get_hyperbolic_polar_embeddings(ids)
+    eucl = rhos.detach().reshape(-1).float().cpu().numpy()
+  else:  # embedding-length x-axis is HFLM-only; the freq figure needs only sums/cnts
+    eucl = np.zeros(model.vocab_size)
   t_grid = np.linspace(0.001, 1.0, 33)
   sums, cnts = [], []
   for t in t_grid:
@@ -91,7 +93,8 @@ def compute_perword(run_dir: str, step: int, args):
     cnts.append(model._word_cnt.cpu().numpy())
     print(f'  t={t:.3f} done', flush=True)
   emb = RunEmbeddings(os.path.basename(run_dir), ['x'], {'x': eucl},
-                      float(model.rho_max), float(model.gaussian_curvature),
+                      float(getattr(model, 'rho_max', float('nan'))),
+                      float(getattr(model, 'gaussian_curvature', float('nan'))),
                       cfg, tokenizer)
   freq = _train_freq(emb, args.freq_batches)
   return t_grid, np.array(sums), np.array(cnts), eucl, freq
