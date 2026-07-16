@@ -12,6 +12,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/eflm_truncated_adaptive_${
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
+LR="${LR:-3e-4}"                     # AdamW learning rate
 ALPHA_MAX="${ALPHA_MAX:-0.767}"      # alpha_star_euclidean(12); null = no truncation
 
 GLOBAL_BS=256
@@ -25,6 +26,7 @@ python -u -m main \
     data.difficulty="${DIFFICULTY}" \
     seed="${SEED}" \
     model=tiny-sphere-dit \
+    optim.lr="${LR}" \
     algo=eflm \
     algo.invert_time_convention=false \
     noise=log-linear-adaptive \
