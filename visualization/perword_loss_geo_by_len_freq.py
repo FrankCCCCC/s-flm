@@ -60,7 +60,7 @@ def plot_by_length(t, sums, cnts, eucl, out, min_count, tag, run, logy=True):
             label=f'len {q[i]:.1f}-{q[i+1]:.1f} '
                   f'(n={int(m.sum())}, t50={np.median(t50[m]):.2f})')
   ax.set(xlabel='t', ylabel='Loss',
-         title=f'HFLM {run} {tag}: per-word loss timing by length quintile')
+         title=f'{run} {tag}: per-word loss timing by length quintile')
   if logy:
     ax.set_yscale('log')
   ax.grid(alpha=0.3); ax.legend(fontsize=7)
@@ -80,7 +80,7 @@ def plot_by_freq(t, sums, cnts, out, tag, run, logy=True):
     ax.plot(t, g, marker='o', ms=3,
             label=f'cnt {lo}-{hi if hi < 10**9 else "max"} (n={int(m.sum())})')
   ax.set(xlabel='t', ylabel='Loss',
-         title=f'HFLM {run} {tag}: group curves by word count (frequency)')
+         title=f'{run} {tag}: group curves by word count (frequency)')
   if logy:
     ax.set_yscale('log')
   ax.grid(alpha=0.3); ax.legend(fontsize=7)
@@ -118,9 +118,10 @@ def main():
     np.savez_compressed(cache, t=t, sums=sums, cnts=cnts, eucl=eucl, freq=freq)
     print(f'wrote {cache}')
 
-  plot_by_length(t, sums, cnts, eucl, args.out, args.min_count, tag, args.run)
-  plot_by_length(t, sums, cnts, eucl, args.out, args.min_count, tag, args.run,
-                 logy=False)
+  if np.any(eucl > 0):  # embedding-length quintile figure is HFLM-only
+    plot_by_length(t, sums, cnts, eucl, args.out, args.min_count, tag, args.run)
+    plot_by_length(t, sums, cnts, eucl, args.out, args.min_count, tag, args.run,
+                   logy=False)
   plot_by_freq(t, sums, cnts, args.out, tag, args.run)
   plot_by_freq(t, sums, cnts, args.out, tag, args.run, logy=False)
 
