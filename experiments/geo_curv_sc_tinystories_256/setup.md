@@ -7,7 +7,7 @@
 - Data: TinyStories, **475M train / 5M val** (seed 42)
 - Model (DiT, *small*): Width **768**, Depth **12**, Heads **12**, Init ``ngpt``: $\mathcal{N}(0, \frac{1}{d})$ (variance)
 - Geometries
-  - S-FLM {Naive, ada sched, truncation, ada sched + truncation} * {Self Cond: On} + {Naive, Self Cond: On}
+  - S-FLM {Naive, ada sched, truncation, ada sched + truncation} * {Self Cond: On} + {Naive} * {Self Cond: Off}
   - E-FLM {Naive, ada sched, truncation, ada sched + truncation} * {Self Cond: On, Off}
 
 ---
@@ -38,6 +38,7 @@
 - ``rho_max``: {12}
 - Self Cond: On
 - Gaussian Curvature: {-0.01, -0.1, -0.25, -0.5, -0.75}
+- Noise Sched: {``log-linear``, ``log-linear-adaptive``}
 
 ---
 
