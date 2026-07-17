@@ -1,42 +1,56 @@
 #!/bin/bash
-# E-FLM with truncated noise schedule. Single TinyStories training run.
-# ALPHA_MAX default is the Euclidean analog of the paper's Eq. 17 bound:
-# alpha_star_euclidean(V=50257) = 0.840 (noise_schedules.py; ngpt init
-# ||e||~=1, N(0,I) prior, delta=0.1).
+# H-FLM with truncated + adaptive noise schedule. Single TinyStories training
+# run. ALPHA_MAX default is the hyperbolic analog of the paper's Eq. 17 bound:
+# alpha_star_hyperbolic(V=50257, d=768, embed_std=1/sqrt(768)) = 0.979
+# (noise_schedules.py; matches the default INIT=ngpt, prior_cov=0.25,
+# rho_max=12, delta=0.1 — nearly vacuous because the ngpt clean radius ~1
+# is dwarfed by the noise radius ~10). For INIT=hyperbolic (embed_std=0.3)
+# set ALPHA_MAX=0.608. NOT the sphere bound 0.121 — that collapses HFLM
+# (experiments/hflm/RESULTS.md).
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eflm_truncated}"
-RUN_NAME="${RUN_NAME:-eflm_truncated}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/hflm_truncated_adaptive}"
+RUN_NAME="${RUN_NAME:-hflm_truncated_adaptive}"
 WANDB_GROUP="${WANDB_GROUP:-adv_geo}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 MAX_STEPS="${MAX_STEPS:-30000}"
 PER_GPU_BS="${PER_GPU_BS:-8}"
 CKPT_EVERY="${CKPT_EVERY:-2500}"
-LR="${LR:-3e-4}"
-ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257); null = no truncation
+INIT="${INIT:-ngpt}"            # ngpt | hyperbolic | custom
+INIT_STD="${INIT_STD:-}"        # required only when INIT=custom
+PRIOR_COV="${PRIOR_COV:-0.25}"
+RHO_MAX="${RHO_MAX:-12}"
+GAUSS_CURV="${GAUSS_CURV:--1.0}"    # Gaussian curvature, restrict to < 0.0 for hyperbolic
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
 if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
+if [ "${INIT}" = "custom" ]; then INIT_ARGS="model.init=custom model.init_std=${INIT_STD}"; else INIT_ARGS="model.init=${INIT}"; fi
 
 cd "${REPO_ROOT}"
 python -u -m main \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
-    model=small-sphere-dit \
+    model=small-hyperbolic-dit \
     model.length=${SEQ_LEN:-1024} \
-    model.init=ngpt \
-    algo=eflm \
+    ${INIT_ARGS} \
+    algo=hflm \
+    algo.prior_cov=${PRIOR_COV} \
+    algo.rho_max=${RHO_MAX} \
+    algo.gaussian_curvature=${GAUSS_CURV} \
     algo.renormalize_weights=False \
     algo.invert_time_convention=false \
     algo.self_conditioning="${SELF_COND}" \
-    noise=log-linear \
-    noise.alpha_max=${ALPHA_MAX} \
-    optim.lr=${LR} \
+    sampler=hflm \
+    noise=log-linear-adaptive \
+    noise.adaptive_refit_every=50 \
+    noise.adaptive_buffer_size=25600 \
+    noise.adaptive_ema=0.9 \
+    noise.adaptive_uniform_mix=1e-3 \
     loader.global_batch_size=512 \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \

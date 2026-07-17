@@ -1,5 +1,8 @@
 #!/bin/bash
-# EFLM — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval).
+# HFLM + adaptive noise — eval ONE TinyStories checkpoint: valid PPL (ppl_eval)
+# + GenPPL (sample_eval). Uses noise=log-linear-adaptive to MATCH the adaptive
+# training schedule (scripts/train/tinystories/hlfm_adaptive.sh); the learned
+# schedule is reconstructed from the checkpoint's alpha_vals buffer.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export CUDA_VISIBLE_DEVICES=0
@@ -7,32 +10,36 @@ export CUDA_VISIBLE_DEVICES=0
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?set CKPT_PATH=/abs/path/to/checkpoint.ckpt}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/eflm}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/hflm_adaptive}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
 STEPS="${STEPS:-180}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
-ALPHA_MAX="${ALPHA_MAX:-0.840}"
+PRIOR_COV="${PRIOR_COV:-0.25}"
+RHO_MAX="${RHO_MAX:-12}"
+GAUSS_CURV="${GAUSS_CURV:--1.0}"    # Gaussian curvature K < 0; must match training
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
 
 MARGS=(
-    model=small-sphere-dit
+    model=small-hyperbolic-dit
     model.length=${SEQ_LEN:-1024}
     model.init=ngpt
-    algo=eflm
+    algo=hflm
     algo.self_conditioning=${SELF_COND}
+    algo.prior_cov=${PRIOR_COV}
+    algo.rho_max=${RHO_MAX}
+    algo.gaussian_curvature=${GAUSS_CURV}
     algo.renormalize_weights=False
     noise=log-linear-adaptive
-    noise.alpha_max=${ALPHA_MAX}
     noise.adaptive_refit_every=50
     noise.adaptive_buffer_size=25600
     noise.adaptive_ema=0.9
     noise.adaptive_uniform_mix=1e-3
-    sampler=eflm
+    sampler=hflm
     sampler.velocity=${VELOCITY}
     sampler.top_k_velocity=${TOPK_VELOCITY}
     sampler.steps=${STEPS}

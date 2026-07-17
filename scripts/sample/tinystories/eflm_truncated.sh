@@ -13,7 +13,7 @@ EVAL_BS="${EVAL_BS:-16}"
 STEPS="${STEPS:-180}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
-ALPHA_MAX="${ALPHA_MAX:-0.8402}"
+ALPHA_MAX="${ALPHA_MAX:-0.840}"
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 
 cd "${REPO_ROOT}"
@@ -26,12 +26,8 @@ MARGS=(
     algo=eflm
     algo.self_conditioning=${SELF_COND}
     algo.renormalize_weights=False
-    noise=log-linear-adaptive
+    noise=log-linear
     noise.alpha_max=${ALPHA_MAX}
-    noise.adaptive_refit_every=50
-    noise.adaptive_buffer_size=25600
-    noise.adaptive_ema=0.9
-    noise.adaptive_uniform_mix=1e-3
     sampler=eflm
     sampler.velocity=${VELOCITY}
     sampler.top_k_velocity=${TOPK_VELOCITY}
