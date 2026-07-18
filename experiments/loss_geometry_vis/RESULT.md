@@ -30,8 +30,10 @@ faithful.
 > checkpoints of a learned schedule.** See [Caveat](#caveat-what-t-means) — read
 > this before comparing runs point-by-point.
 
-Figures live in [`tinystories/`](tinystories/); each run has a linear-Y (`.png`)
-and log-Y (`_log.png`) figure plus a cached `.json` of the raw curves.
+Figures are organized as `{dataset}/{run}/` — each run folder holds its linear-Y
+(`.png`), log-Y (`_log.png`) and `‖x_t‖`-axis (`_xtnorm.png`, `_xtnorm_log.png`)
+figures plus a cached `.json`. Datasets: `tinystories/` and `sudoku_hard/` (the
+HFLM-curvature runs are `sudoku_hard/hflm_K*/`).
 
 ## TinyStories runs
 
@@ -164,6 +166,48 @@ computed only on the solution cells, with the puzzle given as a fixed prefix**
 4. Every Sudoku curve is flat-≈0 until `t→1`, mirroring EFLM's "naive geometry"
    on TinyStories — but here it's intrinsic to the conditional task, not a
    pathology.
+
+## HFLM — loss geometry per Gaussian curvature
+
+One curve per Gaussian curvature `K`, using the **best `(init, lr)`** config of
+each curvature from the Sudoku-hard sweep `outputs/hflm_curv_init_lr_sudoku`
+(`prior_cov` is **fixed at 0.25**; only `gaussian_curvature = −K` varies).
+"Best" = highest `eval/results.json` sudoku accuracy (num_correct / 2000).
+Figures in [`sudoku_hard/hflm_K*/`](sudoku_hard/). **HFLM must be drawn with the non-dev1
+`claude/curv` code** (the `gaussian_curvature` knob is absent on `main`; dev1
+would silently use K=−1) — done via `s-flm/visualization/loss_geometry_curv.py`.
+
+| K | best config (init/lr) | best acc (seed) | drawn | final step | L(1) |
+|---|---|---|---|---|---|
+| 0.25 | c0.04 / 5e-4 | 0.459 (rs1) | ✅ rs1 (=best) | 20K | 0.250 |
+| 0.3  | c0.01 / 3e-4 | 0.502 (rs2) | ⚠️ rs1 (0.310) | 20K | 0.246 |
+| 0.5  | c0.01 / 3e-4 | **0.582** (rs2) | ⚠️ rs1 (fresh run) | 20K | 0.244 |
+| 0.7  | c0.01 / 3e-4 | 0.467 (rs3) | ✅ rs1 (0.361) | 20K | 0.251 |
+| 1.0  | c0.01 / 3e-4 | 0.461 (rs2) | ⚠️ rs1 (0.357) | 20K | 0.264 |
+| 1.5  | c0.01 / 3e-4 | 0.451 (rs2) | ✅ rs1 (0.278) | 20K | **0.436** |
+
+**Accuracy vs curvature** peaks at **K=0.5 (0.58)** and falls toward both extremes
+— a real curvature effect (the interesting scientific result of the sweep).
+
+**Loss geometry vs curvature (final, seed rs1, all at 20K):** L(1) is tight for
+K=0.25–1.0 (**0.244–0.264**) but jumps to **0.436 at K=1.5** — and K=1.5's L(1)
+*rose* over training (0.306@5K → 0.436@20K), i.e. the highest curvature is
+unstable / degrades. So the curvature effect that shows up as an accuracy drop at
+the extremes is mirrored in the loss geometry at K=1.5. The overlay is now a fair
+same-step (20K) comparison across all six curvatures.
+
+**Status / caveats:**
+- **All 6 curvatures drawn; task complete** (seed rs1). The best-*scoring* config
+  for 5/6 was seed **rs2/rs3** (trained under `ch2263`, checkpoints on unreachable
+  `/scratch/ch2263`); the user re-ran the **rs1** sweep (accessible), so figures
+  use the best `(init,lr)` config at **seed rs1** — the best hyperparameters, not
+  the highest-scoring seed. Only K=0.25's rs1 run is also its best seed.
+- **Final steps: all 6 at 20K** (K=0.3's rs1 run has since finished to 20K), so
+  the overlay is a fair same-step comparison.
+- The **2-hour poll is now retired** (cron `81ebad32` deleted) — all 6 best-config
+  rs1 runs are finished, so no further checkpoints are coming. To upgrade to the
+  higher-scoring **rs2/rs3** seeds would require retrieving them from `ch2263`
+  (needs your authorization); recipe in `sudoku_hard/hflm_curv_POLL_STATE.md`.
 
 ## Reproduce
 

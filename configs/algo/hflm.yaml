@@ -15,3 +15,6 @@ renormalize_weights: False
 prior_cov: 0.25               # tangent VARIANCE (s²); s=0.5 ⇒ E[ρ]≈11.3 < 20
 rho_max: 12                   # soft radial clamp ρ_eff = 12·tanh(ρ/12)
 gaussian_curvature: -1.0      # Gaussian curvature K < 0; -1 = standard unit hyperboloid
+
+self_conditioning: false      # LangFlow-style self-conditioning (2-pass, zero-init W_in/W_sc)
+p_self_cond: 0.25             # train-time self-cond probability

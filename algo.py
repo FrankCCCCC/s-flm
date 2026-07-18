@@ -209,12 +209,44 @@ class DUO_BASE(trainer_base.UniformState):
     return diffusion_loss
 
 
-class SFM(trainer_base.Diffusion):
+class SelfConditioning:
+  """LangFlow-style self-conditioning (LangFlow paper §4.2, Alg. 1).
+
+  With probability p_self_cond at train time (always at eval), a no-grad
+  forward first predicts x0 with z_sc=0; its expected embedding in the
+  model-input space of xt (`_sc_embed_table`) is then fed to the loss
+  forward through the backbone's zero-init W_in/W_sc path via context.z_sc.
+  """
+
+  def _init_self_cond(self, config):
+    self.self_conditioning = config.algo.self_conditioning
+    self.p_self_cond = config.algo.p_self_cond
+    if self.self_conditioning:
+      assert 0.0 <= self.p_self_cond <= 1.0
+
+  def _sc_embed_table(self):
+    """[V, d] vocab embeddings in the same space as the model input xt."""
+    raise NotImplementedError
+
+  def _self_cond_pass(self, xt, sigma, context, train_mode):
+    """Sets context.z_sc in place; no-op when self-conditioning is off."""
+    if not self.self_conditioning:
+      return
+    context.z_sc = None
+    if train_mode and torch.rand(()) >= self.p_self_cond:
+      return
+    with torch.no_grad():
+      log_xhat = self.forward(x0=None, xt=xt, sigma=sigma, context=context)
+      context.z_sc = (log_xhat.exp() @ self._sc_embed_table()).detach()
+
+
+class SFM(SelfConditioning, trainer_base.Diffusion):
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
     self.eps = config.algo.eps
     self.renormalize_weights = config.algo.renormalize_weights
     self.invert_time_convention = config.algo.invert_time_convention
+    self._init_self_cond(config)
     self._validate_configuration()
 
   def _validate_configuration(self):
@@ -303,6 +335,7 @@ class SFM(trainer_base.Diffusion):
       valid_tokens=valid_tokens)
 
     sigma = self._sigma_from_alphat(alpha_t)
+    self._self_cond_pass(xt, sigma, context, train_mode)
     log_x_theta = self.forward(
       x0=x0, xt=xt, sigma=sigma, context=context)
     utils.print_nans(log_x_theta, 'model_output')
@@ -315,12 +348,17 @@ class SFM(trainer_base.Diffusion):
 
     return loss, t
 
-class EFLM(trainer_base.Diffusion):
+  def _sc_embed_table(self):
+    # Unit-norm embeddings: the sphere xt lives on (cf. get_sphere_embeddings).
+    return utils.sphere_normalize(self.backbone.sphere_embed.weight)
+
+class EFLM(SelfConditioning, trainer_base.Diffusion):
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
     self.eps = config.algo.eps
     self.renormalize_weights = config.algo.renormalize_weights
     self.invert_time_convention = config.algo.invert_time_convention
+    self._init_self_cond(config)
     self._validate_configuration()
 
   def _validate_configuration(self):
@@ -408,6 +446,7 @@ class EFLM(trainer_base.Diffusion):
       valid_tokens=valid_tokens)
 
     sigma = self._sigma_from_alphat(alpha_t)
+    self._self_cond_pass(xt, sigma, context, train_mode)
     log_x_theta = self.forward(
       x0=x0, xt=xt, sigma=sigma, context=context)
     utils.print_nans(log_x_theta, 'model_output')
@@ -419,6 +458,10 @@ class EFLM(trainer_base.Diffusion):
       context=context, train_mode=train_mode)
 
     return loss, t
+
+  def _sc_embed_table(self):
+    # Raw Euclidean embeddings: the space xt lives in (cf. get_raw_embeddings).
+    return self.backbone.sphere_embed.weight
 
 @dataclass
 class LangFlowContext:
@@ -574,7 +617,7 @@ class LangFlow(trainer_base.Diffusion):
     return loss
 
 
-class HFLM(trainer_base.Diffusion):
+class HFLM(SelfConditioning, trainer_base.Diffusion):
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
     self.eps = config.algo.eps
@@ -585,6 +628,7 @@ class HFLM(trainer_base.Diffusion):
     # getattr default keeps checkpoints/configs from before the curvature knob
     # loading with the standard unit hyperboloid (K = -1).
     self.gaussian_curvature = config.algo.gaussian_curvature
+    self._init_self_cond(config)
     self._validate_configuration()
 
   def _validate_configuration(self):
@@ -727,6 +771,7 @@ class HFLM(trainer_base.Diffusion):
       valid_tokens=valid_tokens)
 
     sigma = self._sigma_from_alphat(alpha_t)
+    self._self_cond_pass(xt, sigma, context, train_mode)
     log_x_theta = self.forward(
       x0=x0, xt=xt, sigma=sigma, context=context)
     utils.print_nans(log_x_theta, 'model_output')
@@ -738,6 +783,14 @@ class HFLM(trainer_base.Diffusion):
       context=context, train_mode=train_mode)
 
     return loss, t
+
+  def _sc_embed_table(self):
+    # Poincaré-ball points: the space xt lives in (cf. q_xt's rho-clamped
+    # polar -> cartesian map of the clean embeddings).
+    w = self.backbone.sphere_embed.weight
+    return GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+      self._rho_clamp(w.norm(p=2, dim=-1)), utils.sphere_normalize(w),
+      gaussian_curvature=self.gaussian_curvature)
 
 class HyperbolicBoundaryFM(trainer_base.Diffusion):
   def __init__(self, config, tokenizer):

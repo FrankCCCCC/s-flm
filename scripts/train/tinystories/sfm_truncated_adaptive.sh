@@ -15,6 +15,10 @@ PER_GPU_BS="${PER_GPU_BS:-8}"
 CKPT_EVERY="${CKPT_EVERY:-2500}"
 LR="${LR:-3e-4}"
 ALPHA_MAX="${ALPHA_MAX:-0.121}"
+SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
+# self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
+# default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
+if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
 
 cd "${REPO_ROOT}"
 python -u -m main \
@@ -26,6 +30,7 @@ python -u -m main \
     algo=sfm \
     algo.renormalize_weights=False \
     algo.invert_time_convention=false \
+    algo.self_conditioning="${SELF_COND}" \
     noise=log-linear-adaptive \
     noise.alpha_max=${ALPHA_MAX} \
     noise.adaptive_refit_every=50 \
@@ -40,6 +45,7 @@ python -u -m main \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \
+    ${SC_STRAT} \
     trainer.max_steps=${MAX_STEPS} \
     trainer.val_check_interval=60_000 \
     trainer.limit_val_batches=0 \

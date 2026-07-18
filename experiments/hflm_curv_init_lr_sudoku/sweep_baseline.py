@@ -80,6 +80,12 @@ SITES = {
     'tc': dict(
         repo='/home/shengyenc/workspace/research/s-flm',
         envbin='/home/shengyenc/anaconda3/envs/sfm/bin',
+        # checkpoints are RETAINED this run -> park runs (incl. ~1.8G/cell ckpts) on the
+        # project GPFS (4.2P, no per-user /home quota risk); shared across TC + Falcon.
+        # /scratch is per-cluster + login-visible + huge (no group-quota risk, unlike
+        # /projects) -> runs incl. retained ckpts live here; gathered to /share at the end
+        # (before scratch purge) as the persistent deliverable.
+        output_base='/scratch/shengyenc/sfm_output/hflm_curv_init_lr_sudoku',
         algos=['eflm', 'langflow_ada'],
         # ARC rejects multi-partition submissions (per-partition QOS) -> round-robin
         # single queues (fast-starting first; preemption costs <=~40 min: ckpt-5k +
@@ -94,6 +100,10 @@ SITES = {
     'falcon': dict(
         repo='/home/shengyenc/workspace/research/s-flm',
         envbin='/home/shengyenc/anaconda3/envs/sfm/bin',
+        # /scratch is per-cluster + login-visible + huge (no group-quota risk, unlike
+        # /projects) -> runs incl. retained ckpts live here; gathered to /share at the end
+        # (before scratch purge) as the persistent deliverable.
+        output_base='/scratch/shengyenc/sfm_output/hflm_curv_init_lr_sudoku',
         algos=['sfm_trunc', 'sfm_trunc_ada', 'langflow_full'],
         # Falcon has NO a100 queue: L40S-48GB / A30-24GB are the bf16+flash-attn
         # options (V100/T4 are not). Round-robin single queues, fast-starting first.
@@ -151,11 +161,8 @@ def job_body(site, algo, tdir, difficulty, seed, langflow_topk):
         {ev}{topk}DIFFICULTY={difficulty} CKPT_PATH={tdir}/checkpoints/last.ckpt \\
             OUTPUT_DIR={tdir}/eval DEVICES=1 \\
             bash scripts/sample/sudoku/{sample}.sh
-        # checkpoints are transient bulk (~1.8G/cell): once the eval deliverable
-        # exists, drop them to keep /home (ARC) and /share (unicorn) within quota
-        if [ -f {tdir}/eval/results.json ]; then
-            rm -rf {tdir}/checkpoints && echo "[$(date)] checkpoints cleaned"
-        fi
+        # checkpoints are RETAINED (save last.ckpt + periodic) as a deliverable of this
+        # re-run; they live on the project GPFS (output_base) which has ample quota.
         echo "[$(date)] DONE"
         ''')
 
@@ -180,9 +187,8 @@ def main():
     site = SITES[args.site]
     algos = args.algos if args.algos else site['algos']
     partitions = args.partitions if args.partitions else site['partitions']
-    exp = f"{site['repo']}/experiments/hflm_curv_init_lr_sudoku"
-    logs = f'{exp}/logs'
-    out = f"{site['repo']}/outputs/hflm_curv_init_lr_sudoku"
+    out = site.get('output_base', f"{site['repo']}/outputs/hflm_curv_init_lr_sudoku")
+    logs = f'{out}/logs'  # logs live beside the runs (on /scratch) to keep /home clean
     nice = 0
     if not args.dry_run:  # site repo path is only writable on the submitting cluster
         os.makedirs(logs, exist_ok=True)

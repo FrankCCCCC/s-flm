@@ -27,6 +27,7 @@ class Loss:
 @dataclass
 class TrainingContext:
   kv_cache: bool = False
+  z_sc: torch.Tensor | None = None  # [B, L, d] self-cond embeds, None -> zeros
 
 
 @dataclass

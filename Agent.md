@@ -70,6 +70,8 @@ Make sure the codebase is easy-understanding, canonical, and concise.
 
 If you're on SLURM and the script need to load / compute with model, do it on compute node. DO NOT RUN ANY MODEL ON LOGIN NODE.
 
+### 7. NO GIT OPERATIOn WITHOUT USERS' APPROVAL
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
@@ -154,6 +156,8 @@ Login Nodes
   - ``{target_host_socket}`` is the ``tailscaled`` daemon socket of the ARC node you run this from
     (its filename encodes that node; see ``ls ~/.tailscale``). This reverse direction is not yet
     verified from this repo.
+- Storage:
+  - Use ``/scratch/shengyenc`` to save checkpoints and dataset. But the storage is only available on compute nodes
 
 - GPUs / Partitions (source: https://www.docs.arc.vt.edu/resources/gpu.html):
   - TinkerCliffs (login: tinkercliffs1/2)
@@ -198,7 +202,8 @@ pip install -r requirements.txt
 
 - Create functions / classes in ``experiment.py`` to set up the soft link of the checkpoint for training and sampling run (if needed)
 - If use ``ch2263@Unicorn``, save the checkpoints at ``/scratch/ch2263/syc_workspace/sfm_output/{project_name}/{run_name}/checkpoints`` and create a soft link at ``${OUTPUT_DIR}/checkpoints`` to link the actual checkpoint path ``/scratch/ch2263/syc_workspace/sfm_output/{project_name}/{run_name}/checkpoints`` before the training starts. This should be handle in ``experiment.py``
-- The sweep.py of each experiment should use setup method in ``experiment.py`` to handle the storage of ch2263@unicorn
+- If use ``shengyenc@ARC``, save the checkpoints at ``/scratch/shengyenc/syc_workspace/sfm_output/{project_name}/{run_name}/checkpoints`` and create a soft link at ``${OUTPUT_DIR}/checkpoints`` to link the actual checkpoint path ``/scratch/shengyenc/syc_workspace/sfm_output/{project_name}/{run_name}/checkpoints`` before the training starts. This should be handle in ``experiment.py``
+- The sweep.py of each experiment should use setup method in ``experiment.py`` to handle the storage of ch2263@unicorn and shengyenc@ARC
 
 ### Training Script
 
