@@ -17,6 +17,7 @@ INIT="${INIT:-ngpt}"            # ngpt | custom
 INIT_STD="${INIT_STD:-}"        # required only when INIT=custom
 PRIOR_COV="${PRIOR_COV:-0.25}"
 RHO_MAX="${RHO_MAX:-12}"
+LR="${LR:-3e-4}"                     # AdamW learning rate (config default 3e-4)
 GAUSS_CURV="${GAUSS_CURV:--1.0}"    # Gaussian curvature, restrict to < 0.0 for hyperbolic
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
@@ -35,6 +36,7 @@ python -u -m main \
     algo.prior_cov=${PRIOR_COV} \
     algo.rho_max=${RHO_MAX} \
     algo.gaussian_curvature=${GAUSS_CURV} \
+    optim.lr=${LR} \
     algo.renormalize_weights=False \
     algo.invert_time_convention=false \
     algo.self_conditioning="${SELF_COND}" \

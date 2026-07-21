@@ -1,5 +1,6 @@
 import torch
 import collections
+import math
 from dataclass_patch import dataclass
 
 import samplers
@@ -654,7 +655,13 @@ class HFLM(SelfConditioning, trainer_base.Diffusion):
   def _rho_clamp(self, rhos):
     # Soft radial clamp rho_eff = rho_max * tanh(rho / rho_max): caps below the
     # _LORENTZ_RHO_MAX=20 guard with headroom, smoothly (gradient never zero).
-    return self.rho_max * torch.tanh(rhos / self.rho_max)
+    norm_by: str = "sqrt_dim"
+    if norm_by is None:
+      return self.rho_max * torch.tanh(rhos / self.rho_max)
+    elif norm_by == "sqrt_dim":
+      return self.rho_max * torch.tanh(rhos / self.rho_max / float(math.sqrt(self.config.model.hidden_size)))
+    else:
+      return self.rho_max * torch.tanh(rhos / self.rho_max)
 
   def _sample_prior(self, e_clean_rhos):
     # Origin wrapped-normal prior on H^d. Returns (rhos[B,L,1], u[B,L,d]).
