@@ -1,4 +1,4 @@
-type: log-linear
+type: cosine-squared
 eps: 1e-3
 alpha_min: null
 alpha_max: null
