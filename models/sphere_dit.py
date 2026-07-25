@@ -199,6 +199,27 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     """Raw embedding lookup, NO normalization. Returns [B, L, d]."""
     return self.sphere_embed(token_ids)
 
+  def get_rescaled_embeddng(token_ids: torch.Tensor, rho_max: float=None, rho_min: float=None) -> torch.Tensor:
+    # Rescale embedding norms into [rho_min, rho_max] (identity when both are
+    # None).  rho_min == rho_max pins every norm to that value (normalized
+    # embeddings); otherwise the soft clamp
+    # rho_eff = rho_min + range * tanh(rho / range), range = rho_max - rho_min.
+    x = self.get_raw_embeddings(token_ids)
+    if rho_min is None and rho_max is None:
+      return x
+    theta = utils.sphere_normalize(x)
+    radius = torch.norm(x, p=2, dim=-1, keepdim=True)
+    if rho_max is None:
+      return (radius + rho_min) * theta  # floor: norm >= rho_min
+    rho_min = 0.0 if rho_min is None else rho_min
+    radius_range = rho_max - rho_min
+    if radius_range < 0.0:
+      raise ValueError(f'rho_max ({rho_max}) must be >= '
+                       f'rho_min ({rho_min}).')
+    if radius_range == 0.0:
+      return rho_max * theta
+    return (rho_min + radius_range * torch.tanh(radius / radius_range)) * theta
+
   def reset_kv_cache(self):
     self.ctx_cached_len = 0
 

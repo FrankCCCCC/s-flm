@@ -375,12 +375,34 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
                             context=None):
     return model_output.float().log_softmax(-1)
 
+  def _radius_rescale(self, x):
+    # Soft radial clamp rho_eff = rho_max * tanh(rho / rho_max): caps below the
+    # _LORENTZ_RHO_MAX=20 guard with headroom, smoothly (gradient never zero).
+    theta = utils.sphere_normalize(x)
+    radius = torch.norm(x, p=2, dim=-1)
+    if self.rho_max is None:
+      if self.rho_min is None:
+        return x
+      else:
+        return (radius + self.rho_min) * theta
+    else:
+      if self.rho_min is None:
+        rho_min = 0.0
+      radius_range: float = self.rho_max - rho_min
+      if radius_range < 0.0:
+        raise ValueError(f"rho_max ({self.rho_max}) must be larger than rho_min (self.rho_min).")
+      elif radius_range == 0.0:
+        return self.rho_max * theta
+      else:
+        return (rho_min + radius_range * torch.tanh(radius / radius_range)) * theta
+
   def _sample_prior(self, e_clean):
     e_noisy = torch.randn_like(e_clean)
     return e_noisy
 
   def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
     e_clean = self.backbone.get_raw_embeddings(x)  # [B, L, d] raw Euclidean
+    e_clean = self._radius_rescale(e_clean)
     e_noisy = self._sample_prior(e_clean)
 
     if use_pure_noise:
