@@ -6,7 +6,7 @@ export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/eflm_rescale_${DIFFICULTY}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/eflm_rescale_adaptive_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
@@ -16,6 +16,9 @@ SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
 if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
 RHO="${RHO:-1.0}"                    # fixed embedding norm R (rho_min = rho_max = RHO)
+
+GLOBAL_BS=256
+BUF_SIZE=$((50 * GLOBAL_BS))
 
 cd "${REPO_ROOT}"
 
@@ -31,8 +34,12 @@ python -u -m main \
     algo.self_conditioning="${SELF_COND}" \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
-    noise=log-linear \
-    loader.global_batch_size=256 \
+    noise=log-linear-adaptive \
+    noise.adaptive_refit_every=50 \
+    noise.adaptive_buffer_size=${BUF_SIZE} \
+    noise.adaptive_ema=0.9 \
+    noise.adaptive_uniform_mix=1e-3 \
+    loader.global_batch_size=${GLOBAL_BS} \
     loader.batch_size=256 \
     loader.eval_batch_size=256 \
     loader.num_workers=8 \

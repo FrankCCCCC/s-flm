@@ -358,6 +358,8 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     self.eps = config.algo.eps
     self.renormalize_weights = config.algo.renormalize_weights
     self.invert_time_convention = config.algo.invert_time_convention
+    self.rho_min = config.algo.rho_min
+    self.rho_max = config.algo.rho_max
     self._init_self_cond(config)
     self._validate_configuration()
 
@@ -366,6 +368,16 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       raise ValueError('Adaptive noise schedule requires '
                        'invert_time_convention=false '
                        '(MDLM-like convention).')
+    if self.rho_min is not None and self.rho_min < 0.0:
+      raise ValueError(f'EFLM requires algo.rho_min >= 0, got '
+                       f'{self.rho_min}.')
+    if self.rho_max is not None and self.rho_max < 0.0:
+      raise ValueError(f'EFLM requires algo.rho_max >= 0, got '
+                       f'{self.rho_max}.')
+    if (self.rho_min is not None and self.rho_max is not None
+        and self.rho_max < self.rho_min):
+      raise ValueError(f'EFLM requires algo.rho_max >= algo.rho_min, got '
+                       f'{self.rho_max} < {self.rho_min}.')
     backbone_type = self.config.model.type
     if backbone_type == 'sphere-arch' and not self.renormalize_weights:
       raise ValueError('Backbone sphere-arch requires '
@@ -375,34 +387,13 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
                             context=None):
     return model_output.float().log_softmax(-1)
 
-  def _radius_rescale(self, x):
-    # Soft radial clamp rho_eff = rho_max * tanh(rho / rho_max): caps below the
-    # _LORENTZ_RHO_MAX=20 guard with headroom, smoothly (gradient never zero).
-    theta = utils.sphere_normalize(x)
-    radius = torch.norm(x, p=2, dim=-1)
-    if self.rho_max is None:
-      if self.rho_min is None:
-        return x
-      else:
-        return (radius + self.rho_min) * theta
-    else:
-      if self.rho_min is None:
-        rho_min = 0.0
-      radius_range: float = self.rho_max - rho_min
-      if radius_range < 0.0:
-        raise ValueError(f"rho_max ({self.rho_max}) must be larger than rho_min (self.rho_min).")
-      elif radius_range == 0.0:
-        return self.rho_max * theta
-      else:
-        return (rho_min + radius_range * torch.tanh(radius / radius_range)) * theta
-
   def _sample_prior(self, e_clean):
     e_noisy = torch.randn_like(e_clean)
     return e_noisy
 
   def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
-    e_clean = self.backbone.get_raw_embeddings(x)  # [B, L, d] raw Euclidean
-    e_clean = self._radius_rescale(e_clean)
+    e_clean = self.backbone.get_rescaled_embeddings(
+      x, self.rho_min, self.rho_max)  # [B, L, d] Euclidean, norms rescaled
     e_noisy = self._sample_prior(e_clean)
 
     if use_pure_noise:
@@ -482,8 +473,9 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     return loss, t
 
   def _sc_embed_table(self):
-    # Raw Euclidean embeddings: the space xt lives in (cf. get_raw_embeddings).
-    return self.backbone.sphere_embed.weight
+    # Radius-rescaled Euclidean embeddings: the space xt lives in (cf. q_xt).
+    return self.backbone.rescale_radius(
+      self.backbone.sphere_embed.weight, self.rho_min, self.rho_max)
 
 @dataclass
 class LangFlowContext:

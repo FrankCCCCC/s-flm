@@ -6,7 +6,7 @@ export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/sfm_${DIFFICULTY}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/eflm_rescale_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
@@ -15,7 +15,7 @@ SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
 if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
-RHO="{RHO:-1.0}"
+RHO="${RHO:-1.0}"                    # fixed embedding norm R (rho_min = rho_max = RHO)
 
 cd "${REPO_ROOT}"
 
@@ -29,8 +29,8 @@ python -u -m main \
     algo=eflm \
     algo.invert_time_convention=false \
     algo.self_conditioning="${SELF_COND}" \
-    algo.rho_min=1.0 \
-    algo.rho_max=1.0 \
+    algo.rho_min="${RHO}" \
+    algo.rho_max="${RHO}" \
     noise=log-linear \
     loader.global_batch_size=256 \
     loader.batch_size=256 \
