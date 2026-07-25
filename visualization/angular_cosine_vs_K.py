@@ -15,6 +15,11 @@ intrinsic radii (K-independent in this codebase; K enters only through rho/R).
 Draws one panel per curvature (3 word depths + rho=0.1, 0.5) and a summary of
 t* / rotation width vs |K|.  Pure math -- no checkpoint, CPU-only.
 
+--y-mode picks the y axis of the per-K panels: 'cosine' (default) plots the
+directional cosine itself; 'angular' plots the angle angle(z_t, u_k) =
+arccos(cosine) in degrees, with the threshold at arccos(tau) ~ 79 deg and the
+default --out switched to experiments/curv_loss_geo/angle_vs_K.png.
+
 Example:
   python visualization/angular_cosine_vs_K.py \
     --out experiments/curv_loss_geo/angular_cosine_vs_K.png
@@ -42,9 +47,17 @@ def cos_angle(rho_k, rho_n, K, t):
 
 def main():
   p = argparse.ArgumentParser(description=__doc__)
-  p.add_argument('--out',
-                 default='experiments/curv_loss_geo/angular_cosine_vs_K.png')
+  p.add_argument('--y-mode', choices=['cosine', 'angular'], default='cosine',
+                 help='y axis of the per-K panels: directional cosine, or the '
+                      'angle angle(z_t, u_k) in degrees')
+  p.add_argument('--out', default=None,
+                 help='output png (default: experiments/curv_loss_geo/'
+                      '{angular_cosine|angle}_vs_K.png)')
   args = p.parse_args()
+  if args.out is None:
+    args.out = ('experiments/curv_loss_geo/angle_vs_K.png'
+                if args.y_mode == 'angular' else
+                'experiments/curv_loss_geo/angular_cosine_vs_K.png')
 
   tau = np.sqrt(2 * np.log(2 * (V - 1) / DELTA) / D)
   rho_n = 12.0 * np.tanh(np.sqrt(D) / 12.0)
@@ -54,17 +67,26 @@ def main():
     i = np.argmax(c < level)
     return t[i] if c[i] < level else 1.0
 
+  ang = args.y_mode == 'angular'
+  thr = np.degrees(np.arccos(tau)) if ang else tau
+
+  def sig(c):
+    """cosine -> plotted y: angle in degrees (angular mode) or the cosine."""
+    return np.degrees(np.arccos(np.clip(c, -1.0, 1.0))) if ang else c
+
   fig, ax = plt.subplots(2, 3, figsize=(15, 8.5))
   for p_i, K in enumerate(KS):
     a = ax.reshape(-1)[p_i]
     for (rho_k, lab), col in zip(WORDS, COLORS):
       c = cos_angle(rho_k, rho_n, K, t)
       ts = t_at(c, tau)
-      a.plot(t, c, color=col, label=f'{lab}  t*={ts:.2f}')
+      a.plot(t, sig(c), color=col, label=f'{lab}  t*={ts:.2f}')
       a.axvline(ts, color=col, ls=':', lw=1)
-    a.axhline(tau, color='r', ls='--', lw=1)
+    a.axhline(thr, color='r', ls='--', lw=1)
     a.set(title=f'K={K}   (R={1/np.sqrt(abs(K)):.2f})', xlabel='t',
-          ylabel='directional cosine', ylim=(-0.02, 1.02))
+          ylabel=r'angle $\angle$(z$_t$,$\hat u_k$)  [deg]' if ang
+                 else 'directional cosine',
+          ylim=(-2, 92) if ang else (-0.02, 1.02))
     a.legend(fontsize=8); a.grid(alpha=0.3)
 
   a = ax.reshape(-1)[5]
