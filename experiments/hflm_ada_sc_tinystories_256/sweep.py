@@ -43,9 +43,18 @@ SAVE_TOPK = 1
 RHO_MAX = '12'
 
 SITES = {
+    'unicorn': dict(                          # overflow: relieve TC jam onto free unicorn GPUs
+        repo='/share/thickstun/sychou/workspace/research/s-flm',
+        envbin='/home/sc3379/anaconda3/envs/sfm/bin',
+        curvatures=['-0.01'],                 # TC's stuck K set
+        per_gpu_bs=32,                        # A5000-24GB safe
+        partitions=['thickstun,desa'],
+        slurm=dict(exclude='desa-compute-01', gres='gpu:1', ntasks=1,
+                   cpus_per_task=8, mem='48G', time='10-00:00:00'),
+    ),
     'ch2263': dict(
         repo='/home/ch2263/syc_workspace/s-flm',
-        envbin='/home/ch2263/miniconda3/envs/sfm_fa/bin',  # py3.12+torch2.9+flash-attn
+        envbin='/home/ch2263/miniconda3/envs/sfm/bin',  # py3.12, torch2.9.1+cu128 + flash-attn
         curvatures=['-0.5', '-0.75'],
         per_gpu_bs=64,                        # A100-80GB
         partitions=['nlplarge-claire-highpri', 'nlplarge'],

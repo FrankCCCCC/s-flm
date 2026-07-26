@@ -1,13 +1,15 @@
 #!/usr/bin/env python
-"""naive_ar_tinystories_s256 (slides jun25_2026) — Naive AR baseline, SEQ LEN 256.
+"""naive_ar_tinystories_s256 (slides jun25_2026) — Naive baselines, SEQ LEN 256.
 
-Single run: causal small DiT (768/12/12), 30k steps, batch 512, seq 256, bf16,
-EMA 0.9999, AdamW (config defaults already match the slide). Eval = greedy decoding.
-Checkpoints every 5k steps, all retained (SAVE_TOPK=-1).
+Reference points for the geometry flows (S/E/H-FLM): a causal AR small DiT and an
+MDLM masked-diffusion small DiT, identical width 768 / depth 12 / heads 12, 30k steps,
+batch 512, seq 256, bf16, EMA 0.9999, AdamW (config defaults). Checkpoints every 5k
+steps, all retained (SAVE_TOPK=-1). Valid PPL is a true AR PPL for `ar`; for `mdlm`
+it is a denoising-ELBO bound (not comparable to AR PPL).
 
 ORCHESTRATION ONLY — calls the single-run shared scripts (SEQ_LEN=256 knob):
-  scripts/train/tinystories/ar.sh   (train)
-  scripts/sample/tinystories/ar.sh  (valid PPL + GenPPL)
+  scripts/train/tinystories/{ar,mdlm}.sh   (train)
+  scripts/sample/tinystories/{ar,mdlm}.sh  (valid PPL + GenPPL)
 Idempotent + resumable: skips cells whose eval/ppl.json exists or that are already
 queued; a resubmitted cell auto-resumes from checkpoints/last.ckpt (same OUTPUT_DIR).
 
@@ -31,6 +33,12 @@ SEQ_LEN = 256
 CKPT_EVERY = 5000
 SAVE_TOPK = -1
 
+# tag -> script basename (shared by the train + sample scripts for that method)
+CELLS = {
+    'ar':   'ar.sh',
+    'mdlm': 'mdlm.sh',
+}
+
 
 def active_jobnames():
     try:
@@ -41,7 +49,7 @@ def active_jobnames():
         return set()
 
 
-def job_body(tag):
+def job_body(tag, script):
     tdir = f'{OUT}/{tag}'
     edir = f'{tdir}/eval'
     return textwrap.dedent(f'''\
@@ -55,10 +63,10 @@ def job_body(tag):
         echo "[$(date)] TRAIN {tag} on $(hostname)"
         OUTPUT_DIR={tdir} RUN_NAME={tag} DEVICES={DEVICES} PER_GPU_BS={PER_GPU_BS} \\
             SEQ_LEN={SEQ_LEN} CKPT_EVERY={CKPT_EVERY} SAVE_TOPK={SAVE_TOPK} \\
-            bash scripts/train/tinystories/ar.sh
+            bash scripts/train/tinystories/{script}
         echo "[$(date)] EVAL {tag}"
         CKPT_PATH={tdir}/checkpoints/last.ckpt OUTPUT_DIR={edir} DEVICES=1 SEQ_LEN={SEQ_LEN} \\
-            bash scripts/sample/tinystories/ar.sh
+            bash scripts/sample/tinystories/{script}
         echo "[$(date)] DONE {tag}"
         ''')
 
@@ -68,22 +76,27 @@ def main():
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args()
     os.makedirs(LOGS, exist_ok=True)
-    tag = 'ar'
-    jobname = f'nar256_{tag}'
     if args.dry_run:
-        print(f'1 cell: {jobname}\n\n--- body ---\n{job_body(tag)}')
+        for tag, script in CELLS.items():
+            print(f'  nar256_{tag}: script={script}')
+        ex = 'mdlm'
+        print('\n--- example body ---\n' + job_body(ex, CELLS[ex]))
         return
-    if os.path.exists(f'{OUT}/{tag}/eval/ppl.json'):
-        print(f'skip {tag}: already evaluated')
-        return
-    if jobname in active_jobnames():
-        print(f'skip {tag}: already queued')
-        return
-    slurm = Slurm(job_name=jobname, partition='thickstun,desa', gres=f'gpu:{DEVICES}',
-                  ntasks=1, cpus_per_task=16, mem='64G', time='10-00:00:00',
-                  exclude='desa-compute-01', output=f'{LOGS}/{tag}_%j.log')
-    jid = slurm.sbatch(job_body(tag))
-    print(f'submitted {tag}: job {jid}')
+    active = active_jobnames()
+    n_sub = n_skip = 0
+    for tag, script in CELLS.items():
+        jobname = f'nar256_{tag}'
+        if os.path.exists(f'{OUT}/{tag}/eval/ppl.json') or jobname in active:
+            print(f'skip {tag}: already evaluated or queued')
+            n_skip += 1
+            continue
+        slurm = Slurm(job_name=jobname, partition='thickstun,desa', gres=f'gpu:{DEVICES}',
+                      ntasks=1, cpus_per_task=16, mem='64G', time='10-00:00:00',
+                      exclude='desa-compute-01', output=f'{LOGS}/{tag}_%j.log')
+        jid = slurm.sbatch(job_body(tag, script))
+        print(f'submitted {tag}: job {jid}')
+        n_sub += 1
+    print(f'submitted {n_sub}, skipped {n_skip}')
 
 
 if __name__ == '__main__':

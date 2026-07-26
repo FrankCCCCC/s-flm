@@ -37,7 +37,7 @@
 - Init noise for diffusion process: {0.5, 0.8, 1.0}
 - ``rho_max``: {12}
 - Self Cond: On
-- Gaussian Curvature: {-0.01, -0.1, -0.25, -0.5, -0.75}
+- Gaussian Curvature: {0.0, -0.01, -0.1, -0.25, -0.5, -0.75}
 - Noise Sched: {``log-linear``, ``log-linear-adaptive``}
 
 ---

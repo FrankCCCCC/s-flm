@@ -61,7 +61,7 @@ SITES = {
     'unicorn': dict(
         repo='/share/thickstun/sychou/workspace/research/s-flm',
         envbin='/home/sc3379/anaconda3/envs/sfm/bin',
-        study='A',
+        study='B', curvatures=['-0.01', '-0.1', '-0.25', '-0.5', '-0.75'],  # Part A done -> Part B overflow onto free unicorn GPUs
         partitions=['thickstun,desa'],  # comma-list is one submission on unicorn
         slurm=dict(exclude='desa-compute-01',  # 2080 Ti 11G OOMs at seq256
                    gres='gpu:1', ntasks=1, cpus_per_task=8, mem='48G',
