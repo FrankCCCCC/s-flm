@@ -199,6 +199,39 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     """Raw embedding lookup, NO normalization. Returns [B, L, d]."""
     return self.sphere_embed(token_ids)
 
+  @staticmethod
+  def rescale_radius(x: torch.Tensor, rho_min: float = None,
+                     rho_max: float = None) -> torch.Tensor:
+    # Rescale embedding norms into [rho_min, rho_max] (identity when both are
+    # None).  rho_min == rho_max pins every norm to that value (normalized
+    # embeddings); otherwise the soft clamp
+    # rho_eff = rho_min + range * tanh(rho / range), range = rho_max - rho_min.
+    if rho_min is None and rho_max is None:
+      return x
+    if rho_min is not None and rho_min < 0.0:
+      raise ValueError(f'rho_min ({rho_min}) must be >= 0.')
+    if rho_max is not None and rho_max < 0.0:
+      raise ValueError(f'rho_max ({rho_max}) must be >= 0.')
+    if rho_min is not None and rho_max is not None and rho_max < rho_min:
+      raise ValueError(f'rho_max ({rho_max}) must be >= '
+                       f'rho_min ({rho_min}).')
+    theta = utils.sphere_normalize(x)
+    radius = torch.norm(x, p=2, dim=-1, keepdim=True)
+    if rho_max is None:
+      return (radius + rho_min) * theta  # floor: norm >= rho_min
+    rho_min = 0.0 if rho_min is None else rho_min
+    radius_range = rho_max - rho_min
+    if radius_range == 0.0:
+      return rho_max * theta
+    return (rho_min + radius_range * torch.tanh(radius / radius_range)) * theta
+
+  def get_rescaled_embeddings(self, token_ids: torch.Tensor,
+                              rho_min: float = None,
+                              rho_max: float = None) -> torch.Tensor:
+    """Embedding lookup with norms rescaled into [rho_min, rho_max]."""
+    return self.rescale_radius(
+      self.get_raw_embeddings(token_ids), rho_min, rho_max)
+
   def reset_kv_cache(self):
     self.ctx_cached_len = 0
 

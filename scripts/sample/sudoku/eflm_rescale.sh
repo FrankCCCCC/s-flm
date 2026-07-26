@@ -4,16 +4,17 @@ set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CKPT_PATH="${CKPT_PATH:?set CKPT_PATH to the trained EFLM sudoku checkpoint}"
+CKPT_PATH="${CKPT_PATH:?set CKPT_PATH to the trained eflm_rescale sudoku checkpoint}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/sudoku/eflm_${DIFFICULTY}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/sudoku/eflm_rescale_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 STEPS="${STEPS:-180}"
 VELOCITY="${VELOCITY:-exact}"         # sample / exact
 TOPK_VELOCITY="${TOPK_VELOCITY:--1}"  # 1 = top-1, -1 = full vocab (no top-k)
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
+RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
 
 cd "${REPO_ROOT}"
 
@@ -28,6 +29,8 @@ python -u -m main \
     algo=eflm \
     algo.invert_time_convention=false \
     algo.self_conditioning="${SELF_COND}" \
+    algo.rho_min="${RHO}" \
+    algo.rho_max="${RHO}" \
     noise=log-linear \
     sampler=eflm \
     sampler.noise_removal=greedy \
