@@ -33,6 +33,7 @@ if [ "${INIT}" = "custom" ]; then INIT_ARGS="model.init=custom model.init_std=${
 
 cd "${REPO_ROOT}"
 python -u -m main \
+    seed=${SEED:-1} \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small-hyperbolic-dit \
