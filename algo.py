@@ -352,6 +352,23 @@ class SFM(SelfConditioning, trainer_base.Diffusion):
     # Unit-norm embeddings: the sphere xt lives on (cf. get_sphere_embeddings).
     return utils.sphere_normalize(self.backbone.sphere_embed.weight)
 
+def snr_weight(alpha_t, dalpha_t, invert_time_convention, eps):
+  """VDM (Kingma et al., 2021) Eq. 16 loss weight -SNR'(t)/2.
+
+  EFLM's interpolant is x_t = (1 - b_t) e + b_t z, z ~ N(0, I) (cf. q_xt), so
+  SNR(t) = (1 - b_t)^2 / b_t^2 and
+
+      -SNR'(t)/2 = (1 - b_t) |b_t'| / b_t^3.
+
+  b_t (the noise fraction) is alpha_t under invert_time_convention and
+  1 - alpha_t otherwise; |b_t'| = |alpha_t'| either way (the sign only encodes
+  which end of [0, 1] the clean data sits at).
+  """
+  b_t = alpha_t if invert_time_convention else 1.0 - alpha_t
+  b_t = b_t.clamp(min=eps)
+  return (1.0 - b_t) * dalpha_t.abs() / b_t.pow(3)
+
+
 class EFLM(SelfConditioning, trainer_base.Diffusion):
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
@@ -360,6 +377,7 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     self.invert_time_convention = config.algo.invert_time_convention
     self.rho_min = config.algo.rho_min
     self.rho_max = config.algo.rho_max
+    self.snr_weighted_ce = config.algo.snr_weighted_ce
     self._init_self_cond(config)
     self._validate_configuration()
 
@@ -415,10 +433,16 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
 
   def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
                     low_var=False, context=None, train_mode=False):
-    del xt, alpha_t, dalpha_t, low_var, context
+    del xt, low_var, context
 
     ce_loss = -log_x_theta.gather(
       -1, x0.unsqueeze(-1)).squeeze(-1)
+
+    if self.snr_weighted_ce:
+      # Variational bound: the CE stands in for the ||x - x_hat||^2 of VDM
+      # Eq. 16, weighted by -SNR'(t)/2 (t ~ U(0, 1) is the MC estimator).
+      ce_loss = snr_weight(alpha_t, dalpha_t, self.invert_time_convention,
+                           self.eps) * ce_loss
 
     return ce_loss
 

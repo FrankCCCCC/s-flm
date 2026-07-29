@@ -65,6 +65,34 @@ class LogLinear(NoiseSchedule):
     return -(1 - self.eps) * torch.ones_like(t)
 
 
+class Autonomous(NoiseSchedule):
+  """alpha_t = 1 - (1 - eps) * exp(-tau_max * (1 - t)): the autonomous clock.
+
+  Re-parameterizing the bridge time as tau = -log((T - t) / T)
+  (slides/jul09_2026) turns the singular bridge drift (y - X_t)/(T - t) into
+  the time-invariant v(X) = y - X. Under that clock the noise fraction decays
+  exponentially, 1 - alpha_t = exp(-tau), so sampling uniformly in t is
+  uniform in tau: every Euler step advances the flow by the same d_tau. The
+  target is reached only as tau -> infinity, hence the truncation tau_max
+  (noise-fraction floor exp(-tau_max)).
+
+  MDLM convention (invert_time_convention=false): alpha_t is the signal level,
+  clean at t = 0. The eps floor mirrors LogLinear (alpha_t(1) = eps) so the
+  time conditioning -log(alpha_t) stays finite at the pure-noise end.
+  """
+  def __init__(self, eps, tau_max):
+    super().__init__()
+    self.eps = eps
+    self.tau_max = tau_max
+
+  def alpha_t(self, t):
+    return 1 - (1 - self.eps) * torch.exp(-self.tau_max * (1 - t))
+
+  def alpha_prime_t(self, t):
+    return -((1 - self.eps) * self.tau_max
+             * torch.exp(-self.tau_max * (1 - t)))
+
+
 def alpha_star_sphere(vocab_size, dim, delta=0.1):
   """Truncation bound for S-FLM (Eq. 17, hyperspherical-flows paper).
 
@@ -458,6 +486,8 @@ def get_noise(config):
     noise = LogLinear(noise_config.eps)
   elif noise_config.type == 'cosine-squared':
     noise = CosineSquared(noise_config.eps)
+  elif noise_config.type == 'autonomous':
+    noise = Autonomous(noise_config.eps, noise_config.tau_max)
   else:
     raise ValueError(f'Unknown noise type: {noise_config.type}')
 

@@ -1,16 +1,17 @@
 #!/bin/bash
-# Eval for E-FLM with fixed embedding norm R + adaptive noise schedule (no
-# truncation). The noise config must mirror training so the adapted schedule
-# (alpha_vals buffers) loads from the checkpoint and drives the sampling
-# trajectory; RHO must match training for the same reason as eflm_rescale.sh.
+# Eval for E-FLM with fixed embedding norm R on the AUTONOMOUS clock +
+# adaptive noise schedule. The noise config must mirror training so the adapted
+# schedule (alpha_vals buffers) loads from the checkpoint and drives the
+# sampling trajectory; RHO/TAU_MAX must match for the same reason.
+
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CKPT_PATH="${CKPT_PATH:?set CKPT_PATH to the trained eflm_rescale_adaptive sudoku checkpoint}"
+CKPT_PATH="${CKPT_PATH:?set CKPT_PATH to the trained eflm_rescale_auto_adaptive sudoku checkpoint}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/sudoku/eflm_rescale_adaptive_${DIFFICULTY}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/sudoku/eflm_rescale_auto_adaptive_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 STEPS="${STEPS:-180}"
@@ -18,7 +19,8 @@ VELOCITY="${VELOCITY:-exact}"         # sample / exact
 TOPK_VELOCITY="${TOPK_VELOCITY:--1}"  # 1 = top-1, -1 = full vocab (no top-k)
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
-SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM variational bound)
+TAU_MAX="${TAU_MAX:-3.0}"            # autonomous-clock horizon; must match training
+SNR_CE="${SNR_CE:-false}"            # loss weighting; only affects the reported bound
 
 GLOBAL_BS=256
 BUF_SIZE=$((50 * GLOBAL_BS))
@@ -39,7 +41,8 @@ python -u -m main \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
     algo.snr_weighted_ce="${SNR_CE}" \
-    noise=log-linear-adaptive \
+    noise=autonomous-adaptive \
+    noise.tau_max="${TAU_MAX}" \
     noise.adaptive_refit_every=50 \
     noise.adaptive_buffer_size=${BUF_SIZE} \
     noise.adaptive_ema=0.9 \

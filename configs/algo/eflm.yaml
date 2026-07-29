@@ -15,6 +15,7 @@ renormalize_weights: False    # raw Euclidean embeddings; do NOT project weights
 rho_min: null                 # radial rescale of word embeddings into [rho_min, rho_max]; both null = off
 rho_max: null                 # rho_min == rho_max = R pins every embedding norm to R (normalized embeddings)
 prior_cov: 1.0                # variance of the Gaussian prior z ~ N(0, prior_cov*I); 1.0 matches q_xt's N(0,I) noise
+snr_weighted_ce: false        # weight the per-token CE by -SNR'(t)/2 (VDM Eq. 16 variational bound)
 
 self_conditioning: false      # LangFlow-style self-conditioning (2-pass, zero-init W_in/W_sc)
 p_self_cond: 0.25             # train-time self-cond probability

@@ -16,6 +16,7 @@ SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
 if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
 RHO="${RHO:-1.0}"                    # fixed embedding norm R (rho_min = rho_max = RHO)
+SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM variational bound)
 
 cd "${REPO_ROOT}"
 
@@ -31,6 +32,7 @@ python -u -m main \
     algo.self_conditioning="${SELF_COND}" \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
+    algo.snr_weighted_ce="${SNR_CE}" \
     noise=log-linear \
     loader.global_batch_size=256 \
     loader.batch_size=256 \
