@@ -1,15 +1,15 @@
 #!/bin/bash
-# E-FLM with truncated noise schedule. Single TinyStories training run.
-# ALPHA_MAX default is the Euclidean analog of the paper's Eq. 17 bound:
-# alpha_star_euclidean(V=50257) = 0.840 (noise_schedules.py; ngpt init
-# ||e||~=1, N(0,I) prior, delta=0.1).
+# E-FLM with fixed embedding norm R (rho_min = rho_max = RHO) + truncated
+# noise schedule. Single TinyStories training run. ALPHA_MAX should be the
+# R-dependent Eq. 17 bound alpha_star_euclidean(V=50257, embed_norm=RHO)
+# (noise_schedules.py); the default 0.840 is the RHO=1 value.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eflm_truncated}"
-RUN_NAME="${RUN_NAME:-eflm_truncated}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eflm_rescale_truncated}"
+RUN_NAME="${RUN_NAME:-eflm_rescale_truncated}"
 WANDB_GROUP="${WANDB_GROUP:-adv_geo}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
@@ -17,7 +17,8 @@ MAX_STEPS="${MAX_STEPS:-30000}"
 PER_GPU_BS="${PER_GPU_BS:-8}"
 CKPT_EVERY="${CKPT_EVERY:-2500}"
 LR="${LR:-3e-4}"
-ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257); null = no truncation
+RHO="${RHO:-1.0}"                   # fixed embedding norm R (rho_min = rho_max = RHO)
+ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257, embed_norm=RHO); null = no truncation
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
@@ -34,6 +35,8 @@ python -u -m main \
     algo.renormalize_weights=False \
     algo.invert_time_convention=false \
     algo.self_conditioning="${SELF_COND}" \
+    algo.rho_min="${RHO}" \
+    algo.rho_max="${RHO}" \
     noise=log-linear \
     noise.alpha_max=${ALPHA_MAX} \
     optim.lr=${LR} \

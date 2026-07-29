@@ -133,3 +133,46 @@ Peak: naive **0.440 @ R=2 (lr1e-3)**; ada **0.539 @ R=5 (lr1e-3)**.
 Data: `outputs/eflm_rescale_sudoku/eflmrs_{arm}_r-{R}_lr-{lr}_d-hard_rs{seed}/
 eval/results.json`. Checkpoints kept for the post-hoc loss-geometry L(t)
 analysis (EXPERIMENT.md success criterion 1), still to be run.
+
+---
+
+# Round 2 — truncation × radius (`sweep_trunc.py`, 108/108 cells, n=3)
+
+Truncate the *fixed* schedule at the R-dependent Eq. 17 bound
+ALPHA_MAX = α*(R) = `alpha_star_euclidean(V=12, embed_norm=R)` (= 1 − t*(R)
+from the codebook signal analysis; identical to 3 decimals), offsets
+{α*−0.1, α*, α*+0.1} (clipped to ≥0.05), R ∈ {1, 2, 5, 8, 16, 32},
+LR ∈ {5e-4, 1e-3}, 3 seeds. Same train/eval protocol as round 1
+(`eflm_rescale_truncated.sh`).
+
+## Headline: static truncation rescues the naive collapse — most, not all,
+## of the adaptive gain
+
+Best cell per R within each arm (best over LR and, for trunc, offset):
+
+| R | naive (r1) | **trunc (r2)** | ada (r1) |
+|---|---|---|---|
+| 1 | 0.415 | 0.397 | 0.418 |
+| 2 | 0.440 | 0.468 | 0.448 |
+| 5 | 0.400 | 0.464 | 0.539 |
+| 8 | 0.321 | **0.426** | 0.488 |
+| 16 | 0.236 | **0.416** | 0.476 |
+| 32 | 0.162 | **0.433** | 0.505 |
+
+- **Large R (≥8): trunc(α*) turns the collapse into a flat ~0.42–0.43** —
+  +10pt at R=8, +18pt at R=16, +27pt at R=32 over naive (all many seed-std).
+  The mechanism is confirmed: the fixed schedule's failure was wasting its
+  steps in the trivial high-signal region; cutting that region off at the
+  codebook-signal bound recovers roughly **60–75 % of the adaptive gain**.
+- **ada still wins at every R ≥ 5** (0.48–0.54 vs trunc 0.42–0.46): refitting
+  onto the *measured* transition beats the single-token NN-model bound.
+- **Small R: truncation is neutral-to-harmful** (R=1: 0.397 < naive 0.415;
+  R=2: 0.468 ≈ naive within std) — nothing to rescue, coverage lost.
+- **Offset:** α* and α*+0.1 are statistically tied for best at large R;
+  α*−0.1 is clearly worse and high-variance at R=16 (α_max=0.07 leaves almost
+  no signal band). At R=32 the clipped floor 0.05 won its LR slice
+  (0.433±0.071) but overlaps the α* cell (0.394±0.052) within std. Practical
+  rule: **truncate at α*(R), never tighter.**
+
+Data: `outputs/eflm_rescale_sudoku/eflmrst_r-{R}_am-{α}_lr-{lr}_d-hard_rs{s}/
+eval/results.json`.

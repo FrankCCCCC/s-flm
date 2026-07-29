@@ -1,5 +1,8 @@
 #!/bin/bash
-# EFLM — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval).
+# EFLM rescale+truncated+adaptive — eval ONE TinyStories checkpoint: valid
+# PPL (ppl_eval) + GenPPL (sample_eval). RHO and ALPHA_MAX must match
+# training; the noise config must mirror training so the adapted schedule
+# (alpha_vals buffers) loads from the checkpoint.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export CUDA_VISIBLE_DEVICES=0
@@ -7,13 +10,14 @@ export CUDA_VISIBLE_DEVICES=0
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?set CKPT_PATH=/abs/path/to/checkpoint.ckpt}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/eflm}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/eflm_rescale_truncated_adaptive}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
 STEPS="${STEPS:-180}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
-ALPHA_MAX="${ALPHA_MAX:-0.840}"
+RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
+ALPHA_MAX="${ALPHA_MAX:-0.840}"      # must match training
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 
 cd "${REPO_ROOT}"
@@ -26,6 +30,8 @@ MARGS=(
     algo=eflm
     algo.self_conditioning=${SELF_COND}
     algo.renormalize_weights=False
+    algo.rho_min=${RHO}
+    algo.rho_max=${RHO}
     noise=log-linear-adaptive
     noise.alpha_max=${ALPHA_MAX}
     noise.adaptive_refit_every=50
