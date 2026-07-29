@@ -1,19 +1,24 @@
 #!/bin/bash
-
+# Eval for E-FLM with fixed embedding norm R + truncated (non-adaptive) noise
+# schedule. The noise config must mirror training (the truncated schedule
+# drives the sampling trajectory); RHO and ALPHA_MAX must match the training
+# run. ALPHA_MAX = alpha_star_euclidean(V=12, embed_norm=RHO).
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CKPT_PATH="${CKPT_PATH:?set CKPT_PATH to the trained EFLM sudoku checkpoint}"
+CKPT_PATH="${CKPT_PATH:?set CKPT_PATH to the trained eflm_rescale_truncated sudoku checkpoint}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/sudoku/eflm_${DIFFICULTY}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/sudoku/eflm_rescale_truncated_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 STEPS="${STEPS:-180}"
 VELOCITY="${VELOCITY:-exact}"         # sample / exact
 TOPK_VELOCITY="${TOPK_VELOCITY:--1}"  # 1 = top-1, -1 = full vocab (no top-k)
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
+RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
+ALPHA_MAX="${ALPHA_MAX:-0.767}"      # must match training
 
 cd "${REPO_ROOT}"
 
@@ -28,7 +33,10 @@ python -u -m main \
     algo=eflm \
     algo.invert_time_convention=false \
     algo.self_conditioning="${SELF_COND}" \
+    algo.rho_min="${RHO}" \
+    algo.rho_max="${RHO}" \
     noise=log-linear \
+    noise.alpha_max="${ALPHA_MAX}" \
     sampler=eflm \
     sampler.noise_removal=greedy \
     sampler.velocity="${VELOCITY}" \

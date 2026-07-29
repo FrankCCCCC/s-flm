@@ -839,7 +839,8 @@ class EFLMSampler(Sampler):
 
     prefix_embeds = None
     if prefix_tokens is not None:
-      prefix_embeds = model.backbone.get_raw_embeddings(prefix_tokens)
+      prefix_embeds = model.backbone.get_rescaled_embeddings(
+        prefix_tokens, model.rho_min, model.rho_max)
       self._project_prefix(xt, prefix_embeds, prefix_lengths)
       start_idx = int(prefix_lengths.min())
     else:
@@ -914,7 +915,7 @@ class EFLMSampler(Sampler):
     # Arguments to compute the velocity field:
     #  v = sum_k p_k * log_{x}(e_k).
     log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
-    E = model.backbone.sphere_embed.weight.detach()  # [V, d]
+    E = model._sc_embed_table().detach()  # [V, d] (radius-rescaled)
     x = state.xt[:, state.start_idx:].to(E)  # [B, L, d]
 
     if self.lerp_float64:
