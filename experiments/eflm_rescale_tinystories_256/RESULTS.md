@@ -6,6 +6,11 @@ steps, 1 seed (see EXPERIMENT.md). Eval: valid PPL (flow bound), GenPPL
 180 steps exact velocity. Coverage: 9/9 cells (one cell initially lost to a
 dataset-cache build race at first launch; re-run cleanly).
 
+Truncation (trunc / trunc_ada arms): ALPHA_MAX = α*(R) =
+`alpha_star_euclidean(V=50257, embed_norm=R)` → R=1: **0.840**, R=8: **0.397**,
+R=28: **0.158** (flow-time t* = 1−α*: 0.16 / 0.60 / 0.84); ada arm:
+alpha_max=null.
+
 | arm | R | valid PPL† | GenPPL | entropy |
 |---|---|---|---|---|
 | ada | 1 | 24.11 | 12.57 | 3.80 |

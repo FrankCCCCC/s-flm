@@ -1,4 +1,4 @@
-## Rescale EFLM * {w/ Ada, w/o Ada}, Sudoku Exp: Setting Up
+## Rescale EFLM * {w/ Ada, w/o Ada} * {w/ Trunc, w/o Trunc}, Sudoku Exp: Setting Up
 
 - Data: Sudoku, **48k train / 2k val** per difficulty (seed 42)
   - Difficulties: {hard 30}
@@ -12,7 +12,7 @@
   - noise norm E‖ε‖≈√d≈22.6; grid brackets it so t*(R) spans ~0.03→0.91
 ---
 
-## Rescale EFLM * {w/ Ada, w/o Ada}, Sudoku Exp: Setting Up
+## Rescale EFLM * {w/ Ada, w/o Ada} * {w/ Trunc, w/o Trunc}, Sudoku Exp: Setting Up
 
 - Training
   - Training Steps: **20k**, Batch Size: **256**, Max Seq Len: **180**, bf16, EMA 0.9999
@@ -24,7 +24,7 @@
 
 ---
 
-## Rescale EFLM * {w/ Ada, w/o Ada}, Sudoku Exp: Setting Up
+## Rescale EFLM * {w/ Ada, w/o Ada} * {w/ Trunc, w/o Trunc}, Sudoku Exp: Setting Up
 
 - Evaluation
   - Exact-velocity, top_k_v = -1 (avg across vocab), 180 sampling steps
