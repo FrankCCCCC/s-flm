@@ -17,6 +17,7 @@ LR="${LR:-3e-4}"
 
 cd "${REPO_ROOT}"
 python -u -m main \
+    seed=${SEED:-1} \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small \

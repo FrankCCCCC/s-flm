@@ -1,6 +1,7 @@
 #!/bin/bash
 # DUO — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval).
-# Same ancestral-sampling budget as mdlm.sh so the two discrete baselines match on NFE.
+# 180 steps + greedy last step per experiments/naive_ar_tinystories_s256/setup.md, matching
+# the step budget of mdlm.sh and the flow methods so GenPPL is compared at equal NFE.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export CUDA_VISIBLE_DEVICES=0
@@ -11,7 +12,7 @@ CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/duo}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
-STEPS="${STEPS:-256}"
+STEPS="${STEPS:-180}"
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -22,6 +23,7 @@ MARGS=(
     algo=duo-base
     sampler=ancestral
     sampler.steps=${STEPS}
+    sampler.noise_removal=greedy
 )
 
 # (1) validation perplexity

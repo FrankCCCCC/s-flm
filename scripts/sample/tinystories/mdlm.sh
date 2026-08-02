@@ -10,7 +10,7 @@ CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/mdlm}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
-STEPS="${STEPS:-256}"
+STEPS="${STEPS:-180}"   # setup.md: MDLM 180 steps, matched to DUO/FLM/geo-flow NFE
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
