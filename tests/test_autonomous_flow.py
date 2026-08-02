@@ -16,7 +16,8 @@ import pytest
 import torch
 
 from algo import snr_weight
-from noise_schedules import Autonomous, LogLinear
+from noise_schedules import (Autonomous, LogLinear,
+                             alpha_star_euclidean)
 from samplers import sfm_step_size
 
 EPS = 1e-3
@@ -85,6 +86,33 @@ def test_alpha_prime_matches_autograd(tau_max):
   t = grid(0.0, 1.0, 11).requires_grad_(True)
   grad, = torch.autograd.grad(sched.alpha_t(t).sum(), t)
   assert torch.allclose(grad, sched.alpha_prime_t(t.detach()), atol=1e-6)
+
+
+@pytest.mark.parametrize('R', [0.5, 1.0, 5.0, 8.0, 16.0, 28.0])
+@pytest.mark.parametrize('V', [12, 50257])
+def test_auto_clock_bound_is_the_noise_fraction_horizon(R, V):
+  """alpha_star_euclidean(auto_clock=True) is the Eq. 17 bound moved onto the
+  autonomous clock. That clock runs on the NOISE fraction b = 1 - alpha =
+  exp(-tau), so the horizon is -log(1 - alpha*) = log(1 + z) -- NOT
+  -log(alpha*), which is the signal level's horizon and mirrors z -> 1/z,
+  inverting the R dependence."""
+  a_star = alpha_star_euclidean(V, embed_norm=R)
+  tau_star = alpha_star_euclidean(V, embed_norm=R, auto_clock=True)
+  assert tau_star == pytest.approx(-math.log(1 - a_star))
+  # the flow truncated at tau* stops exactly at the decode point b*
+  b_min = 1 - Autonomous(eps=EPS, tau_max=tau_star).alpha_t(
+      torch.tensor(0.0, dtype=torch.float64)).item()
+  assert b_min == pytest.approx(1 - a_star, abs=EPS)
+  # and it is NOT the mirrored quantity (guards the z <-> 1/z slip)
+  if abs(a_star - 0.5) > 1e-3:
+    assert tau_star != pytest.approx(-math.log(a_star), rel=1e-3)
+
+
+def test_auto_clock_horizon_decreases_with_embedding_norm():
+  """Larger R decodes earlier (larger b*), so it needs a SHORTER flow."""
+  taus = [alpha_star_euclidean(50257, embed_norm=R, auto_clock=True)
+        for R in (0.5, 1.0, 5.0, 8.0, 16.0, 28.0)]
+  assert all(a > b for a, b in zip(taus, taus[1:])), taus
 
 
 @pytest.mark.parametrize('sched', [Autonomous(eps=EPS, tau_max=3.0),

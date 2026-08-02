@@ -109,7 +109,7 @@ def alpha_star_sphere(vocab_size, dim, delta=0.1):
 
 
 def alpha_star_euclidean(vocab_size, delta=0.1, noise_std=1.0,
-                         embed_norm=1.0):
+                         embed_norm=1.0, auto_clock: bool=False):
   """Truncation bound for EFLM (flat-space analog of Eq. 17).
 
   Tractable model: embeddings i.i.d. uniform on the sphere of
@@ -125,10 +125,24 @@ def alpha_star_euclidean(vocab_size, delta=0.1, noise_std=1.0,
   1/sqrt(d) impostor concentration). Much larger than the sphere
   bound because the N(0, I) noise norm (sqrt(d)) dwarfs the
   unit-norm embeddings.
+
+  auto_clock=False returns alpha* itself, the SIGNAL level at the
+  decode point (use as noise.alpha_max, MDLM convention).
+  auto_clock=True returns the same bound on the AUTONOMOUS clock
+  (noise=autonomous), i.e. the horizon tau_max = tau* at which the
+  flow stops. That clock runs on the NOISE fraction b_t = 1 -
+  alpha_t = exp(-tau) -- its exponential decay is what makes the
+  drift time-invariant -- so the decode point in tau is
+    tau* = -log b* = -log(1 - alpha*) = log(1 + z),
+  NOT -log(alpha*): the latter is the horizon of the signal level
+  and mirrors z -> 1/z, inverting the R dependence (it returns
+  tau*(1) for R=28 and vice versa).
   """
   z = (noise_std / embed_norm) * math.sqrt(
     2 * math.log(2 * (vocab_size - 1) / delta))
-  return z / (1 + z)
+  if not auto_clock:
+    return z / (1 + z)
+  return math.log1p(z)
 
 
 def alpha_star_hyperbolic(vocab_size, dim, delta=0.1, prior_cov=0.25,
