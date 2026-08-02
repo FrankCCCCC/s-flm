@@ -1,34 +1,62 @@
 #!/bin/bash
-
+# DUO — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval).
+# Same ancestral-sampling budget as mdlm.sh so the two discrete baselines match on NFE.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+export CUDA_VISIBLE_DEVICES=0
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-CKPT_PATH="${CKPT_PATH:-${REPO_ROOT}/checkpoints/tinystories/duo.ckpt}"
+CKPT_PATH="${CKPT_PATH:?set CKPT_PATH=/abs/path/to/checkpoint.ckpt}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/tinystories/duo}"
-NUM_NODES="${NUM_NODES:-1}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/duo}"
 DEVICES="${DEVICES:-1}"
-STEPS="${STEPS:-32}"
-NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-8}"
+EVAL_BS="${EVAL_BS:-16}"
+STEPS="${STEPS:-256}"
 
 cd "${REPO_ROOT}"
+mkdir -p "${OUTPUT_DIR}"
 
+MARGS=(
+    model=small
+    model.length=${SEQ_LEN:-1024}
+    algo=duo-base
+    sampler=ancestral
+    sampler.steps=${STEPS}
+)
+
+# (1) validation perplexity
+python -u -m main \
+    mode=ppl_eval \
+    data=tinystories \
+    data.cache_dir="${CACHE_DIR}" \
+    strategy=single-device \
+    "${MARGS[@]}" \
+    eval.checkpoint_path="${CKPT_PATH}" \
+    eval.strict_loading=false \
+    eval.results_json_path="${OUTPUT_DIR}/ppl.json" \
+    loader.eval_batch_size=${EVAL_BS} \
+    loader.num_workers=4 \
+    trainer.num_nodes=1 \
+    trainer.devices="${DEVICES}" \
+    +wandb.offline=true \
+    hydra.run.dir="${OUTPUT_DIR}/ppl"
+
+# (2) generative perplexity + samples
 python -u -m main \
     mode=sample_eval \
-    eval.checkpoint_path="${CKPT_PATH}" \
-    eval.compute_generative_perplexity=True \
-    data=openwebtext-split \
+    data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
-    model=small \
-    algo=duo-base \
-    sampler=ancestral \
-    sampler.steps="${STEPS}" \
-    sampler.num_sample_batches="${NUM_SAMPLE_BATCHES}" \
-    loader.eval_batch_size="${EVAL_BATCH_SIZE}" \
+    strategy=single-device \
+    "${MARGS[@]}" \
+    eval.checkpoint_path="${CKPT_PATH}" \
+    eval.strict_loading=false \
+    eval.compute_generative_perplexity=True \
+    eval.results_json_path="${OUTPUT_DIR}/samples_genppl.json" \
+    sampler.num_sample_batches=4 \
+    sampler.temperature=1.0 \
+    loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
-    trainer.num_nodes="${NUM_NODES}" \
+    trainer.num_nodes=1 \
     trainer.devices="${DEVICES}" \
-    +wandb.offline=True \
-    hydra.run.dir="${OUTPUT_DIR}"
+    +wandb.offline=true \
+    hydra.run.dir="${OUTPUT_DIR}/sample"
