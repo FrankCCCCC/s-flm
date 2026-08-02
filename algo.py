@@ -229,15 +229,25 @@ class SelfConditioning:
     raise NotImplementedError
 
   def _self_cond_pass(self, xt, sigma, context, train_mode):
-    """Sets context.z_sc in place; no-op when self-conditioning is off."""
+    """Sets context.z_sc in place; no-op when self-conditioning is off.
+
+    cache_enabled=False: this no-grad pass runs inside the training step's
+    autocast region, and autocast's weight cache would otherwise hand the
+    DETACHED casted weights to the loss forward that follows -- silently
+    cutting the backbone out of the graph on every self-cond step (cf.
+    EFLM.dlm_state, verified by
+    tests/test_var_noise_schedule.py::test_context_pass_keeps_backbone_in_the_graph).
+    """
     if not self.self_conditioning:
       return
     context.z_sc = None
     if train_mode and torch.rand(()) >= self.p_self_cond:
       return
     with torch.no_grad():
-      log_xhat = self.forward(x0=None, xt=xt, sigma=sigma, context=context)
-      context.z_sc = (log_xhat.exp() @ self._sc_embed_table()).detach()
+      with torch.amp.autocast('cuda', dtype=torch.float32,
+                              cache_enabled=False):
+        log_xhat = self.forward(x0=None, xt=xt, sigma=sigma, context=context)
+        context.z_sc = (log_xhat.exp() @ self._sc_embed_table()).detach()
 
 
 class SFM(SelfConditioning, trainer_base.Diffusion):
@@ -360,6 +370,19 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     self.invert_time_convention = config.algo.invert_time_convention
     self.rho_min = config.algo.rho_min
     self.rho_max = config.algo.rho_max
+    self.variational_noise = config.noise.get('variational', False)
+    self.var_context = config.noise.get('var_context', 'dlm-state')
+    self.var_warmup_steps = config.noise.get('var_warmup_steps', 0)
+    if self.variational_noise and self.var_context == 'prompt':
+      import models.var_noise
+      # Attached onto the noise module so noise.parameters() carries it
+      # into the optimizer, checkpoints, and (after re-prepare) the EMA.
+      self.noise.prompt_ctx = models.var_noise.PromptContext(
+        vocab_size=self.vocab_size,
+        z_dim=config.noise.var_z_dim,
+        width=config.noise.var_enc_width,
+        max_len=config.model.length)
+      self._prepare_ema()  # re-snapshot: prompt_ctx params must be in EMA
     self._init_self_cond(config)
     self._validate_configuration()
 
@@ -368,6 +391,19 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       raise ValueError('Adaptive noise schedule requires '
                        'invert_time_convention=false '
                        '(MDLM-like convention).')
+    if self.variational_noise:
+      if self.invert_time_convention:
+        raise ValueError('Variational noise schedule requires '
+                         'invert_time_convention=false '
+                         '(MDLM-like convention).')
+      if self.config.model.type != 'sphere-dit':
+        raise ValueError('Variational noise schedule requires the '
+                         'sphere-dit backbone (it is the one that exposes '
+                         'the hidden state via output_state).')
+      if self.config.noise.adaptive:
+        raise ValueError('noise.adaptive and noise.variational are mutually '
+                         'exclusive (the variational wrapper would silently '
+                         'starve the adaptive refit buffer).')
     if self.rho_min is not None and self.rho_min < 0.0:
       raise ValueError(f'EFLM requires algo.rho_min >= 0, got '
                        f'{self.rho_min}.')
@@ -387,14 +423,30 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
                             context=None):
     return model_output.float().log_softmax(-1)
 
+  def _process_sigma(self, sigma, context=None):
+    # Per-position sigma from a positional learned schedule: keep [B, L] so
+    # the backbone conditions each token at its own noise level (a scalar
+    # mean cannot convey a learned decoding order; external-review finding).
+    if (self.variational_noise and torch.is_tensor(sigma)
+        and sigma.ndim == 2 and sigma.shape[1] > 1):
+      if not self.time_conditioning:
+        sigma = torch.zeros_like(sigma)
+      return sigma
+    # Explicit base call (not zero-arg super()): the self-conditioning tests
+    # bind this method onto light stubs that are not EFLM instances.
+    return trainer_base.Diffusion._process_sigma(self, sigma, context=context)
+
   def _sample_prior(self, e_clean):
     e_noisy = torch.randn_like(e_clean)
     return e_noisy
 
-  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
-    e_clean = self.backbone.get_rescaled_embeddings(
-      x, self.rho_min, self.rho_max)  # [B, L, d] Euclidean, norms rescaled
-    e_noisy = self._sample_prior(e_clean)
+  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None,
+           e_clean=None, e_noisy=None):
+    if e_clean is None:
+      e_clean = self.backbone.get_rescaled_embeddings(
+        x, self.rho_min, self.rho_max)  # [B, L, d] Euclidean, norms rescaled
+    if e_noisy is None:
+      e_noisy = self._sample_prior(e_clean)
 
     if use_pure_noise:
       x_t = e_noisy
@@ -431,18 +483,174 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       clean = clean.to(torch.float64)
       noisy = noisy.to(torch.float64)
 
-    # Broadcast alpha_t [B,1] over the [B,L,d] embeddings (cf. utils.slerp).
-    alpha_t = alpha_t.reshape(alpha_t.shape[0], *([1] * (clean.ndim - 1)))
+    # Broadcast alpha_t ([B,1] global, [B,L] per-position under the learned
+    # schedule) over the [B,L,d] embeddings (cf. utils.slerp).
+    while alpha_t.ndim < clean.ndim:
+      alpha_t = alpha_t.unsqueeze(-1)
     out = (1.0 - alpha_t) * clean + alpha_t * noisy
 
     if orig_dtype is not None:
       out = out.to(orig_dtype)
     return out
 
+  def dlm_state(self, xt, sigma, context=None):
+    """DLM hidden state [B, L, D] -- the context c of the learned schedule.
+
+    No grad: c conditions the schedule, it is not a path for the
+    reconstruction gradient (MuLAN's encoder plays the same role).
+
+    cache_enabled=False is load-bearing. autocast caches the casted copy of
+    each weight for the duration of the outermost autocast region; under
+    no_grad those copies are detached, and the loss forward that follows
+    would reuse them -- silently cutting every autocast weight out of the
+    graph (DDP then dies with "parameters that were not used in producing
+    the loss"). The flag is inherited by the backbone's inner bf16 region.
+    """
+    sigma = self._process_sigma(sigma, context=context)
+    with torch.no_grad():
+      with torch.amp.autocast('cuda', dtype=torch.float32,
+                              cache_enabled=False):
+        _, state = self.backbone(
+          None, xt, sigma, context, output_state=True)
+    return state.float()
+
+  def _nll_variational(self, x0, context, current_accumulation_step,
+                       train_mode, valid_tokens):
+    """EFLM loss under the learned schedule (noise.variational).
+
+    Two passes, mirroring algo.SelfConditioning: the first corrupts with the
+    base schedule and reads the DLM hidden state c; the second corrupts with
+    alpha_t = alpha_base(tau_phi(c, t)) -- reusing the SAME Gaussian draw --
+    and takes the loss.  The CE is reweighted by
+    w = (-dtau/dt * alpha'_base(tau)) / (alpha(0) - alpha(1)), which makes the
+    objective a schedule-reparametrization-invariant line integral for a
+    global schedule (no degenerate optimum) and leaves the per-position
+    coupling -- the decoding order -- as the only learning signal for phi.
+
+    Context modes (noise.var_context):
+
+    * 'prompt' (default config; MuLAN Suppl. D.1, context available at
+      inference): c encodes the PROMPT tokens (noise.prompt_ctx) -- on
+      sudoku, the clues.  Identical construction at training and sampling,
+      computed once per sequence, no oracle leak of the solution.  The DLM
+      is additionally conditioned on it via context.z_ctx.  Single backbone
+      pass.
+    * 'dlm-state': the DLM hidden state of a base-schedule corruption of x0
+      at an INDEPENDENT t_ctx ~ U[0,1].  This is MuLAN Suppl. D.2's
+      direct-x0 conditioning, which the paper itself shows underperforming
+      the unconditioned baseline (no consistent inference-time context);
+      confirmed on sudoku hard (RESULTS.md round 1).  Kept for comparison.
+
+    The context must not encode the loss's own t (the DLM is
+    sigma-conditioned): dtau/dt is a partial derivative holding c fixed, and
+    an un-reweighted c-pathway would re-open the degenerate "no noise until
+    t = 1" optimum.  'prompt' is t-free by construction; 'dlm-state' uses
+    the independent t_ctx.  E_t[w | c] = 1 then holds exactly per context
+    (the u-parametrized warp pins its endpoints on the sampled interval).
+
+    The warp is annealed in over noise.var_warmup_steps (gate 0 -> 1): the
+    schedule starts as the base schedule while the denoiser becomes
+    competent, so the early, near-random hidden representations never pick
+    the decoding order (external-review finding).  Gate 1 at eval; note a
+    mid-warmup checkpoint evaluates at gate 1.
+    """
+    t = self._sample_t(x0.shape[0], current_accumulation_step)
+    assert t.shape[0] == x0.shape[0]
+
+    e_clean = self.backbone.get_rescaled_embeddings(
+      x0, self.rho_min, self.rho_max)
+    e_noisy = self._sample_prior(e_clean)
+
+    if self.var_context == 'prompt':
+      z = self.noise.prompt_ctx(x0, valid_tokens)
+      c = self.noise.prompt_ctx.expand(z, x0.shape[1])
+      context.z_ctx = z
+    else:
+      t_ctx = torch.rand_like(t)
+      alpha_ctx = self.noise.base_alpha_t(t_ctx).unsqueeze(-1)
+      xt_ctx = self.q_xt(
+        x0, alpha_ctx, use_pure_noise=False, valid_tokens=valid_tokens,
+        e_clean=e_clean, e_noisy=e_noisy)
+      c = self.dlm_state(
+        xt_ctx, self._sigma_from_alphat(alpha_ctx), context=context)
+
+    gate = 1.0
+    if (self.var_warmup_steps > 0
+        and getattr(self, '_trainer', None) is not None):
+      gate = min(1.0, self.global_step / self.var_warmup_steps)
+
+    dalpha_t, alpha_t = self.noise(t, c, gate=gate)
+    xt = self.q_xt(
+      x0, alpha_t, use_pure_noise=False, valid_tokens=valid_tokens,
+      e_clean=e_clean, e_noisy=e_noisy)
+
+    # Per-position sigma [B, L]: prompt positions are clean in q_xt
+    # regardless of their nominal alpha, so condition them at sigma = 0
+    # (alpha = 1) -- and keep them out of every diagnostic.  A [B] global
+    # alpha keeps the scalar conditioning path.
+    if alpha_t.ndim == 2 and valid_tokens is not None:
+      alpha_cond = torch.where(valid_tokens.bool(), alpha_t,
+                               torch.ones_like(alpha_t))
+    else:
+      alpha_cond = alpha_t
+    sigma = self._sigma_from_alphat(alpha_cond)
+    self._self_cond_pass(xt, sigma, context, train_mode)
+    log_x_theta = self.forward(
+      x0=x0, xt=xt, sigma=sigma, context=context)
+    utils.print_nans(log_x_theta, 'model_output')
+
+    ce_loss = self.nll_per_token(
+      log_x_theta=log_x_theta, xt=xt, x0=x0,
+      alpha_t=alpha_t, dalpha_t=dalpha_t,
+      low_var=train_mode and self.loss_type == 'low_var',
+      context=context, train_mode=train_mode)
+    weight = self.noise.loss_weight(dalpha_t)
+    if weight.ndim == 1:  # global schedule -> broadcast over positions
+      weight = weight.unsqueeze(-1)
+    if train_mode:
+      self._log_variational_diagnostics(
+        alpha_t, weight, valid_tokens, ce_loss, gate)
+    return weight * ce_loss, t
+
+  def _log_variational_diagnostics(self, alpha_t, weight, valid_tokens,
+                                   ce_loss, gate):
+    # All statistics over GENERATED positions only -- prompt positions are
+    # clean and their loss is masked, so including them (external-review
+    # finding) makes weight_max/spread meaningless nuisance readings.
+    # alpha_spread > 0 means a decoding order was learned; exactly 0 for a
+    # global schedule.
+    m = (torch.ones_like(ce_loss) if valid_tokens is None
+         else valid_tokens.to(ce_loss.dtype))
+    n_total = m.sum().clamp(min=1)
+    if alpha_t.ndim == 2:
+      n = m.sum(-1, keepdim=True).clamp(min=1)
+      centered = (alpha_t - (alpha_t * m).sum(-1, keepdim=True) / n) * m
+      spread = ((centered ** 2).sum(-1) / n.squeeze(-1)).sqrt().mean()
+      w_masked = torch.where(m.bool(), weight.expand_as(m),
+                             torch.zeros_like(m))
+      w_max = w_masked.max()
+    else:
+      spread = torch.zeros((), device=weight.device)
+      w_max = weight.max()
+    self.log('sched/alpha_spread', spread.item(), on_step=True,
+             on_epoch=False, sync_dist=True)
+    self.log('sched/weight_max', w_max.item(), on_step=True,
+             on_epoch=False, sync_dist=True)
+    self.log('sched/gate', float(gate), on_step=True,
+             on_epoch=False, sync_dist=True)
+    # Unweighted CE on generated tokens: comparable across scopes/arms,
+    # unlike the weighted training loss.
+    self.log('sched/ce_unweighted',
+             ((ce_loss * m).sum() / n_total).item(),
+             on_step=True, on_epoch=False, sync_dist=True)
+
   def nll(self, x0, output_tokens, context,
           current_accumulation_step=None, train_mode=False,
           valid_tokens=None):
     del output_tokens
+    if self.variational_noise:
+      return self._nll_variational(
+        x0, context, current_accumulation_step, train_mode, valid_tokens)
     t = self._sample_t(x0.shape[0], current_accumulation_step)
     assert t.shape[0] == x0.shape[0]
     use_pure_noise = self._use_pure_noise(
@@ -776,6 +984,7 @@ class HFLM(SelfConditioning, trainer_base.Diffusion):
     if use_pure_noise:
       t = torch.ones_like(t)
 
+    # TODO: make it compactiable to all noise scheduler
     dalpha_t, alpha_t = self.noise(t)
     alpha_t = alpha_t.unsqueeze(-1)
     dalpha_t = dalpha_t.unsqueeze(-1)

@@ -506,8 +506,13 @@ class DDiTBlock(nn.Module):
     x = self.norm1(x)
 
     if self.adaLN:
+      # c: [B, cond] (per sequence) or [B, L, cond] (per token, e.g.
+      # per-position noise levels under a learned schedule).
+      mod = self.adaLN_modulation(c)
+      if mod.ndim == 2:
+        mod = mod[:, None]
       (shift_msa, scale_msa, gate_msa, shift_mlp,
-       scale_mlp, gate_mlp) = self.adaLN_modulation(c)[:, None].chunk(6, dim=2)
+       scale_mlp, gate_mlp) = mod.chunk(6, dim=2)
       x = modulate_fused(x, shift_msa, scale_msa)
 
     qkv = einops.rearrange(
@@ -570,7 +575,12 @@ class DDiTFinalLayer(nn.Module):
   def forward(self, x, c):
     x = self.norm_final(x)
     if self.adaLN:
-      shift, scale = self.adaLN_modulation(c)[:, None].chunk(2, dim=2)
+      # c: [B, cond] (one condition per sequence) or [B, L, cond]
+      # (per-token condition, e.g. per-position noise levels).
+      mod = self.adaLN_modulation(c)
+      if mod.ndim == 2:
+        mod = mod[:, None]
+      shift, scale = mod.chunk(2, dim=2)
       x = modulate_fused(x, shift, scale)
     x = self.linear(x)
     return x

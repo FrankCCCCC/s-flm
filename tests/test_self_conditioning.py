@@ -107,6 +107,12 @@ class _Stub:
       self.prior_cov = a.prior_cov
       self.rho_max = a.rho_max
       self.gaussian_curvature = a.gaussian_curvature
+    if algo_name == 'eflm':
+      # configs/algo/eflm.yaml defaults: no radial rescale, so
+      # get_rescaled_embeddings / _sc_embed_table are the raw weights.
+      self.rho_min = None
+      self.rho_max = None
+      self.variational_noise = False  # read by EFLM._process_sigma
     self._algo_cls = _ALGO_CLS[algo_name]
 
   def __getattr__(self, name):

@@ -553,6 +553,7 @@ class SFMState(BaseState):
   prefix_tokens: torch.Tensor = None  # [B, L]
   prefix_embeds: torch.Tensor = None  # [B, P, d] sphere embeddings of prefix
   z_sc: torch.Tensor = None  # [B, L, d] self-cond carry (None when off / at k=0)
+  z_ctx: torch.Tensor = None  # [B, z_dim] MuLAN latent ~ prior, fixed per trajectory
 
 
 @dataclass
@@ -747,6 +748,7 @@ class SFMSampler(Sampler):
 class EFLMContext:
   temperature: float = 0.0
   z_sc: torch.Tensor | None = None
+  z_ctx: torch.Tensor | None = None  # [B, z_dim] MuLAN latent (variational noise)
 
 @torch.compile
 def elfm_compute_velocity(x, E, log_p, mode, eps):
@@ -855,11 +857,28 @@ class EFLMSampler(Sampler):
     else:
       t_schedule = torch.linspace(1.0, eps, num_steps + 1,
                                   device=model.device)
+    # Prompt-context mode (MuLAN D.1): z encodes the PROMPT -- available at
+    # inference -- computed once and held FIXED for the whole trajectory,
+    # the identical construction to training.  Schedule and denoiser both
+    # condition on it.
+    z_ctx = None
+    if (getattr(model, 'variational_noise', False)
+        and getattr(model, 'var_context', None) == 'prompt'):
+      if prefix_tokens is not None:
+        z_ctx = model.noise.prompt_ctx(
+          prefix_tokens, torch.zeros_like(prefix_tokens))
+      else:
+        # Promptless sampling: no clue context exists; an all-zero z is the
+        # encoder's masked-mean of nothing.  Training always had a prompt on
+        # prefix datasets, so prefer prefixed evaluation for this mode.
+        z_ctx = torch.zeros(
+          num_samples, model.noise.prompt_ctx.z_dim, device=model.device)
     state = SFMState(xt=xt, t_schedule=t_schedule,
       start_idx=start_idx, step_idx=0, nfe=0, done=False,
       prefix_lengths=prefix_lengths,
       prefix_embeds=prefix_embeds,
-      prefix_tokens=prefix_tokens)
+      prefix_tokens=prefix_tokens,
+      z_ctx=z_ctx)
     return state
 
   def _last_step_decode(self, state, log_p):
@@ -885,20 +904,56 @@ class EFLMSampler(Sampler):
     return elfm_compute_velocity(
       x, E, log_p, mode=self.velocity, eps=self.eps)
 
-  def _get_step_size(self, model, state):
-    _, alpha_t = model.noise(state.t_schedule[state.step_idx])
-    _, alpha_s = model.noise(state.t_schedule[state.step_idx + 1])
-    return sfm_step_size(
-      alpha_t, alpha_s, self.invert_time_convention, self.eps)
+  def _schedule_alphas(self, model, state):
+    """(alpha_t, alpha_s) for this step.
+
+    Scalars for a fixed schedule.  Under the learned
+    `VariationalAdaptiveSchedule` they are [B] (global) or [B, L]
+    (per-position, i.e. a learned decoding order) and need the DLM hidden
+    state as context -- one extra NFE per step, mirroring the two-pass
+    training loss in EFLM._nll_variational.  The context is re-read every
+    step, so the Euler integrator always uses the locally current schedule.
+    The z_sc=None context mirrors training, where the context pass runs
+    before self-conditioning is set (a self-cond backbone then applies the
+    same x + W_in(x) + W_sc(0) input path in both).
+    """
+    t = state.t_schedule[state.step_idx]
+    s = state.t_schedule[state.step_idx + 1]
+    if not getattr(model, 'variational_noise', False):
+      return model.noise.alpha_t(t), model.noise.alpha_t(s)
+    B = state.xt.shape[0]
+    t, s = t.expand(B), s.expand(B)
+    if state.z_ctx is not None:
+      # prompt mode: the context is the fixed prompt encoding -- no extra NFE.
+      c = model.noise.prompt_ctx.expand(state.z_ctx, state.xt.shape[1])
+    else:
+      sigma_base = model._sigma_from_alphat(
+        model.noise.base_alpha_t(t)).unsqueeze(-1)
+      c = model.dlm_state(state.xt, sigma_base,
+                          context=EFLMContext(z_sc=None))
+      state.nfe += 1
+    return model.noise.alpha_t(t, c), model.noise.alpha_t(s, c)
 
   def step(self, model, state):
     num_steps = len(state.t_schedule) - 1
     is_last_step = (state.step_idx == num_steps - 1)
 
-    _, alpha_t = model.noise(state.t_schedule[state.step_idx])
-    sigma_t = model._sigma_from_alphat(alpha_t).reshape(-1, 1)
+    alpha_t, alpha_s = self._schedule_alphas(model, state)
+    # Prompt positions stay projected-clean in xt, so condition them at
+    # alpha = 1 (sigma = 0), matching training's per-position sigma.
+    alpha_cond = alpha_t
+    if torch.is_tensor(alpha_t) and alpha_t.ndim == 2 \
+        and state.prefix_lengths is not None:
+      pos = torch.arange(alpha_t.shape[1], device=alpha_t.device)
+      prompt_mask = pos[None, :] < state.prefix_lengths[:, None]
+      alpha_cond = torch.where(prompt_mask, torch.ones_like(alpha_t),
+                               alpha_t)
+    sigma_t = model._sigma_from_alphat(alpha_cond)
+    if sigma_t.ndim < 2:
+      sigma_t = sigma_t.reshape(-1, 1)
 
-    context = EFLMContext(temperature=self.temperature, z_sc=state.z_sc)
+    context = EFLMContext(temperature=self.temperature, z_sc=state.z_sc,
+                          z_ctx=state.z_ctx)
     log_p = model.forward(xt=state.xt, sigma=sigma_t,
                           context=context)
     if self.use_float64:
@@ -929,7 +984,12 @@ class EFLMSampler(Sampler):
 
     vel = self._compute_velocity(x, E, log_p_v)
 
-    dt = self._get_step_size(model, state)
+    dt = sfm_step_size(
+      alpha_t, alpha_s, self.invert_time_convention, self.eps)
+    if dt.ndim == 2:    # per-position schedule -> [B, Lw, 1]
+      dt = dt[:, state.start_idx:].unsqueeze(-1)
+    elif dt.ndim == 1:  # global learned schedule -> [B, 1, 1]
+      dt = dt.reshape(-1, 1, 1)
     x_new = x + dt * vel
     state.xt[:, state.start_idx:] = x_new.to(state.xt.dtype)
     self._project_prefix(

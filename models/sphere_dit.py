@@ -60,6 +60,19 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     if self.adaLN:
       self.sigma_map = TimestepEmbedder(cond_dim)
 
+    # Schedule-context conditioning (noise.variational + var_context=prompt):
+    # the reverse process must be conditioned on the schedule's context z
+    # (MuLAN Sec. 3.3 / D.1) -- (z, t) then determines the full learned
+    # schedule, which a scalar sigma alone cannot convey.  Zero-init keeps
+    # checkpoints and the step-0 forward identical to the unconditioned model.
+    noise_cfg = config.get('noise', None) if not isinstance(config, dict) else None
+    self.var_z_cond = bool(
+      noise_cfg is not None and noise_cfg.get('variational', False)
+      and noise_cfg.get('var_context', 'dlm-state') == 'prompt')
+    if self.var_z_cond:
+      self.W_z = nn.Linear(noise_cfg.var_z_dim, cond_dim, bias=False)
+      self.W_z.weight.data.zero_()
+
     self.rotary_emb = Rotary(dim // config.model.n_heads)
 
     self.blocks = nn.ModuleList([
@@ -262,7 +275,13 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     return coef1 * inner - coef2 * norm_sq
 
   def forward(self, x0, xt: torch.Tensor, sigma: torch.Tensor,
-              context=None) -> torch.Tensor:
+              context=None, output_state: bool = False) -> torch.Tensor:
+    """Returns the logits, or (logits, hidden state) when `output_state`.
+
+    The hidden state is the last block's output, i.e. the input of the output
+    layer; `noise_schedules.VariationalAdaptiveSchedule` conditions on it.
+    Default False keeps the single-tensor return every other caller expects.
+    """
     del x0
 
     x = xt  # [B, L, d]
@@ -273,7 +292,19 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       x = x + self.W_in(x) + self.W_sc(z_sc)
 
     if self.adaLN:
-      t_cond = F.silu(self.sigma_map(sigma))
+      # sigma: [B] (one level per sequence) or [B, L] (per-position levels
+      # under a learned positional schedule -- the denoiser must know each
+      # position's noise level; a scalar mean cannot convey the schedule).
+      if sigma.ndim == 2:
+        B, L = sigma.shape
+        cond = self.sigma_map(sigma.reshape(-1)).reshape(B, L, -1)
+      else:
+        cond = self.sigma_map(sigma)
+      z_ctx = getattr(lf, 'z_ctx', None) if lf is not None else None
+      if self.var_z_cond and z_ctx is not None:
+        w_z = self.W_z(z_ctx)
+        cond = cond + (w_z.unsqueeze(1) if cond.ndim == 3 else w_z)
+      t_cond = F.silu(cond)
     else:
       t_cond = None
 
@@ -282,6 +313,7 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     with torch.amp.autocast('cuda', dtype=torch.bfloat16):
       for block in self.blocks:
         x = block(x, rotary_cos_sin, c=t_cond)
+      state = x
       x = self.output_layer(x, c=t_cond)
       if self.out_temperature_scaling:
         pre_temperature = x[:, :, [-1]]
@@ -291,4 +323,6 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
 
     if self.logit_bias and lf is not None and lf.r > 0.0:
       x = x + self._plaid_bias(xt, lf.alpha, lf.sigma, lf.r, dtype=x.dtype)
+    if output_state:
+      return x, state
     return x

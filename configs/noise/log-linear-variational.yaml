@@ -1,0 +1,24 @@
+type: log-linear
+eps: 1e-3
+alpha_min: null
+alpha_max: null
+adaptive: false
+variational: true         # MuLAN-style learned time warp over the base schedule
+var_basis: polynomial     # polynomial (MuLAN Suppl. E.2) / rbf (Gaussian basis)
+var_degree: 5             # polynomial degree (odd) / number of RBF bases
+var_scope: positional     # positional -> alpha_t is [B, L] (learned decoding
+                          # order); global -> [B], one schedule per sequence
+var_model_type: dit       # dit (mixes positions) / mlp (per position)
+var_num_layer: 2
+var_embed_dim: 128
+var_context: prompt       # prompt: schedule context = an encoding of the
+                          # PROMPT (inference-available; MuLAN Suppl. D.1),
+                          # fixed per trajectory, identical at train/sample.
+                          # dlm-state: DLM hidden state of corrupted x0 --
+                          # MuLAN Suppl. D.2's ablation, shown there AND on
+                          # sudoku (RESULTS.md round 1) to underperform the
+                          # fixed baseline.
+var_z_dim: 64             # context encoding width
+var_enc_width: 128        # prompt encoder MLP width
+var_warmup_steps: 2000    # anneal the warp in (gate 0 -> 1) so the schedule
+                          # never locks onto an untrained denoiser's order

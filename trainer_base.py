@@ -28,6 +28,7 @@ class Loss:
 class TrainingContext:
   kv_cache: bool = False
   z_sc: torch.Tensor | None = None  # [B, L, d] self-cond embeds, None -> zeros
+  z_ctx: torch.Tensor | None = None  # [B, z_dim] MuLAN latent (variational noise)
 
 
 @dataclass

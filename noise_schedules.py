@@ -445,6 +445,100 @@ class UnifInfoSchedule(NoiseSchedule):
   def alpha_prime_t(self, t):
     return torch.zeros_like(t)
 
+class VariationalAdaptiveSchedule(NoiseSchedule):
+  """MuLAN-style learned noise schedule gamma_phi(c, t) (models/var_noise.py).
+
+  `gamma_net` maps the DLM hidden state c ([B, L, D]) and t to a monotone time
+  warp tau(c, t) in [0, 1] with tau(c, 0) = 0 and tau(c, 1) = 1; the schedule
+  is that warp composed with the base schedule,
+
+      alpha_t(c, t) = alpha_base(tau(c, t))
+      alpha'_t(c, t) = alpha'_base(tau) * dtau/dt.
+
+  tau is MuLAN's gamma_phi up to the affine relabelling
+  gamma = gamma_min + (gamma_max - gamma_min) tau (Suppl. E.2, Eq. 63); we keep
+  it in [0, 1] so alpha stays in the base schedule's range -- the range the
+  sampler, the truncation bounds and _sigma_from_alphat already assume -- and so
+  that the identity init tau = t reproduces the base schedule exactly.
+
+  tau is a scalar per sequence ([B]) or per position ([B, L]); the latter is
+  what makes the decoding order learnable.  Without a context (c=None) this
+  falls back to the base schedule.
+  """
+
+  def __init__(self, base_schedule, gamma_net, t_min=0.0):
+    super().__init__()
+    self.base_schedule = base_schedule
+    self.gamma_net = gamma_net
+    # The warp is parametrized over u = (t - t_min) / (1 - t_min), the
+    # normalized coordinate of the SAMPLED interval U[t_min, 1]
+    # (t_min = training.sampling_eps).  With the warp's endpoints pinned at
+    # u = 0 and u = 1, int_{t_min}^{1} (-dalpha/dt) dt =
+    # alpha_base(0) - alpha_base(1) for EVERY context and gate, so the
+    # loss-weight span below is a c-independent constant and E[w | c] = 1
+    # holds exactly on the sampled interval.
+    self.t_min = float(t_min)
+    self.alpha_span = (
+      base_schedule.alpha_t(torch.tensor(0.0)).item()
+      - base_schedule.alpha_t(torch.tensor(1.0)).item()) / (1.0 - self.t_min)
+
+  def base_alpha_t(self, t):
+    """Un-warped schedule; used for the context pass that produces c."""
+    return self.base_schedule.alpha_t(t)
+
+  def _u(self, t):
+    return ((t - self.t_min) / (1.0 - self.t_min)).clamp(0.0, 1.0)
+
+  def _warp(self, t, c, gate):
+    """(tau, dtau/dt) of the gated warp.
+
+    gate anneals the warp in during training (0 -> identity == the base
+    schedule up to the u-relabelling, 1 -> fully learned); gradients flow at
+    every gate so DDP never sees unused parameters.  Endpoints are gate-
+    independent: tau(u=0) = 0, tau(u=1) = 1.
+    """
+    u = self._u(t)
+    tau, dtau_du = self.gamma_net(u, c)
+    if gate != 1.0:
+      u_b = u.reshape(u.shape[0], *([1] * (tau.ndim - 1)))
+      tau = u_b + gate * (tau - u_b)
+      dtau_du = 1.0 + gate * (dtau_du - 1.0)
+    return tau, dtau_du / (1.0 - self.t_min)
+
+  def forward(self, t, c=None, gate=1.0):
+    if c is None:
+      return self.base_schedule.alpha_prime_t(t), self.base_schedule.alpha_t(t)
+    tau, dtau_dt = self._warp(t, c, gate)
+    return (self.base_schedule.alpha_prime_t(tau) * dtau_dt,
+            self.base_schedule.alpha_t(tau))
+
+  def alpha_t(self, t, c=None, gate=1.0):
+    if c is None:
+      return self.base_schedule.alpha_t(t)
+    tau, _ = self._warp(t, c, gate)
+    return self.base_schedule.alpha_t(tau)
+
+  def alpha_prime_t(self, t, c=None, gate=1.0):
+    if c is None:
+      return self.base_schedule.alpha_prime_t(t)
+    tau, dtau_dt = self._warp(t, c, gate)
+    return self.base_schedule.alpha_prime_t(tau) * dtau_dt
+
+  def loss_weight(self, dalpha_t):
+    """MuLAN reweighting w = (-dalpha/dt) / span.
+
+    span is the (constant, c-independent) average of -dalpha/dt over the
+    sampled interval U[t_min, 1] -- constant because the u-parametrized warp
+    pins its endpoints there -- so E_t[w | c] == 1 EXACTLY for every context,
+    gate, and warp.  w == 1 identically for the un-warped base schedule, so
+    the weighted CE reduces exactly to EFLM's plain CE at gate 0.  The
+    weighted objective is invariant under reparametrizing a GLOBAL schedule
+    (it is then just int CE(alpha) dalpha), which is what stops the schedule
+    from collapsing to "no noise until t = 1"; the learning signal comes from
+    the per-position / context coupling (MuLAN Sec. 3.5).
+    """
+    return (-dalpha_t) / self.alpha_span
+
 
 def get_noise(config):
   noise_config = config.noise
@@ -492,5 +586,27 @@ def get_noise(config):
       plot_profile=noise_config.adaptive_plot_profile,
       plot_dir=noise_config.adaptive_plot_dir,
       log_importance=noise_config.get('adaptive_log_importance', False))
+
+  if noise_config.get('variational', False):
+    # Imported lazily: models.var_noise pulls in the DiT stack (flash_attn).
+    import models.var_noise
+    # var_context: 'prompt' (inference-available prompt encoding, z_dim
+    # wide; MuLAN Suppl. D.1) or 'dlm-state' (the DLM hidden state -- MuLAN
+    # Suppl. D.2's known-inferior direct-x0 conditioning; kept for
+    # comparison).  The PromptContext module itself needs the vocab size,
+    # so EFLM.__init__ attaches it as noise.prompt_ctx.
+    prompt_ctx = noise_config.get('var_context', 'dlm-state') == 'prompt'
+    noise = VariationalAdaptiveSchedule(
+      base_schedule=noise,
+      gamma_net=models.var_noise.GammaNet(
+        in_dim=(noise_config.var_z_dim if prompt_ctx
+                else config.model.hidden_size),
+        embed_dim=noise_config.var_embed_dim,
+        num_layer=noise_config.var_num_layer,
+        model_type=noise_config.var_model_type,
+        scope=noise_config.var_scope,
+        basis=noise_config.var_basis,
+        degree=noise_config.var_degree),
+      t_min=config.training.sampling_eps)
 
   return noise
