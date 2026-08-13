@@ -31,6 +31,7 @@ if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=t
 
 cd "${REPO_ROOT}"
 python -u -m main \
+    seed=${SEED:-1} \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small-sphere-dit \
