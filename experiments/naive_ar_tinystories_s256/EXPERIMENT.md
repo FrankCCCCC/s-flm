@@ -49,6 +49,37 @@ compared. Four methods, each swept over LR and seed:
 eval/ppl.json, eval/samples_genppl.json.
 Report: `experiments/naive_ar_tinystories_s256/RESULTS.md` (via `report.py`).
 
+---
+
+## Phase 2 — Gen. PPL / entropy frontier (`frontier_sweep.py`)
+
+`setup.md` "GenPPL & Entropy Frontier Evaluation". Consumes the phase-1 checkpoints; no
+retraining.
+
+- **1080 cells** = 3 methods {mdlm, duo, flm} × seed {1,2,3} × NFE {1,4,8,16,32,64,128,256}
+  × T {0.50 … 1.20, 15 values}, **512 samples each**.
+- **LR fixed at 1e-3** — `setup.md` sweeps only the seed here, and §3.4 of RESULTS.md
+  selects 1e-3 as the shared LR. AR is excluded (its sampler has no NFE budget).
+- Same decoders as the phase-1 eval: `ancestral` for mdlm, `ancestral` +
+  `noise_removal=greedy` for duo, `flm_euler` for flm. Only `sampler.steps` and
+  `sampler.temperature` move.
+- Deliverable: Gen. PPL (y, log) vs per-sample unigram entropy (x), one frontier line per
+  NFE, mean ± sd over the 3 training seeds (S-FLM paper Fig. 10 / App. C.8).
+
+**Expected invariance (not a bug):** duo and flm argmax on the final sampling step, so at
+**NFE = 1** the entire sample is a temperature-independent argmax — their 15 T-cells collapse
+to one point. MDLM's last step is stochastic, so it keeps a curve at NFE = 1.
+
+- GPU allocation: 72 SLURM jobs (one per method × seed × NFE), `gpu:1` on `thickstun,desa`
+  (exclude desa-compute-01); each job walks its 15 temperatures in sequence.
+  `EVAL_BS` 32 for mdlm/duo, 16 for flm (dense (B, L, V) float64 sampler state); all three
+  measured to fit the 24 GB A5000.
+- Expected wall-clock: ~11 GPU-hr each for mdlm/duo, ~22 for flm ⇒ **≈ 45 GPU-hr**;
+  longest single job (flm, NFE 256) ≈ 3.5–6 hr.
+- Outputs: `outputs/.../m-{method}_lr-1e-3_sd-{seed}/frontier/nfe-{nfe}_t-{T}/samples_genppl.json`.
+  Figure + tables: `visualization/genppl_entropy_frontier_line.py`.
+  Report: `experiments/naive_ar_tinystories_s256/FRONTIER_RESULTS.md`.
+
 **Legacy dirs:** `ar/` and `mdlm/` predate this naming and are the lr-3e-4 / seed-1 cells.
 Rename them to `m-ar_lr-3e-4_sd-1` / `m-mdlm_lr-3e-4_sd-1` to reuse their checkpoints;
 otherwise those two cells retrain from scratch. Their *eval* outputs are stale regardless

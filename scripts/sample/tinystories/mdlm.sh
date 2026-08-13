@@ -11,6 +11,9 @@ OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/mdlm}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
 STEPS="${STEPS:-180}"   # setup.md: MDLM 180 steps, matched to DUO/FLM/geo-flow NFE
+TEMPERATURE="${TEMPERATURE:-1.0}"
+NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
+RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}"   # false: GenPPL pass only
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -24,21 +27,23 @@ MARGS=(
 )
 
 # (1) validation perplexity
-python -u -m main \
-    mode=ppl_eval \
-    data=tinystories \
-    data.cache_dir="${CACHE_DIR}" \
-    strategy=single-device \
-    "${MARGS[@]}" \
-    eval.checkpoint_path="${CKPT_PATH}" \
-    eval.strict_loading=false \
-    eval.results_json_path="${OUTPUT_DIR}/ppl.json" \
-    loader.eval_batch_size=${EVAL_BS} \
-    loader.num_workers=4 \
-    trainer.num_nodes=1 \
-    trainer.devices="${DEVICES}" \
-    +wandb.offline=true \
-    hydra.run.dir="${OUTPUT_DIR}/ppl"
+if [ "${RUN_PPL_EVAL}" = "true" ]; then
+    python -u -m main \
+        mode=ppl_eval \
+        data=tinystories \
+        data.cache_dir="${CACHE_DIR}" \
+        strategy=single-device \
+        "${MARGS[@]}" \
+        eval.checkpoint_path="${CKPT_PATH}" \
+        eval.strict_loading=false \
+        eval.results_json_path="${OUTPUT_DIR}/ppl.json" \
+        loader.eval_batch_size=${EVAL_BS} \
+        loader.num_workers=4 \
+        trainer.num_nodes=1 \
+        trainer.devices="${DEVICES}" \
+        +wandb.offline=true \
+        hydra.run.dir="${OUTPUT_DIR}/ppl"
+fi
 
 # (2) generative perplexity + samples
 python -u -m main \
@@ -51,8 +56,8 @@ python -u -m main \
     eval.strict_loading=false \
     eval.compute_generative_perplexity=True \
     eval.results_json_path="${OUTPUT_DIR}/samples_genppl.json" \
-    sampler.num_sample_batches=4 \
-    sampler.temperature=1.0 \
+    sampler.num_sample_batches=${NUM_SAMPLE_BATCHES} \
+    sampler.temperature=${TEMPERATURE} \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
     trainer.num_nodes=1 \
