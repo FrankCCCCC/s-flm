@@ -1,5 +1,7 @@
 #!/bin/bash
-# MDLM — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval).
+# FLM — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval).
+# Same 180-step budget as the geometry flows (sfm.sh / eflm.sh). The Euler sampler
+# always argmaxes on the last step, so there is no noise_removal knob to match.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export CUDA_VISIBLE_DEVICES=0
@@ -7,10 +9,10 @@ export CUDA_VISIBLE_DEVICES=0
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?set CKPT_PATH=/abs/path/to/checkpoint.ckpt}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/mdlm}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/flm}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
-STEPS="${STEPS:-180}"   # setup.md: MDLM 180 steps, matched to DUO/FLM/geo-flow NFE
+STEPS="${STEPS:-180}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
 RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}"   # false: GenPPL pass only
@@ -19,10 +21,11 @@ cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
 
 MARGS=(
-    model=small
+    model=small-flm
     model.length=${SEQ_LEN:-1024}
-    algo=mdlm
-    sampler=ancestral
+    algo=flm
+    noise=log-linear
+    sampler=flm_euler
     sampler.steps=${STEPS}
 )
 

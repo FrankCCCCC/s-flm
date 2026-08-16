@@ -1,13 +1,15 @@
 #!/bin/bash
-# Naive MDLM (masked diffusion) baseline. Single TinyStories training run (slides jun25_2026).
+# Naive FLM (base flow language model, simplex/Gaussian flow) baseline. Single
+# TinyStories training run (slides jun25_2026). Same recipe as sfm.sh / mdlm.sh —
+# only model + algo differ (small-flm is the same 768/12/12 DiT).
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/mdlm}"
-RUN_NAME="${RUN_NAME:-naive_mdlm}"
-WANDB_GROUP="${WANDB_GROUP:-naive_mdlm}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/flm}"
+RUN_NAME="${RUN_NAME:-naive_flm}"
+WANDB_GROUP="${WANDB_GROUP:-naive_flm}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 MAX_STEPS="${MAX_STEPS:-30000}"
@@ -20,9 +22,11 @@ python -u -m main \
     seed=${SEED:-1} \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
-    model=small \
+    model=small-flm \
     model.length=${SEQ_LEN:-1024} \
-    algo=mdlm \
+    algo=flm \
+    sampler=flm_euler \
+    noise=log-linear \
     loader.global_batch_size=512 \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \
