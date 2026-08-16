@@ -5,6 +5,7 @@ import math
 import numpy as np
 import torch
 import torch.nn.functional as F
+from dataclass_patch import dataclass
 from scipy.interpolate import PchipInterpolator
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
@@ -538,3 +539,51 @@ def get_noise(config):
       log_importance=noise_config.get('adaptive_log_importance', False))
 
   return noise
+
+@dataclass
+class GT_Method:
+  LINEAR: str = "linear"
+  LOG: str = "log"
+
+class GScheduler(torch.nn.Module, abc.ABC):
+  def forward(self, t):
+    return self.g_prime_t(t), self.g_t(t)
+
+  @abc.abstractmethod
+  def g_t(self, t):
+    pass
+
+  @abc.abstractmethod
+  def g_prime_t(self, t):
+    pass
+
+class LinearGScheduler(GScheduler):
+  """Diffusion scale g(t) of the SDE sampler, as a function of the
+  flow-matching time t (t=0 noise, t=1 data). LINEAR g(t) = 1 - t keeps the
+  drift regular -- eta*g^2(t)/(2(1-t)) = eta*(1-t)/2 -- and the injected
+  noise vanishes as t -> 1 (cf. experiments/eflm_sde/derivation.md sec. 9)."""
+
+  @staticmethod
+  def g_t(t):
+    return 1.0 - t
+
+  @staticmethod
+  def g_prime_t(t):
+    return -torch.ones_like(t)
+
+class LogGScheduler(GScheduler):
+  @staticmethod
+  def g_t(t):
+    raise NotImplementedError('log GSchedule is not implemented yet.')
+
+  @staticmethod
+  def g_prime_t(t):
+    raise NotImplementedError('log GSchedule is not implemented yet.')
+
+def get_gscheduler(method: str):
+  if method == GT_Method.LINEAR:
+    return LinearGScheduler()
+  elif method == GT_Method.LOG:
+    return LogGScheduler()
+  else:
+    raise ValueError(f"method, {method}, is not supported.")
