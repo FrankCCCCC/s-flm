@@ -74,3 +74,30 @@ grid brackets it — small R decodes early/smoothly, R ≳ √d decodes late/sha
 Post-hoc analysis (compute node): loss-geometry L(t) per R on
 `outputs/eflm_rescale_sudoku/*/checkpoints/last.ckpt`, then RESULTS.md with
 the measured t50/slope vs the t*(R) table above.
+
+## Round 2 — truncation × radius (`sweep_trunc.py`)
+
+Round-1 result: the fixed schedule collapses at large R (transition moves late,
+schedule under-samples it); the adaptive schedule rescues it. Round 2 tests the
+**static** fix — truncate the fixed schedule at the R-dependent Eq. 17 bound so
+training never samples the trivial high-signal region:
+
+    ALPHA_MAX(R) = alpha_star_euclidean(V=12, embed_norm=R)   [noise_schedules.py]
+                 = 1 − t*(R)  [codebook signal analysis — identical to 3 decimals]
+
+| R | 1 | 2 | 5 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| α*(R) | 0.767 | 0.622 | 0.396 | 0.291 | 0.170 | 0.093 |
+
+- Grid: R ∈ {1, 2, 5, 8, 16, 32} × ALPHA_MAX ∈ {α*−0.1, α*, α*+0.1} (clipped to
+  [0.05, 0.95]) × LR ∈ {5e-4, 1e-3} × seed ∈ {1, 2, 3} → **108 jobs**
+  (`scripts/{train,sample}/sudoku/eflm_rescale_truncated.sh`; small R (0.1, 0.5)
+  skipped — α* ≥ 0.87 makes truncation a near-no-op; 3e-4 dropped — rarely best
+  in round 1).
+- Hypothesis: trunc at α*(R) recovers (much of) the ada gain at large R with a
+  *fixed* schedule; the ±0.1 offsets probe whether the NN-model bound, a tighter
+  band (cf. trunc_ada_sudoku round 3: the real transformer band sits below the
+  single-token bound), or a safety margin is best.
+- Baselines: round-1 `eflmrs_naive_*` (no trunc) and `eflmrs_ada_*` at the same
+  R/LR. Success = trunc(α*) > naive at R ≥ 5; parity with ada would show the
+  static bound suffices.

@@ -59,6 +59,12 @@ def job_body(ada, rho, lr, tdir, difficulty, seed):
         export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
         export TORCHDYNAMO_DISABLE=1
         export PATH={ENVBIN}:$PATH
+        # /home/sc3379 is full (100%); redirect temp + caches to node-local
+        # /tmp so wandb/matplotlib import-time temp dirs don't ENOSPC.
+        export TMPDIR=/tmp
+        export MPLCONFIGDIR=/tmp/mpl-$SLURM_JOB_ID
+        export WANDB_CACHE_DIR=/tmp/wandb-cache-$SLURM_JOB_ID
+        mkdir -p "$TMPDIR" "$MPLCONFIGDIR" "$WANDB_CACHE_DIR"
         cd {REPO}
         if [ -f {tdir}/eval/results.json ]; then
             echo "[$(date)] cell already completed elsewhere -> no-op"; exit 0

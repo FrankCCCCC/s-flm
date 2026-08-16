@@ -1,19 +1,24 @@
 #!/bin/bash
-# Naive S-FLM (spherical flow). Single TinyStories training run (slides jun25_2026).
+# E-FLM with fixed embedding norm R (rho_min = rho_max = RHO) + truncated
+# noise schedule. Single TinyStories training run. ALPHA_MAX should be the
+# R-dependent Eq. 17 bound alpha_star_euclidean(V=50257, embed_norm=RHO)
+# (noise_schedules.py); the default 0.840 is the RHO=1 value.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/sfm}"
-RUN_NAME="${RUN_NAME:-naive_geo_sfm}"
-WANDB_GROUP="${WANDB_GROUP:-naive_geo}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eflm_rescale_truncated}"
+RUN_NAME="${RUN_NAME:-eflm_rescale_truncated}"
+WANDB_GROUP="${WANDB_GROUP:-adv_geo}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 MAX_STEPS="${MAX_STEPS:-30000}"
 PER_GPU_BS="${PER_GPU_BS:-8}"
 CKPT_EVERY="${CKPT_EVERY:-2500}"
 LR="${LR:-3e-4}"
+RHO="${RHO:-1.0}"                   # fixed embedding norm R (rho_min = rho_max = RHO)
+ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257, embed_norm=RHO); null = no truncation
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
@@ -21,22 +26,24 @@ if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=t
 
 cd "${REPO_ROOT}"
 python -u -m main \
-    seed=${SEED:-1} \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small-sphere-dit \
     model.length=${SEQ_LEN:-1024} \
     model.init=ngpt \
-    algo=sfm \
+    algo=eflm \
     algo.renormalize_weights=False \
     algo.invert_time_convention=false \
     algo.self_conditioning="${SELF_COND}" \
+    algo.rho_min="${RHO}" \
+    algo.rho_max="${RHO}" \
     noise=log-linear \
+    noise.alpha_max=${ALPHA_MAX} \
+    optim.lr=${LR} \
     loader.global_batch_size=512 \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \
     loader.num_workers=8 \
-    optim.lr=${LR} \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \

@@ -1,5 +1,7 @@
 #!/bin/bash
-# MDLM — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval).
+# DUO — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval).
+# 180 steps + greedy last step per experiments/naive_ar_tinystories_s256/setup.md, matching
+# the step budget of mdlm.sh and the flow methods so GenPPL is compared at equal NFE.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export CUDA_VISIBLE_DEVICES=0
@@ -7,10 +9,10 @@ export CUDA_VISIBLE_DEVICES=0
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?set CKPT_PATH=/abs/path/to/checkpoint.ckpt}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/mdlm}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/duo}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
-STEPS="${STEPS:-180}"   # setup.md: MDLM 180 steps, matched to DUO/FLM/geo-flow NFE
+STEPS="${STEPS:-180}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
 RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}"   # false: GenPPL pass only
@@ -21,9 +23,10 @@ mkdir -p "${OUTPUT_DIR}"
 MARGS=(
     model=small
     model.length=${SEQ_LEN:-1024}
-    algo=mdlm
+    algo=duo-base
     sampler=ancestral
     sampler.steps=${STEPS}
+    sampler.noise_removal=greedy
 )
 
 # (1) validation perplexity
