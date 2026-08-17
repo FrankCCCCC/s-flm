@@ -21,6 +21,11 @@ ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257, embed_norm=RHO
 SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM Eq. 16)
 TAU_MAX="${TAU_MAX:-1.834}"          # autonomous horizon; must match training
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
+ETA="${ETA:-0.0}"                    # SDE noise scale; 0 = deterministic ODE
+GT_METHOD="${GT_METHOD:-linear}"     # SDE g(t): const / sqrt / linear / quad
+TEMPERATURE="${TEMPERATURE:-1.0}"
+NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
+RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}" # false: GenPPL pass only
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -42,10 +47,13 @@ MARGS=(
     sampler.velocity=${VELOCITY}
     sampler.top_k_velocity=${TOPK_VELOCITY}
     sampler.steps=${STEPS}
+    sampler.eta=${ETA}
+    sampler.gt_method=${GT_METHOD}
     sampler.noise_removal=greedy
 )
 
 # (1) validation perplexity
+if [ "${RUN_PPL_EVAL}" = "true" ]; then
 python -u -m main \
     mode=ppl_eval \
     data=tinystories \
@@ -62,6 +70,7 @@ python -u -m main \
     trainer.devices="${DEVICES}" \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}/ppl"
+fi
 
 # (2) generative perplexity + samples
 python -u -m main \
@@ -75,8 +84,8 @@ python -u -m main \
     eval.strict_loading=false \
     eval.compute_generative_perplexity=True \
     eval.results_json_path="${OUTPUT_DIR}/samples_genppl.json" \
-    sampler.num_sample_batches=4 \
-    sampler.temperature=1.0 \
+    sampler.num_sample_batches=${NUM_SAMPLE_BATCHES} \
+    sampler.temperature=${TEMPERATURE} \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
     trainer.num_nodes=1 \

@@ -15,6 +15,8 @@ TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
 ALPHA_MAX="${ALPHA_MAX:-0.121}"
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
+NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
+RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}" # false: GenPPL pass only
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -40,6 +42,7 @@ MARGS=(
 )
 
 # (1) validation perplexity
+if [ "${RUN_PPL_EVAL}" = "true" ]; then
 python -u -m main \
     mode=ppl_eval \
     data=tinystories \
@@ -56,6 +59,7 @@ python -u -m main \
     trainer.devices="${DEVICES}" \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}/ppl"
+fi
 
 # (2) generative perplexity + samples
 python -u -m main \
@@ -69,7 +73,7 @@ python -u -m main \
     eval.strict_loading=false \
     eval.compute_generative_perplexity=True \
     eval.results_json_path="${OUTPUT_DIR}/samples_genppl.json" \
-    sampler.num_sample_batches=4 \
+    sampler.num_sample_batches=${NUM_SAMPLE_BATCHES} \
     sampler.temperature=1.0 \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
