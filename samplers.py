@@ -759,6 +759,7 @@ class EFLMState(BaseState):
   prefix_embeds: torch.Tensor = None  # [B, P, d] sphere embeddings of prefix
   z_sc: torch.Tensor = None  # [B, L, d] self-cond carry (None when off / at k=0)
   eta: float = 0.0
+  gt_method: str = GT_Method.LINEAR
 
 @dataclass
 class EFLMContext:
@@ -900,6 +901,7 @@ class EFLMSampler(Sampler):
       eta = getattr(model.config.sampler, 'eta', 0.0)
     if eta is None or eta < 0:
       raise ValueError(f'EFLM SDE requires sampler.eta >= 0, got {eta}.')
+    gt_method = getattr(model.config.sampler, 'gt_method', GT_Method.LINEAR)
 
     if self.invert_time_convention:
       t_schedule = torch.linspace(eps, 1.0, num_steps + 1,
@@ -912,7 +914,8 @@ class EFLMSampler(Sampler):
       prefix_lengths=prefix_lengths,
       prefix_embeds=prefix_embeds,
       prefix_tokens=prefix_tokens,
-      eta=eta)
+      eta=eta,
+      gt_method=gt_method)
     return state
 
   def _last_step_decode(self, state, log_p):
@@ -1028,6 +1031,7 @@ class EFLMSampler(Sampler):
         dt=dt,
         eta=state.eta,
         norm_factor=norm_factor,
+        gt_method=state.gt_method,
       )
     state.xt[:, state.start_idx:] = x_new.to(state.xt.dtype)
     self._project_prefix(

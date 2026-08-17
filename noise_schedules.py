@@ -542,7 +542,11 @@ def get_noise(config):
 
 @dataclass
 class GT_Method:
+  CONST: str = "const"
+  SQRT: str = "sqrt"
+  P75: str = "p75"
   LINEAR: str = "linear"
+  QUAD: str = "quad"
   LOG: str = "log"
 
 class GScheduler(torch.nn.Module, abc.ABC):
@@ -571,6 +575,23 @@ class LinearGScheduler(GScheduler):
   def g_prime_t(t):
     return -torch.ones_like(t)
 
+class PowerGScheduler(GScheduler):
+  """g(t) = (1 - t)^p: p controls when the SDE injects noise along the flow
+  (1 - t = b, the noise fraction). p=0 injects uniformly up to the decode
+  point, p=0.5 is the regular family a(t) = eta*(1-t) of
+  experiments/eflm_sde/derivation.md sec. 9, larger p pushes the injection
+  toward the noise end."""
+
+  def __init__(self, p: float):
+    super().__init__()
+    self.p = float(p)
+
+  def g_t(self, t):
+    return (1.0 - t) ** self.p
+
+  def g_prime_t(self, t):
+    return -self.p * (1.0 - t) ** (self.p - 1.0)
+
 class LogGScheduler(GScheduler):
   @staticmethod
   def g_t(t):
@@ -583,6 +604,14 @@ class LogGScheduler(GScheduler):
 def get_gscheduler(method: str):
   if method == GT_Method.LINEAR:
     return LinearGScheduler()
+  elif method == GT_Method.CONST:
+    return PowerGScheduler(0.0)
+  elif method == GT_Method.SQRT:
+    return PowerGScheduler(0.5)
+  elif method == GT_Method.P75:
+    return PowerGScheduler(0.75)
+  elif method == GT_Method.QUAD:
+    return PowerGScheduler(2.0)
   elif method == GT_Method.LOG:
     return LogGScheduler()
   else:
