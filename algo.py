@@ -208,7 +208,6 @@ class DUO_BASE(trainer_base.UniformState):
     assert diffusion_loss.ndim == 2
     return diffusion_loss
 
-
 class SelfConditioning:
   """LangFlow-style self-conditioning (LangFlow paper §4.2, Alg. 1).
 
@@ -410,8 +409,9 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     return e_noisy
 
   def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
-    e_clean = self.backbone.get_rescaled_embeddings(
-      x, self.rho_min, self.rho_max)  # [B, L, d] Euclidean, norms rescaled
+    # e_clean = self.backbone.get_rescaled_embeddings(
+    #   x, self.rho_min, self.rho_max)  # [B, L, d] Euclidean, norms rescaled
+    e_clean = self._sc_embed_table()
     e_noisy = self._sample_prior(e_clean)
 
     if use_pure_noise:
@@ -496,8 +496,9 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
 
     return loss, t
 
+class SimpFLM(SelfConditioning, trainer_base.Diffusion):
   def _sc_embed_table(self):
-    # Radius-rescaled Euclidean embeddings: the space xt lives in (cf. q_xt).
+    # TODO: Radius-rescaled diagonal matrix as mebedding table
     return self.backbone.rescale_radius(
       self.backbone.sphere_embed.weight, self.rho_min, self.rho_max)
 

@@ -933,6 +933,10 @@ class EFLMSampler(Sampler):
     state.done = True
     return state
 
+  def _get_embed_table(self):
+    E = model._sc_embed_table().detach()  # [V, d] (radius-rescaled)
+    return E
+
   def _select_topk(self, log_p, E, k):
     log_p_k, top_idxs = torch.topk(log_p, k, dim=-1)
     return torch.log_softmax(log_p_k, dim=-1), F.embedding(top_idxs, E)
@@ -1004,7 +1008,7 @@ class EFLMSampler(Sampler):
     # Arguments to compute the velocity field:
     #  v = sum_k p_k * log_{x}(e_k).
     log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
-    E = model._sc_embed_table().detach()  # [V, d] (radius-rescaled)
+    E = self._get_embed_table()
     x = state.xt[:, state.start_idx:].to(E)  # [B, L, d]
 
     if self.lerp_float64:
@@ -1038,6 +1042,9 @@ class EFLMSampler(Sampler):
       state.xt, state.prefix_embeds, state.prefix_lengths)
     state.step_idx += 1
     return state
+
+class SimpFLM(EFLMSampler):
+  
 
 # ════════════════════════════════════════════════════════════════
 #  HFLM Samplers
