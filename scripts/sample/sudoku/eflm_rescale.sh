@@ -15,6 +15,7 @@ VELOCITY="${VELOCITY:-exact}"         # sample / exact
 TOPK_VELOCITY="${TOPK_VELOCITY:--1}"  # 1 = top-1, -1 = full vocab (no top-k)
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
+SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM variational bound)
 
 cd "${REPO_ROOT}"
 
@@ -31,6 +32,7 @@ python -u -m main \
     algo.self_conditioning="${SELF_COND}" \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
+    algo.snr_weighted_ce="${SNR_CE}" \
     noise=log-linear \
     sampler=eflm \
     sampler.noise_removal=greedy \

@@ -1,0 +1,6 @@
+type: autonomous
+eps: 1e-3
+tau_max: 3.0    # noise fraction floor exp(-tau_max); the flow is truncated here
+alpha_min: null
+alpha_max: null
+adaptive: false

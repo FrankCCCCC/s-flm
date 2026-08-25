@@ -13,9 +13,11 @@ DEVICES="${DEVICES:-1}"
 MAX_STEPS="${MAX_STEPS:-30000}"
 PER_GPU_BS="${PER_GPU_BS:-8}"
 CKPT_EVERY="${CKPT_EVERY:-2500}"
+LR="${LR:-3e-4}"
 
 cd "${REPO_ROOT}"
 python -u -m main \
+    seed=${SEED:-1} \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small \
@@ -25,6 +27,7 @@ python -u -m main \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \
     loader.num_workers=8 \
+    optim.lr=${LR} \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \

@@ -13,6 +13,7 @@ DEVICES="${DEVICES:-1}"
 MAX_STEPS="${MAX_STEPS:-30000}"
 PER_GPU_BS="${PER_GPU_BS:-8}"
 CKPT_EVERY="${CKPT_EVERY:-2500}"
+LR="${LR:-3e-4}"
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
@@ -20,6 +21,7 @@ if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=t
 
 cd "${REPO_ROOT}"
 python -u -m main \
+    seed=${SEED:-1} \
     data=tinystories \
     data.cache_dir="${CACHE_DIR}" \
     model=small-sphere-dit \
@@ -34,6 +36,7 @@ python -u -m main \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \
     loader.num_workers=8 \
+    optim.lr=${LR} \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \

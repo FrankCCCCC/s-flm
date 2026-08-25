@@ -18,6 +18,7 @@ import candi_utils
 import utils
 from geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, Coordinate, Geometry)
+from noise_schedules import GT_Method, get_gscheduler
 
 
 def sample_categorical(categorical_probs, gumbel_noise=None):
@@ -743,6 +744,23 @@ class SFMSampler(Sampler):
 #  EFLM Samplers
 # ════════════════════════════════════════════════════════════════
 
+@dataclass(kw_only=True)
+class EFLMState(BaseState):
+  # [B, L, d] float sphere embeddings during integration;
+  # replaced by [B, L] int token ids at the final decoding step.
+  xt: torch.Tensor
+  t_schedule: torch.Tensor
+  start_idx: int
+  step_idx: int
+  nfe: int
+  done: bool
+  prefix_lengths: torch.Tensor = None  # [B] per-sample lengths
+  prefix_tokens: torch.Tensor = None  # [B, L]
+  prefix_embeds: torch.Tensor = None  # [B, P, d] sphere embeddings of prefix
+  z_sc: torch.Tensor = None  # [B, L, d] self-cond carry (None when off / at k=0)
+  eta: float = 0.0
+  gt_method: str = GT_Method.LINEAR
+
 @dataclass
 class EFLMContext:
   temperature: float = 0.0
@@ -769,6 +787,30 @@ def elfm_compute_velocity(x, E, log_p, mode, eps):
   else:
     raise ValueError(f'Unknown velocity mode: {mode}')
 
+def eflm_timestep(alpha_t, invert_time_convention, eps):
+  """
+  timestep is monotonic increasing [0, 1], 0: noise, 1: target
+  """
+  if invert_time_convention:
+    # alpha_t is the noise fraction, decreasing along schedule
+    return (1 - alpha_t).clamp(min=eps)
+  else:
+    # alpha_t is the signal fraction, increasing along schedule
+    return alpha_t.clamp(min=eps)
+
+def eflm_norm_factor(alpha_t, invert_time_convention, eps):
+  """
+  norm factor = 1 - timestep, the noise fraction: the denominator of
+  sfm_step_size, so dt * norm_factor recovers the raw timestep interval
+  and velocity / norm_factor the flow-matching velocity.
+  """
+  if invert_time_convention:
+    # alpha_t is the noise fraction, decreasing along schedule
+    return alpha_t.clamp(min=eps)
+  else:
+    # alpha_t is the signal fraction, increasing along schedule
+    return (1 - alpha_t).clamp(min=eps)
+    
 class EFLMSampler(Sampler):
   """Euclidean flow-matching sampler: the straight-line analog of SFMSampler.
 
@@ -828,9 +870,16 @@ class EFLMSampler(Sampler):
     v = v + mean_t
     return v
 
-  def init_state(self, model, num_samples, *,
-                 num_steps=None, eps=1e-5, prefix_tokens=None,
-                 prefix_lengths=None):
+  def init_state(
+    self,
+    model,
+    num_samples: int,
+    *,
+    num_steps: int = None,
+    eps: float = 1e-5,
+    prefix_tokens: torch.Tensor = None,
+    prefix_lengths: torch.Tensor = None,
+    eta: float = None):
     self._validate_prefix_args(prefix_tokens, prefix_lengths)
     xt = EFLMSampler.gaussian(
       (num_samples, model.num_tokens, model.backbone.embed_dim),
@@ -848,6 +897,11 @@ class EFLMSampler(Sampler):
 
     if num_steps is None:
       num_steps = model.config.sampler.steps
+    if eta is None:
+      eta = getattr(model.config.sampler, 'eta', 0.0)
+    if eta is None or eta < 0:
+      raise ValueError(f'EFLM SDE requires sampler.eta >= 0, got {eta}.')
+    gt_method = getattr(model.config.sampler, 'gt_method', GT_Method.LINEAR)
 
     if self.invert_time_convention:
       t_schedule = torch.linspace(eps, 1.0, num_steps + 1,
@@ -855,11 +909,13 @@ class EFLMSampler(Sampler):
     else:
       t_schedule = torch.linspace(1.0, eps, num_steps + 1,
                                   device=model.device)
-    state = SFMState(xt=xt, t_schedule=t_schedule,
+    state = EFLMState(xt=xt, t_schedule=t_schedule,
       start_idx=start_idx, step_idx=0, nfe=0, done=False,
       prefix_lengths=prefix_lengths,
       prefix_embeds=prefix_embeds,
-      prefix_tokens=prefix_tokens)
+      prefix_tokens=prefix_tokens,
+      eta=eta,
+      gt_method=gt_method)
     return state
 
   def _last_step_decode(self, state, log_p):
@@ -890,6 +946,39 @@ class EFLMSampler(Sampler):
     _, alpha_s = model.noise(state.t_schedule[state.step_idx + 1])
     return sfm_step_size(
       alpha_t, alpha_s, self.invert_time_convention, self.eps)
+
+  def _sde_update(
+    self,
+    timestep: torch.Tensor,
+    x: torch.FloatTensor,
+    velocity: torch.FloatTensor,
+    dt: torch.Tensor,
+    norm_factor: torch.Tensor,
+    eta: float = 0.0,
+    gt_method: str = GT_Method.LINEAR,
+  ):
+    r"""
+    Assume time is monotonic increasing T >= t
+    velocity: un-normalized, X_T - X_t
+    dt: normalized time interval \frac{\Delta t}{1 - t}
+    norm_factor: 1 - t (= the noise fraction), so dt * norm_factor and
+    velocity / norm_factor recover the flow-time quantities of the
+    Euler--Maruyama step (experiments/eflm_sde/derivation.md secs. 7-8).
+    """
+    # Calibrate the dt and velocity back to regular definition.
+    dt = dt * norm_factor
+    velocity = velocity / norm_factor
+
+    gt = get_gscheduler(method=gt_method).g_t(timestep)
+    wiener_proc = dt.sqrt() * torch.randn_like(x)
+    diffusion = eta ** 0.5 * gt * wiener_proc
+
+    coef = (eta * gt ** 2) / (
+      2 * (1 - timestep).clamp(min=self.eps))
+    drift = (1 + coef * timestep) * velocity - coef * x
+
+    x_update = x + drift * dt + diffusion
+    return x_update
 
   def step(self, model, state):
     num_steps = len(state.t_schedule) - 1
@@ -928,9 +1017,22 @@ class EFLMSampler(Sampler):
       log_p_v = log_p_window
 
     vel = self._compute_velocity(x, E, log_p_v)
-
     dt = self._get_step_size(model, state)
-    x_new = x + dt * vel
+
+    if state.eta == 0.0:
+      x_new = x + dt * vel
+    else:
+      timestep_t = eflm_timestep(alpha_t=alpha_t, invert_time_convention=self.invert_time_convention, eps=self.eps)
+      norm_factor = eflm_norm_factor(alpha_t=alpha_t, invert_time_convention=self.invert_time_convention, eps=self.eps)
+      x_new = self._sde_update(
+        timestep=timestep_t,
+        x=x,
+        velocity=vel,
+        dt=dt,
+        eta=state.eta,
+        norm_factor=norm_factor,
+        gt_method=state.gt_method,
+      )
     state.xt[:, state.start_idx:] = x_new.to(state.xt.dtype)
     self._project_prefix(
       state.xt, state.prefix_embeds, state.prefix_lengths)

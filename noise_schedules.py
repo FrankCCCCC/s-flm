@@ -5,6 +5,7 @@ import math
 import numpy as np
 import torch
 import torch.nn.functional as F
+from dataclass_patch import dataclass
 from scipy.interpolate import PchipInterpolator
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
@@ -65,6 +66,34 @@ class LogLinear(NoiseSchedule):
     return -(1 - self.eps) * torch.ones_like(t)
 
 
+class Autonomous(NoiseSchedule):
+  """alpha_t = 1 - (1 - eps) * exp(-tau_max * (1 - t)): the autonomous clock.
+
+  Re-parameterizing the bridge time as tau = -log((T - t) / T)
+  (slides/jul09_2026) turns the singular bridge drift (y - X_t)/(T - t) into
+  the time-invariant v(X) = y - X. Under that clock the noise fraction decays
+  exponentially, 1 - alpha_t = exp(-tau), so sampling uniformly in t is
+  uniform in tau: every Euler step advances the flow by the same d_tau. The
+  target is reached only as tau -> infinity, hence the truncation tau_max
+  (noise-fraction floor exp(-tau_max)).
+
+  MDLM convention (invert_time_convention=false): alpha_t is the signal level,
+  clean at t = 0. The eps floor mirrors LogLinear (alpha_t(1) = eps) so the
+  time conditioning -log(alpha_t) stays finite at the pure-noise end.
+  """
+  def __init__(self, eps, tau_max):
+    super().__init__()
+    self.eps = eps
+    self.tau_max = tau_max
+
+  def alpha_t(self, t):
+    return 1 - (1 - self.eps) * torch.exp(-self.tau_max * (1 - t))
+
+  def alpha_prime_t(self, t):
+    return -((1 - self.eps) * self.tau_max
+             * torch.exp(-self.tau_max * (1 - t)))
+
+
 def alpha_star_sphere(vocab_size, dim, delta=0.1):
   """Truncation bound for S-FLM (Eq. 17, hyperspherical-flows paper).
 
@@ -81,7 +110,7 @@ def alpha_star_sphere(vocab_size, dim, delta=0.1):
 
 
 def alpha_star_euclidean(vocab_size, delta=0.1, noise_std=1.0,
-                         embed_norm=1.0):
+                         embed_norm=1.0, auto_clock: bool=False):
   """Truncation bound for EFLM (flat-space analog of Eq. 17).
 
   Tractable model: embeddings i.i.d. uniform on the sphere of
@@ -97,10 +126,24 @@ def alpha_star_euclidean(vocab_size, delta=0.1, noise_std=1.0,
   1/sqrt(d) impostor concentration). Much larger than the sphere
   bound because the N(0, I) noise norm (sqrt(d)) dwarfs the
   unit-norm embeddings.
+
+  auto_clock=False returns alpha* itself, the SIGNAL level at the
+  decode point (use as noise.alpha_max, MDLM convention).
+  auto_clock=True returns the same bound on the AUTONOMOUS clock
+  (noise=autonomous), i.e. the horizon tau_max = tau* at which the
+  flow stops. That clock runs on the NOISE fraction b_t = 1 -
+  alpha_t = exp(-tau) -- its exponential decay is what makes the
+  drift time-invariant -- so the decode point in tau is
+    tau* = -log b* = -log(1 - alpha*) = log(1 + z),
+  NOT -log(alpha*): the latter is the horizon of the signal level
+  and mirrors z -> 1/z, inverting the R dependence (it returns
+  tau*(1) for R=28 and vice versa).
   """
   z = (noise_std / embed_norm) * math.sqrt(
     2 * math.log(2 * (vocab_size - 1) / delta))
-  return z / (1 + z)
+  if not auto_clock:
+    return z / (1 + z)
+  return math.log1p(z)
 
 
 def alpha_star_hyperbolic(vocab_size, dim, delta=0.1, prior_cov=0.25,
@@ -458,6 +501,8 @@ def get_noise(config):
     noise = LogLinear(noise_config.eps)
   elif noise_config.type == 'cosine-squared':
     noise = CosineSquared(noise_config.eps)
+  elif noise_config.type == 'autonomous':
+    noise = Autonomous(noise_config.eps, noise_config.tau_max)
   else:
     raise ValueError(f'Unknown noise type: {noise_config.type}')
 
@@ -494,3 +539,80 @@ def get_noise(config):
       log_importance=noise_config.get('adaptive_log_importance', False))
 
   return noise
+
+@dataclass
+class GT_Method:
+  CONST: str = "const"
+  SQRT: str = "sqrt"
+  P75: str = "p75"
+  LINEAR: str = "linear"
+  QUAD: str = "quad"
+  LOG: str = "log"
+
+class GScheduler(torch.nn.Module, abc.ABC):
+  def forward(self, t):
+    return self.g_prime_t(t), self.g_t(t)
+
+  @abc.abstractmethod
+  def g_t(self, t):
+    pass
+
+  @abc.abstractmethod
+  def g_prime_t(self, t):
+    pass
+
+class LinearGScheduler(GScheduler):
+  """Diffusion scale g(t) of the SDE sampler, as a function of the
+  flow-matching time t (t=0 noise, t=1 data). LINEAR g(t) = 1 - t keeps the
+  drift regular -- eta*g^2(t)/(2(1-t)) = eta*(1-t)/2 -- and the injected
+  noise vanishes as t -> 1 (cf. experiments/eflm_sde/derivation.md sec. 9)."""
+
+  @staticmethod
+  def g_t(t):
+    return 1.0 - t
+
+  @staticmethod
+  def g_prime_t(t):
+    return -torch.ones_like(t)
+
+class PowerGScheduler(GScheduler):
+  """g(t) = (1 - t)^p: p controls when the SDE injects noise along the flow
+  (1 - t = b, the noise fraction). p=0 injects uniformly up to the decode
+  point, p=0.5 is the regular family a(t) = eta*(1-t) of
+  experiments/eflm_sde/derivation.md sec. 9, larger p pushes the injection
+  toward the noise end."""
+
+  def __init__(self, p: float):
+    super().__init__()
+    self.p = float(p)
+
+  def g_t(self, t):
+    return (1.0 - t) ** self.p
+
+  def g_prime_t(self, t):
+    return -self.p * (1.0 - t) ** (self.p - 1.0)
+
+class LogGScheduler(GScheduler):
+  @staticmethod
+  def g_t(t):
+    raise NotImplementedError('log GSchedule is not implemented yet.')
+
+  @staticmethod
+  def g_prime_t(t):
+    raise NotImplementedError('log GSchedule is not implemented yet.')
+
+def get_gscheduler(method: str):
+  if method == GT_Method.LINEAR:
+    return LinearGScheduler()
+  elif method == GT_Method.CONST:
+    return PowerGScheduler(0.0)
+  elif method == GT_Method.SQRT:
+    return PowerGScheduler(0.5)
+  elif method == GT_Method.P75:
+    return PowerGScheduler(0.75)
+  elif method == GT_Method.QUAD:
+    return PowerGScheduler(2.0)
+  elif method == GT_Method.LOG:
+    return LogGScheduler()
+  else:
+    raise ValueError(f"method, {method}, is not supported.")

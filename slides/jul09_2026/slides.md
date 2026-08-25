@@ -185,6 +185,13 @@ $$
 - This stretches the finite horizon $[0, T)$ onto $[0, \infty)$
 - Key relation for the change of variables: $\;dt = (T-t)\,d\tau$
 
+$$
+\frac{d \tau}{d t} 
+= - \frac{1}{\frac{T-t}{T}} \frac{1}{dt} \frac{T-t}{T}
+= \frac{1}{\frac{T-t}{T}} \frac{1}{T}
+= \frac{1}{T-t}
+$$
+
 ---
 
 ## The Result: An Autonomous Flow
