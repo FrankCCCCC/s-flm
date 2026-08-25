@@ -136,3 +136,95 @@ EFLM eta-curves on the baseline T-curves from
 
 Verify: smoke sample_eval on a compute node (each gt at eta>0, small batch) —
 runs clean, entropy responds to eta, no NaN.
+
+---
+
+## Phase 3 — the temperature frontier line (setup.md "Frontier Line Evaluation")
+
+`setup.md` adds **{Rescale + Auto + Trunc + EFLM}** to the {MDLM, DUO, FLM}
+Gen. PPL / entropy frontier of `experiments/naive_ar_tinystories_s256`, swept
+over sampling temperature instead of `eta`. Sweep:
+`experiments/eflm_sde/tfrontier_sweep.py`.
+
+**Why `top_k_velocity = -1` is the right (and paper-faithful) setting.**
+Temperature enters as `logits / T` in `trainer_base.Diffusion.forward`. Under
+`top_k_velocity = 1` the velocity is `E[argmax] - x` and the last step is
+`argmax`, both invariant to a positive rescaling of the logits, so T cannot
+move the sample. Measured (seed 1, NFE 16, 32 samples):
+
+| arm | T=0.50 | T=1.00 | T=1.20 |
+|---|---|---|---|
+| `top_k_v = 1` | 13.54 @ H 3.803 | 13.54 @ H 3.803 | 13.87 @ H 3.802 |
+| `top_k_v = -1` | 14.72 @ H 4.137 | 28.78 @ H 4.469 | 50.30 @ H 4.587 |
+
+(T=0.5 is bit-identical to T=1.0 — 0.5 is a power of two so `logits/T` is
+exact; T=1.2 differs only by float rounding flipping near-ties.) With
+`top_k_v = -1` the velocity is `softmax(logits/T) @ E - x`, so T reshapes the
+target at every Euler step and traces a curve. This is exactly the paper's
+"S-FLM exact velocity" arm; App. C.8 states that the k=1 velocity variant
+"does not depend on the temperature, so it appears as a single marker rather
+than a curve" — that marker is the eta=0 ODE cell of phase 1/2.
+
+**Protocol** — `scripts/sample/tinystories/eflm_rescale_auto_truncation.sh`
+on the same frozen 3-seed checkpoints `eflmratr_lr-1e-3_r-0.5_m-1.0{,_s2,_s3}`
+(R=0.5, TAU_MAX=2.4436, ALPHA_MAX=null, SNR_CE=false, self-cond off, seq 256):
+`VELOCITY=exact TOPK_VELOCITY=-1 ETA=0.0 GT_METHOD=linear`,
+`noise_removal=greedy`, 512 samples/cell (EVAL_BS 16 x 32), `RUN_PPL_EVAL=false`,
+eval seed fixed at 1 so the prior draw is shared across T.
+
+**Grid** — 3 seeds x NFE {1, 4, 8, 16, 32, 64, 128, 256} x T {0.50, 0.55, ...,
+1.20} = 360 cells, plus the 3 missing NFE=1 eta=0 cells that complete the
+k=1 marker arm across all eight panels.
+
+**Alignment with the paper (App. C.8)** — matched: 15 evenly spaced
+T in [0.50, 1.20]; N = 512 samples/cell; Gen. PPL from a pretrained GPT-2-large
+with tokens at or after the first end-of-text masked; per-sample unigram
+entropy in nats (Eq. 48) averaged over the cell; one (H, PPL) point per cell;
+exact / k=1 velocity variants drawn as curve / marker. Deliberate deviations:
+
+1. NFE {1, ..., 256} rather than {32, ..., 1024} — this is TinyStories at
+   seq 256, not OpenWebText at seq 1024, and the repo's baseline frontier
+   already uses this grid.
+2. The paper's visible window (4.5 <= H <= 6.0, PPL <= 500) is OWT-specific;
+   TinyStories seq-256 entropies sit near 3.7-4.7, so the plot shows the full
+   measured range instead.
+3. `metrics.py` accumulates Gen. PPL corpus-level, `exp(sum nll / sum tokens)`,
+   rather than the paper's mean over per-sample perplexities (Eq. 47). This is
+   the MDLM-codebase convention and is applied identically to every method
+   here, so the curves are mutually comparable; only absolute values shift.
+
+**Hypotheses**
+
+- H4: T is a genuine diversity knob under exact velocity — entropy rises
+  monotonically with T and Gen. PPL with it, giving EFLM a real frontier line
+  (confirmed at NFE 16 by the smoke above; the sweep tests all NFE).
+- H5: the exact-velocity T-curve is *worse* than the eta-curve of phase 2 at
+  matched entropy, because full-vocab velocity blurs the target toward the
+  embedding mean whereas the SDE keeps a top-1 target and adds isotropic
+  noise. If so, the SDE remains the recommended diversity mechanism and the
+  T-curve is the paper-protocol reference point.
+- H6: the k=1 marker lies below (better than) the T-curve at its own entropy,
+  reproducing the paper's finding that top-1 velocity decoding dominates
+  unrestricted decoding at matched budget.
+
+**Compute** — measured ~0.8 s per batch-step (32 batches of 16) for the
+float64 full-vocab velocity einsum, ~6x the top-1 cost; a cell costs
+~40 s + 25.6 s x NFE. 45 SLURM jobs (one per seed x NFE, split into 5-T chunks
+for NFE >= 64 so the ~110 min NFE-256 cells run in parallel), ~167 GPU-h,
+~10 h wall on `thickstun,desa`.
+
+**Outputs** — `outputs/eflm_sde/sd-{seed}/tfrontier/nfe-{nfe}_t-{temp}/`.
+Figure and tables via
+`visualization/genppl_entropy_frontier_line.py --eflm-dir outputs/eflm_sde`,
+written to `experiments/naive_ar_tinystories_s256/` per setup.md.
+
+**Phase-3 verdict (360 cells + 3 markers, 0 failures): COMPLETE.**
+H4 **confirmed** — entropy is strictly monotone in T for all 24 (NFE, seed) curves.
+H5 **refuted** — the temperature knob beats the SDE knob by 7-92% throughout
+H >= 4.2 (NFE 16-64); the SDE wins only below H ~= 4.1, which temperature
+cannot reach. The two knobs cover disjoint bands and neither traces EFLM's
+full frontier alone. H6 **partially confirmed** — the k=1 marker has lower
+Gen. PPL than the exact-velocity curve at every NFE (11.33 vs 12.44 at
+NFE 256), but at ~0.3 nats lower entropy, so neither Pareto-dominates; the
+SDE Pareto-dominates the k=1 marker outright at NFE >= 16. Full analysis:
+`experiments/naive_ar_tinystories_s256/FRONTIER_RESULTS.md` §7.
