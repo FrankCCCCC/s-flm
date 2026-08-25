@@ -42,7 +42,21 @@ RHOS = ['1', '2', '5', '8', '16', '32']
 OFFSETS = ['-0.1', '0', '0.1']
 LRS = ['5e-4', '1e-3']
 SEEDS = ['1', '2', '3']
-STEM = 'eflm_rescale_truncated'
+# arm -> (train/sample script stem, tag prefix)
+ARMS = {'trunc': ('eflm_rescale_truncated', 'eflmrst'),
+        'trunc_ada': ('eflm_rescale_adaptive', 'eflmrsta')}
+
+# round 3 (--round3): wide absolute ALPHA_MAX points per R to localize the
+# empirical optimum alpha_opt(R) and test it against the prediction alpha*(R).
+# Round 2 covered alpha*±0.1; round-1 naive cells are the no-truncation
+# (alpha -> 1) endpoint of each curve.
+ROUND3 = {
+    '2': ['0.2', '0.35', '0.85'],
+    '5': ['0.15', '0.65', '0.85'],
+    '8': ['0.1', '0.55', '0.75'],
+    '16': ['0.4', '0.6', '0.8'],
+    '32': ['0.3', '0.5', '0.7'],
+}
 
 
 def alpha_max_of(rho, offset):
@@ -50,8 +64,8 @@ def alpha_max_of(rho, offset):
     return f'{min(0.95, max(0.05, a)):.3f}'
 
 
-def tag_of(rho, am, lr, seed):
-    return f'eflmrst_r-{rho}_am-{am}_lr-{lr}_d-hard_rs{seed}'
+def tag_of(rho, am, lr, seed, arm='trunc'):
+    return f'{ARMS[arm][1]}_r-{rho}_am-{am}_lr-{lr}_d-hard_rs{seed}'
 
 
 def active_jobnames():
@@ -63,7 +77,8 @@ def active_jobnames():
         return set()
 
 
-def job_body(rho, am, lr, tdir, seed):
+def job_body(rho, am, lr, tdir, seed, arm='trunc'):
+    STEM = ARMS[arm][0]
     return textwrap.dedent(f'''\
         export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
         export SLURM_JOB_NAME=bash
@@ -98,6 +113,14 @@ def job_body(rho, am, lr, tdir, seed):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--nice', type=int, default=0)
+    ap.add_argument('--arm', choices=list(ARMS), default='trunc')
+    ap.add_argument('--partition', default='thickstun,desa')
+    ap.add_argument('--nodelist', default=None,
+                    help='pin jobs to a node, e.g. kuleshov-compute-03 (A5000)')
+    ap.add_argument('--round3', action='store_true',
+                    help='emit the ROUND3 absolute ALPHA_MAX grid instead of '
+                         'the alpha*+offset grid')
     ap.add_argument('--rhos', nargs='+', default=RHOS, choices=RHOS)
     ap.add_argument('--offsets', nargs='+', default=OFFSETS, choices=OFFSETS)
     ap.add_argument('--lrs', nargs='+', default=LRS, choices=LRS)
@@ -110,33 +133,46 @@ def main():
     if not args.dry_run:
         os.makedirs(logs, exist_ok=True)
 
-    cells = [(rho, alpha_max_of(rho, off), lr, seed)
-             for rho, off, lr, seed in itertools.product(
-                 args.rhos, args.offsets, args.lrs, args.seeds)]
-    print(f'eflm_rescale_sudoku trunc: {len(cells)} cells '
-          f'({len(args.rhos)} R x {len(args.offsets)} offset x '
-          f'{len(args.lrs)} lr x {len(args.seeds)} seed)')
+    if args.round3:
+        cells = [(rho, f'{float(a):.3f}', lr, seed)
+                 for rho in args.rhos if rho in ROUND3
+                 for a in ROUND3[rho]
+                 for lr, seed in itertools.product(args.lrs, args.seeds)]
+        print(f'eflm_rescale_sudoku trunc round3: {len(cells)} cells '
+              f'({sum(1 for r in args.rhos if r in ROUND3)} R x 3 alpha x '
+              f'{len(args.lrs)} lr x {len(args.seeds)} seed)')
+    else:
+        cells = [(rho, alpha_max_of(rho, off), lr, seed)
+                 for rho, off, lr, seed in itertools.product(
+                     args.rhos, args.offsets, args.lrs, args.seeds)]
+        print(f'eflm_rescale_sudoku trunc: {len(cells)} cells '
+              f'({len(args.rhos)} R x {len(args.offsets)} offset x '
+              f'{len(args.lrs)} lr x {len(args.seeds)} seed)')
     if args.dry_run:
         for rho, am, lr, seed in cells:
-            print(f'  {tag_of(rho, am, lr, seed)}')
+            print(f'  {tag_of(rho, am, lr, seed, args.arm)}')
         rho, am, lr, seed = cells[0]
         print('\n--- example body (first cell) ---\n'
-              + job_body(rho, am, lr, f'{out}/{tag_of(rho, am, lr, seed)}', seed))
+              + job_body(rho, am, lr,
+                         f'{out}/{tag_of(rho, am, lr, seed, args.arm)}',
+                         seed, args.arm))
         return
 
     active = active_jobnames()
+    extra = {'nodelist': args.nodelist} if args.nodelist else {}
     n_sub = n_skip = 0
     for rho, am, lr, seed in cells:
-        tag = tag_of(rho, am, lr, seed)
+        tag = tag_of(rho, am, lr, seed, args.arm)
         if os.path.exists(f'{out}/{tag}/eval/results.json') or tag in active:
             n_skip += 1
             continue
         slurm = Slurm(job_name=tag, output=f'{logs}/{tag}_%j.log',
-                      partition='thickstun,desa', exclude='desa-compute-01',
+                      partition=args.partition, exclude='desa-compute-01',
                       gres='gpu:1', ntasks=1, cpus_per_task=2, mem='16G',
-                      time='06:00:00')
-        jid = slurm.sbatch(job_body(rho, am, lr, f'{out}/{tag}', seed),
-                           sbatch_cmd='sbatch --requeue', verbose=False)
+                      time='06:00:00', **extra)
+        jid = slurm.sbatch(job_body(rho, am, lr, f'{out}/{tag}', seed, args.arm),
+                           sbatch_cmd=f'sbatch --nice={args.nice} --requeue',
+                           verbose=False)
         print(f'  submitted {tag}: job {jid}')
         n_sub += 1
     print(f'submitted {n_sub}, skipped {n_skip}')

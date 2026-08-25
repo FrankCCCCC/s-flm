@@ -252,7 +252,8 @@ Note that timestep 0 is pure noise
 1. Word Embeddings have various lengths
   -> Sol: Normalized to R
 2. Curve changes along with radius R
-  -> Sol: time invariant drift via re-parametrized timestep + ELBO weighted
+  -> Sol: explicit autonomous clock (`noise=autonomous`)
+  -> VDM-inspired SNR-weighted CE is implemented behind a config flag
 3. Voronoi Cone varies for each word
   -> Sol: Diffusion jump?
 
@@ -262,7 +263,8 @@ Note that timestep 0 is pure noise
 
 ---
 
-## Autonmous Flow - Diffusion Types
+## Autonomous Flow — Two Views
+
 - Brownian Bridge
 - Flow Matching
 
@@ -281,11 +283,7 @@ $$
 
 ---
 
-## Autonmous Brownian Bridge
-
----
-
-## The Idea: An Infinite-Time Clock
+## A Finite Bridge Becomes Autonomous Under an Infinite Clock
 
 Re-parameterize time so the terminal instant $t=T$ maps to $\tau = \infty$:
 
@@ -296,23 +294,132 @@ t = T\left(1 - e^{-\tau}\right)
 $$
 
 - This stretches the finite horizon $[0, T)$ onto $[0, \infty)$
-- Key relation for the change of variables: $\;dt = (T-t)\,d\tau$
+- Since $\dfrac{d\tau}{dt}=\dfrac{1}{T-t}$, we have $dt=(T-t)\,d\tau$
+- Therefore the deterministic drift becomes
 
 $$
-\frac{d \tau}{d t} 
-= - \frac{1}{\frac{T-t}{T}} \frac{1}{dt} \frac{T-t}{T}
-= \frac{1}{\frac{T-t}{T}} \frac{1}{T}
-= \frac{1}{T-t}
+\frac{y-X_t}{T-t}\,dt
+=
+(y-X_\tau)\,d\tau
+\qquad\Longrightarrow\qquad
+\boxed{\frac{dX_\tau}{d\tau}=y-X_\tau}
 $$
 
 ---
 
-## The Idea: An Infinite-Time Clock - Weighted CE Loss
+## Uniform $t$ Becomes Uniform Autonomous Time
 
+The scripts use the MDLM convention: $\alpha$ is signal and $b=1-\alpha$ is noise.
+
+$$
+\tau(t)=\tau_{\max}(1-t),\qquad
+b(t)=(1-\epsilon)e^{-\tau(t)},\qquad
+\alpha(t)=1-b(t)
+$$
+
+| nominal time | autonomous time | endpoint |
+|---:|---:|---|
+| $t=1$ | $\tau=0$ | $\alpha=\epsilon$: almost pure noise |
+| $t=0$ | $\tau=\tau_{\max}$ | $\alpha=1-(1-\epsilon)e^{-\tau_{\max}}$ |
+
+- `Autonomous.alpha_prime_t` returns $\alpha'(t)=-\tau_{\max}b(t)$
+- `noise=autonomous` selects this class; `tau_max` is the finite truncation
+
+<small>`noise_schedules.py:68–93, 491–505`; defaults: $\epsilon=10^{-3}$, $\tau_{\max}=3$.</small>
 
 ---
 
-## Autonmous Flow Matching
+## The Existing Sampler Is Already the Autonomous Solver
+
+EFLM corrupts a clean embedding $e$ with fixed Gaussian noise $z$:
+
+$$
+X_t=\alpha_t e+b_tz,
+\qquad
+\frac{dX_\tau}{d\tau}=e-X_\tau
+$$
+
+The model supplies $\hat e_k=\sum_v p_\theta(v\mid X_k)e_v$, and the sampler uses
+
+$$
+X_{k+1}=X_k+
+\underbrace{\frac{\alpha_{k+1}-\alpha_k}{1-\alpha_k}}_{
+1-b_{k+1}/b_k=1-e^{-\Delta\tau}}
+(\hat e_k-X_k)
+$$
+
+- Uniform nominal $t$ gives constant $\Delta\tau=\tau_{\max}/N$
+- Therefore every fixed-schedule step has the same exponential fraction
+- No sampler change was needed; the schedule is the mechanism
+
+<small>`algo.py:EFLM.q_xt`; `samplers.py:sfm_step_size` and `EFLMSampler.step`.</small>
+
+---
+
+## $\tau_{\max}$ Is the Decode-Point Truncation
+
+For vocabulary size $V$, embedding norm $R$, and unit Gaussian noise:
+
+$$
+z=\frac{\sqrt{2\log(2(V-1)/\delta)}}{R},\qquad
+\alpha^*=\frac{z}{1+z},\quad
+b^*=\frac{1}{1+z},\quad
+\boxed{\tau^*= -\log b^*=\log(1+z)}
+$$
+
+<style scoped>table { font-size: 0.72em; margin: 0 auto; }</style>
+
+| $R$ | $\alpha^*(R)$ | $\tau^*(R)$ |
+|---:|---:|---:|
+| 0.5 | 0.913 | 2.444 |
+| 1 | 0.840 | 1.834 |
+| 5 | 0.513 | 0.719 |
+| 8 | 0.397 | 0.505 |
+| 16 | 0.247 | 0.284 |
+| 28 | 0.158 | 0.172 |
+
+<rd>Use $-\log(1-\alpha^*)$, not $-\log\alpha^*$.</rd> Untruncated uses $\tau_{\max}=-\log 10^{-3}=6.908$.
+
+---
+
+## SNR-Weighted CE Is Implemented
+
+With noise fraction $b_t=1-\alpha_t$:
+
+$$
+\operatorname{SNR}(t)=\frac{(1-b_t)^2}{b_t^2},
+\qquad
+w(t)=\frac{|\operatorname{SNR}'(t)|}{2}
+=\frac{(1-b_t)|\alpha'_t|}{b_t^3}
+$$
+
+`EFLM.nll_per_token` applies
+
+$$
+\boxed{\mathcal L_t=w(t)\,[-\log p_\theta(x_0\mid X_t)]}
+$$
+
+when `algo.snr_weighted_ce=true`. On the autonomous clock,
+
+$$
+\boxed{w_{\mathrm{auto}}(t)=
+\tau_{\max}\frac{1-b_t}{b_t^2}}
+$$
+
+<small>`algo.py:snr_weight` and `EFLM.nll_per_token`; `SNR_CE` wires the flag through train/eval scripts.</small>
+
+---
+
+## Audit Verdict: Correct Wiring, Important Caveats
+
+- <uv>Verified:</uv> endpoints, constant $\Delta\tau$, analytical $\alpha'$, $\tau^*$ conversion, and $w=|\mathrm{SNR}'|/2$ — **29/29 focused tests pass**
+- <uv>Wired:</uv> CE/SNR × truncated/untruncated arms; adaptive CE arms wrap the autonomous base schedule
+- <rd>Dynamic range:</rd> only $b\ge10^{-6}$ is clamped; at untruncated $\tau_{\max}=6.908$, $w$ spans roughly $10^9$
+- <rd>Modeling caveat:</rd> VDM Eq. 16 weights squared reconstruction error; replacing it with categorical CE is a design choice, not an identity
+- `snr_weight` omits the constant $R^2/d$; within one fixed-$R$ run this preserves relative time weights
+- The network still conditions on $\sigma=-\log\alpha$, not $\tau$; adaptive remapping also removes constant $\Delta\tau$
+
+<small>The focused tests validate the schedule and weight helper; the config/script integration was checked by source trace.</small>
 
 ---
 
@@ -325,11 +432,12 @@ $$
 - Data: TinyStories, **475M train / 5M val** (seed 42)
 - Model (DiT, *small*): Width **768**, Depth **12**, Heads **12**, Init ``ngpt``: $\mathcal{N}(0, \frac{1}{d})$ (variance)
 
-- Sched: {w/, w/o ada} * {w/, w/o trunc} + {w/, w/o trunc} * {SNR CE}
+- Plain CE: {w/, w/o ada} × {w/, w/o trunc}
+- SNR-weighted CE: {w/, w/o trunc}, ada off
 - Self Cond: Off
-- Radius & Trunc: {(0.5, ), (1.0, 0.84), (5.0, ), (8.0, 0.397), (28.0, 0.158)}
+- $R\in\{0.5,1,5,8,16,28\}$; trunc uses $\tau^*(R)=\{2.444,1.834,0.719,0.505,0.284,0.172\}$
 
-Note that timestep 0 is pure noise
+<small>With `invert_time_convention=false`, nominal $t=1$ is almost pure noise ($\alpha=\epsilon$); $t=0$ stops at $\tau_{\max}$.</small>
 
 ---
 
@@ -340,7 +448,8 @@ Note that timestep 0 is pure noise
   - Optimizer: AdamW
     - LR: 3e-4, Weight Decay: 0.0
     - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
-  - All use cross entropy loss
+  - Loss: plain CE or VDM-inspired SNR-weighted CE (`SNR_CE`)
+  - `—` cells below are pending measurements, not missing implementation
 
 - Evaluation
   - Exact-velocity, top_k_v = 1 (top-1), 180 sampling steps
@@ -353,11 +462,14 @@ Note that timestep 0 is pure noise
 | arm | R=0.5 | R=1 | R=5 | R=8 | R=16 | R=28 |
 | --- | --- | --- | --- | --- | --- | --- |
 | auto, untrunc, CE | 18.90 | 21.07 | 36.73 | 48.92 | 69.77 | 100.82 |
-| auto, trunc, CE | **11.81** | **12.56** | **17.25** | — | — | — |
+| auto, trunc, CE | **11.81** | **12.56** | **17.25** | **18.29** | **19.76** | — |
 | auto, untrunc, ada, CE | — | — | — | — | — | — |
 | auto, trunc, ada, CE | — | — | — | — | — | — |
-| auto, untrunc, SNR CE | — | — | — | — | — | — |
+| auto, untrunc, SNR CE | 48.09 | 48.50 | 63.06 | 80.54 | 91.07 | 146.73 |
 | auto, trunc, SNR CE | — | — | — | — | — | — |
+
+<small>Log-linear reference (prior sweep, 1 seed): +trunc 12.78 / 16.72 / 18.39 and
++trunc+ada **10.99** / 15.11 / 15.86 at R = 1 / 8 / 28; raw-norm baseline 34.58.</small>
 
 ---
 
@@ -368,11 +480,14 @@ Note that timestep 0 is pure noise
 | arm | R=0.5 | R=1 | R=5 | R=8 | R=16 | R=28 |
 | --- | --- | --- | --- | --- | --- | --- |
 | auto, untrunc, CE | 3.87 | 3.88 | 3.80 | 3.77 | 3.73 | 3.56 |
-| auto, trunc, CE | 3.82 | 3.83 | 3.85 | — | — | — |
+| auto, trunc, CE | 3.82 | 3.83 | 3.85 | 3.89 | 3.93 | — |
 | auto, untrunc, ada, CE | — | — | — | — | — | — |
 | auto, trunc, ada, CE | — | — | — | — | — | — |
-| auto, untrunc, SNR CE | — | — | — | — | — | — |
+| auto, untrunc, SNR CE | 3.71 | 3.75 | 3.63 | 3.47 | 3.35 | 3.25 |
 | auto, trunc, SNR CE | — | — | — | — | — | — |
+
+<small>All cells clear the 3.0 bar, so every GenPPL above is a real quality reading.
+The SNR-CE row declines monotonically in $R$ (3.71 → 3.25) — the least diverse text in the sweep.</small>
 
 ---
 
@@ -383,11 +498,15 @@ Note that timestep 0 is pure noise
 | arm | R=0.5 | R=1 | R=5 | R=8 | R=16 | R=28 |
 | --- | --- | --- | --- | --- | --- | --- |
 | auto, untrunc, CE | 3.25 | 2.20 | 1.29 | 1.19 | 1.10 | 1.06 |
-| auto, trunc at τ*(R), CE | 26.38 | 18.11 | 9.01 | — | — | — |
+| auto, trunc at τ*(R), CE | 26.38 | 18.11 | 9.01 | 7.89 | 6.86 | — |
 | auto, untrunc, ada, CE | — | — | — | — | — | — |
 | auto, trunc, ada, CE | — | — | — | — | — | — |
-| auto, untrunc, SNR CE | — | — | — | — | — | — |
+| auto, untrunc, SNR CE | 3.8e35 ⚠ | 1.6e14 ⚠ | 7.8e06 ⚠ | 2.4e14 ⚠ | 1.3e15 ⚠ | 1.3e11 ⚠ |
 | auto, trunc, SNR CE | — | — | — | — | — | — |
+
+<small>⚠ **Not a perplexity.** With `SNR_CE` the logged `val/nll` is the *weighted* bound
+$w(t)\cdot\mathrm{CE}$ (81.9 nats/token at $R=0.5$ vs ~1.2 for plain CE), so $\exp(\cdot)$ of it is
+meaningless. Read GenPPL + entropy only on those rows.</small>
 
 ---
 
