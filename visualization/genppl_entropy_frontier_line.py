@@ -37,10 +37,14 @@ EFLM_T_RE = re.compile(
 EFLM_K1_RE = re.compile(
   r'/sd-(?P<seed>\d+)/frontier/nfe-(?P<nfe>\d+)_gt-ode_eta-0'
   r'/samples_genppl\.json$')
+EFLM_SDE_RE = re.compile(
+  r'/sd-(?P<seed>\d+)/nfe-(?P<nfe>\d+)_eta-(?P<eta>[\d.]+)_t-(?P<temp>[\d.]+)'
+  r'/samples_genppl\.json$')
 STYLE = {'mdlm': ('MDLM', '#1f77b4'), 'duo': ('DUO', '#ff7f0e'),
          'flm': ('FLM', '#2ca02c'), 'ar': ('AR', '#d62728'),
          'eflm': ('EFLM (exact vel.)', '#9467bd'),
-         'eflm-k1': ('EFLM (k=1 vel.)', '#8c564b')}
+         'eflm-k1': ('EFLM (k=1 vel.)', '#8c564b'),
+         'eflm-sde': ('EFLM (SDE eta*, exact vel.)', '#e377c2')}
 MARKERS = ['eflm-k1']   # temperature-inert: one point per NFE, not a curve
 
 
@@ -82,6 +86,25 @@ def load_eflm(dir_):
                         entropy=d['entropy'],
                         num_unique=len(set(d['text'])),
                         num_samples=len(d['text'])))
+  return cells
+
+
+def load_eflm_sde(dir_, eta_of_nfe):
+  """EFLM SDE x temperature arm (experiments/eflm_sde_temp): one T-curve per
+  NFE at that NFE's chosen eta (`eta_of_nfe`: {nfe: eta})."""
+  cells = []
+  for path in sorted(glob.glob(os.path.join(
+      dir_, 'sd-*/nfe-*_eta-*_t-*/samples_genppl.json'))):
+    m = EFLM_SDE_RE.search(path)
+    if m is None or eta_of_nfe.get(int(m['nfe'])) != float(m['eta']):
+      continue
+    d = json.load(open(path))
+    cells.append(dict(method='eflm-sde', seed=int(m['seed']),
+                      nfe=int(m['nfe']), temp=float(m['temp']),
+                      gen_ppl=d['gen_ppl_first_chunk_retok'],
+                      entropy=d['entropy'],
+                      num_unique=len(set(d['text'])),
+                      num_samples=len(d['text'])))
   return cells
 
 
@@ -225,6 +248,10 @@ def main():
   p.add_argument('--dir', default='outputs/naive_ar_tinystories_s256')
   p.add_argument('--lr', default='1e-3', help='LR of the pretrained cells')
   p.add_argument('--methods', default='mdlm,duo,flm,eflm')
+  p.add_argument('--eflm-sde-dir', default='',
+                 help='EFLM SDE x T cells (experiments/eflm_sde_temp)')
+  p.add_argument('--eflm-sde-eta', nargs='+', default=[],
+                 help='chosen eta per NFE, e.g. 32:4 64:16 128:32')
   p.add_argument('--eflm-dir', default='outputs/eflm_sde',
                  help="EFLM cells (experiments/eflm_sde); '' to disable")
   p.add_argument('--out', default='experiments/naive_ar_tinystories_s256/'
@@ -239,6 +266,10 @@ def main():
   assert cells, f'no frontier samples_genppl.json under {args.dir}'
   if args.eflm_dir:
     cells += load_eflm(args.eflm_dir)
+  if args.eflm_sde_dir:
+    cells += load_eflm_sde(args.eflm_sde_dir,
+                           {int(k): float(v) for k, v in
+                            (s.split(':') for s in args.eflm_sde_eta)})
   methods = [m for m in args.methods.split(',')
              if any(c['method'] == m for c in cells)]
   # Panels follow the swept-curve NFE grid; markers are drawn only where a
