@@ -18,6 +18,7 @@ VELOCITY="${VELOCITY:-exact}"         # sample / exact
 TOPK_VELOCITY="${TOPK_VELOCITY:--1}"  # 1 = top-1, -1 = full vocab (no top-k)
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
+ALPHA_MAX="${ALPHA_MAX:-null}"       # must match training (null = adaptive only)
 
 GLOBAL_BS=256
 BUF_SIZE=$((50 * GLOBAL_BS))
@@ -38,6 +39,7 @@ python -u -m main \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
     noise=log-linear-adaptive \
+    noise.alpha_max="${ALPHA_MAX}" \
     noise.adaptive_refit_every=50 \
     noise.adaptive_buffer_size=${BUF_SIZE} \
     noise.adaptive_ema=0.9 \
