@@ -58,7 +58,8 @@ def embedding_matrices(ckpt: str, args):
   W = model.backbone.sphere_embed.weight.detach().double()
   rescaled = model.backbone.rescale_radius(
     W, cfg.algo.get('rho_min'), cfg.algo.get('rho_max'))
-  return {'raw': W, 'rescaled': rescaled}, cfg
+  normalized = torch.nn.functional.normalize(W, p=2.0, dim=-1)
+  return {'raw': W, 'rescaled': rescaled, 'normalized': normalized}, cfg
 
 
 def spectrum(W: torch.Tensor) -> dict:
