@@ -637,6 +637,8 @@ def main(config):
     diffusion_model = algo.SFM
   elif config.algo.name == 'eflm':
     diffusion_model = algo.EFLM
+  elif config.algo.name == 'simpflm':
+    diffusion_model = algo.SimpFLM
   elif config.algo.name == 'langflow':
     diffusion_model = algo.LangFlow
   elif config.algo.name == 'hflm':

@@ -408,10 +408,17 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     e_noisy = torch.randn_like(e_clean)
     return e_noisy
 
+  def _clean_embeddings(self, x):
+    """[B, L, d] flow endpoints: the rows of the embedding table for x.
+
+    The one place the ambient geometry enters the interpolant -- SimpFLM
+    overrides it to hand back rows of the diagonal R * I_V instead.
+    """
+    return self.backbone.get_rescaled_embeddings(
+      x, self.rho_min, self.rho_max)  # [B, L, d] Euclidean, norms rescaled
+
   def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
-    # e_clean = self.backbone.get_rescaled_embeddings(
-    #   x, self.rho_min, self.rho_max)  # [B, L, d] Euclidean, norms rescaled
-    e_clean = self._sc_embed_table()
+    e_clean = self._clean_embeddings(x)
     e_noisy = self._sample_prior(e_clean)
 
     if use_pure_noise:
@@ -496,11 +503,103 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
 
     return loss, t
 
-class SimpFLM(SelfConditioning, trainer_base.Diffusion):
   def _sc_embed_table(self):
-    # TODO: Radius-rescaled diagonal matrix as mebedding table
+    # Radius-rescaled Euclidean embeddings: the space xt lives in (cf. q_xt).
     return self.backbone.rescale_radius(
       self.backbone.sphere_embed.weight, self.rho_min, self.rho_max)
+
+
+class SimpFLM(EFLM):
+  """Simplex FLM: E-FLM with the word-embedding matrix replaced by a DIAGONAL.
+
+  Every "embedding" is a one-hot simplex vertex, E = R * I_V, so the Gaussian
+  Euclidean flow x_t = (1 - b_t) e + b_t z runs in the one-hot (logit) space
+  R^V instead of a learned d-dim space. Nothing else about E-FLM changes: the
+  interpolant, the CE loss, the noise schedules (autonomous clock, truncation,
+  adaptive remap) and the Euler / Euler-Maruyama sampler are inherited.
+
+  R is the radius of the simplex sphere: E-FLM's radial rescale with
+  `algo.rho_min == algo.rho_max == R` (required) pins every vertex to norm R,
+  so the diagonal is exactly R * I_V -- see `vertex_radius`.
+
+  Two things follow from the vertices being orthogonal with a fixed norm:
+
+  * Nothing about the geometry is learned, so there is no embedding drift and
+    no `renormalize_weights` / self-conditioning path (the flm-dit backbone,
+    which projects the [B, L, V] blend down to the model width, has neither).
+  * The Eq.-17 decode point applies verbatim rather than through E-FLM's
+    sub-Gaussian estimate of random directions in d dimensions: the impostor
+    score <x_t, e_v> = R b_t z_v is LITERALLY Gaussian, so the largest of the
+    V - 1 impostors stays under the target's mean R^2 (1 - b_t) w.p. >=
+    1 - delta iff
+
+        (1 - b*) / b* >= sqrt(2 log(2 (V - 1) / delta)) / R,
+
+    i.e. b* = 1 - `noise_schedules.alpha_star_euclidean(V, embed_norm=R)`, or
+    tau*(R) = log(1 + C/R) on the autonomous clock (`auto_clock=True`). Only
+    the ratio noise/R enters, so R rescales the decode point and nothing else.
+  """
+
+  def _validate_configuration(self):
+    super()._validate_configuration()
+    if self.config.model.type != 'flm-dit':
+      raise ValueError(
+        'SimpFLM integrates in R^V, so the backbone must project the '
+        '[B, L, V] blend down to the model width: use model=small-flm '
+        f'(flm-dit), got {self.config.model.type}.')
+    if self.self_conditioning:
+      raise ValueError(
+        'SimpFLM does not support algo.self_conditioning: flm-dit has no '
+        'W_in/W_sc path, and the carry would go through the [V, V] diagonal.')
+    if self.renormalize_weights:
+      raise ValueError(
+        'SimpFLM has no trainable embedding table to renormalize; set '
+        'algo.renormalize_weights=False.')
+    if (self.rho_min is None or self.rho_max is None
+        or self.rho_min != self.rho_max):
+      raise ValueError(
+        'SimpFLM requires algo.rho_min == algo.rho_max == R, the radius of '
+        'the simplex sphere every one-hot vertex is pinned to (E-FLM\'s soft '
+        'radial clamp has nothing to clamp here -- all V rows already share '
+        f'the norm 1); got rho_min={self.rho_min}, rho_max={self.rho_max}.')
+    if self.rho_max <= 0.0:
+      raise ValueError(
+        f'SimpFLM requires a strictly positive simplex radius, got R='
+        f'{self.rho_max}: R = 0 collapses every vertex onto the origin, so '
+        'the interpolant carries no signal about x0.')
+    if self.config.sampler.predictor != 'simpflm':
+      raise ValueError(
+        'SimpFLM must be sampled with sampler=simpflm; predictor='
+        f'{self.config.sampler.predictor!r} would look for a [V, d] embedding '
+        'table on a backbone that has none (and would materialize the [V, V] '
+        'diagonal if it found one).')
+
+  @property
+  def vertex_radius(self):
+    """R: the radius of the simplex sphere every vertex sits on.
+
+    E-FLM's radial rescale with rho_min == rho_max (required, see
+    `_validate_configuration`) pins every embedding norm to exactly that
+    value, so R is `algo.rho_max` and every row of the diagonal has norm R.
+    """
+    return self.rho_max
+
+  def _clean_embeddings(self, x):
+    """[B, L, V] rows of the diagonal: R * one_hot(x)."""
+    return self.vertex_radius * F.one_hot(
+      x, self.vocab_size).to(torch.float32)
+
+  def _sc_embed_table(self):
+    """The diagonal E = R * I_V, materialized.
+
+    [V, V] -- 10 GB at V = 50257 -- so nothing on the hot path calls it:
+    `_clean_embeddings` takes rows directly and the sampler's `p @ E`
+    collapses to `R * p` (`samplers.SimpFLMSampler`). It exists so the
+    substitution stays literally checkable against E-FLM's code path at the
+    small vocabularies used in tests.
+    """
+    return self.vertex_radius * torch.eye(
+      self.vocab_size, device=self.device)
 
 @dataclass
 class LangFlowContext:

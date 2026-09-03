@@ -1,0 +1,21 @@
+name: simpflm
+diffusion_type: euclidean
+backbone: flm-dit
+parameterization: mean
+time_conditioning: True
+loss_type: ce
+T: 0
+causal_attention: False
+adaLN: True
+slerp_precision: float32      # the flow lives in R^V (V=50k): a float64 lerp doubles a ~1.6 GB tensor
+eps: 1e-6
+
+invert_time_convention: false  # true: alpha_t=1 is noisy (matches SFM). false: MDLM-like (required by the autonomous + adaptive schedules).
+renormalize_weights: False     # the diagonal is not trainable -- nothing to renormalize
+rho_min: 1.0                   # R, the radius of the simplex sphere: rho_min and rho_max MUST be equal,
+rho_max: 1.0                   # which pins every diagonal row to norm R. Feeds alpha_star_euclidean(V, embed_norm=R).
+prior_cov: 1.0                 # variance of the Gaussian prior z ~ N(0, prior_cov*I_V); 1.0 matches q_xt's N(0,I) noise
+snr_weighted_ce: false         # weight the per-token CE by -SNR'(t)/2 (VDM Eq. 16); setup.md specifies plain CE
+
+self_conditioning: false       # unsupported by SimpFLM: flm-dit has no W_in/W_sc path
+p_self_cond: 0.25              # unused while self_conditioning is false

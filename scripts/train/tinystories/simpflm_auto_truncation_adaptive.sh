@@ -6,17 +6,26 @@
 # the model width. R = RHO (algo.rho_min = rho_max = RHO) is E-FLM's own radial
 # rescale applied to the diagonal (rho_min and rho_max must be EQUAL), and it
 # is the only geometric knob.#
-# Truncated LOG-LINEAR schedule: ALPHA_MAX is the Eq.-17 decode point. For the
-# ORTHOGONAL vertices of the diagonal the impostor score is literally Gaussian,
-# so alpha_star_euclidean(V=50257, embed_norm=R) applies verbatim -- 0.840 at
-# R = 1. null = no truncation.
+# AUTONOMOUS clock: 1 - alpha_t = exp(-tau), tau = TAU_MAX * (1 - t), so the
+# bridge drift is the time-invariant v(X) = y - X and every Euler step advances
+# the same d_tau. TAU_MAX *is* the truncation on this clock (noise-fraction
+# floor exp(-TAU_MAX)); tau*(R) = -log(1 - alpha_star_euclidean(V=50257,
+# embed_norm=R)) = log(1 + C/R) stops at the decode point (C = 5.2575, so
+# tau*(1) = 1.834), and TAU_MAX = 6.908 (= -log 1e-3) is the untruncated
+# horizon.#
+# Plus the ADAPTIVE time remap: a spline reweighting of t onto where |dL/dt| is
+# largest (noise_schedules.AdaptiveSchedule). It sits on top of the truncated
+# alpha_t, so the decode point is unchanged -- only the density of visited noise
+# levels moves. Requires the MDLM time convention (invert_time_convention=false),
+# this algo's default. The fitted remap ships in the checkpoint, so train and
+# eval must use the same `noise=` config.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/simpflm_truncated}"
-RUN_NAME="${RUN_NAME:-simpflm_truncated}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/simpflm_auto_truncation_adaptive}"
+RUN_NAME="${RUN_NAME:-simpflm_auto_truncation_adaptive}"
 WANDB_GROUP="${WANDB_GROUP:-simpflm}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
@@ -25,7 +34,7 @@ PER_GPU_BS="${PER_GPU_BS:-8}"
 CKPT_EVERY="${CKPT_EVERY:-2500}"
 LR="${LR:-3e-4}"
 RHO="${RHO:-1.0}"                   # R: the radius of the simplex sphere (algo.rho_min = rho_max = RHO)
-ALPHA_MAX="${ALPHA_MAX:-0.840}"      # alpha_star_euclidean(50257, embed_norm=RHO); null = no truncation
+TAU_MAX="${TAU_MAX:-1.834}"         # autonomous horizon = the truncation; tau*(R=1) = 1.834
 
 cd "${REPO_ROOT}"
 python -u -m main \
@@ -39,8 +48,8 @@ python -u -m main \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
     sampler=simpflm \
-    noise=log-linear \
-    noise.alpha_max=${ALPHA_MAX} \
+    noise=autonomous-adaptive \
+    noise.tau_max=${TAU_MAX} \
     optim.lr=${LR} \
     loader.global_batch_size=512 \
     loader.batch_size=${PER_GPU_BS} \

@@ -882,14 +882,13 @@ class EFLMSampler(Sampler):
     eta: float = None):
     self._validate_prefix_args(prefix_tokens, prefix_lengths)
     xt = EFLMSampler.gaussian(
-      (num_samples, model.num_tokens, model.backbone.embed_dim),
+      (num_samples, model.num_tokens, self._ambient_dim(model)),
       mean=0.0, cov=self.prior_cov,
       dtype=torch.float32, device=model.device)
 
     prefix_embeds = None
     if prefix_tokens is not None:
-      prefix_embeds = model.backbone.get_rescaled_embeddings(
-        prefix_tokens, model.rho_min, model.rho_max)
+      prefix_embeds = model._clean_embeddings(prefix_tokens)
       self._project_prefix(xt, prefix_embeds, prefix_lengths)
       start_idx = int(prefix_lengths.min())
     else:
@@ -933,9 +932,13 @@ class EFLMSampler(Sampler):
     state.done = True
     return state
 
-  def _get_embed_table(self):
-    E = model._sc_embed_table().detach()  # [V, d] (radius-rescaled)
-    return E
+  def _ambient_dim(self, model):
+    """Dimension of the space the flow integrates in."""
+    return model.backbone.embed_dim
+
+  def _get_embed_table(self, model):
+    """[V, d] embedding table the velocity points at."""
+    return model._sc_embed_table().detach()  # (radius-rescaled)
 
   def _select_topk(self, log_p, E, k):
     log_p_k, top_idxs = torch.topk(log_p, k, dim=-1)
@@ -944,6 +947,17 @@ class EFLMSampler(Sampler):
   def _compute_velocity(self, x, E, log_p):
     return elfm_compute_velocity(
       x, E, log_p, mode=self.velocity, eps=self.eps)
+
+  def _velocity(self, model, state, log_p):
+    """(x, v) over the sampling window, v = sum_k p_k (e_k - x) = p @ E - x."""
+    E = self._get_embed_table(model)
+    x = state.xt[:, state.start_idx:].to(E)  # [B, Lw, d]
+    if self.lerp_float64:
+      E = E.to(torch.float64)
+      x = x.to(torch.float64)
+    if self.top_k_velocity > 0:
+      log_p, E = self._select_topk(log_p, E, self.top_k_velocity)
+    return x, self._compute_velocity(x, E, log_p)
 
   def _get_step_size(self, model, state):
     _, alpha_t = model.noise(state.t_schedule[state.step_idx])
@@ -1008,19 +1022,7 @@ class EFLMSampler(Sampler):
     # Arguments to compute the velocity field:
     #  v = sum_k p_k * log_{x}(e_k).
     log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
-    E = self._get_embed_table()
-    x = state.xt[:, state.start_idx:].to(E)  # [B, L, d]
-
-    if self.lerp_float64:
-      E = E.to(torch.float64)
-      x = x.to(torch.float64)
-
-    if self.top_k_velocity > 0:
-      log_p_v, E = self._select_topk(log_p_window, E, self.top_k_velocity)
-    else:
-      log_p_v = log_p_window
-
-    vel = self._compute_velocity(x, E, log_p_v)
+    x, vel = self._velocity(model, state, log_p_window)
     dt = self._get_step_size(model, state)
 
     if state.eta == 0.0:
@@ -1043,8 +1045,47 @@ class EFLMSampler(Sampler):
     state.step_idx += 1
     return state
 
-class SimpFLM(EFLMSampler):
-  
+# ════════════════════════════════════════════════════════════════
+#  SimpFLM Samplers
+# ════════════════════════════════════════════════════════════════
+
+class SimpFLMSampler(EFLMSampler):
+  """EFLMSampler with the embedding table replaced by the diagonal R * I_V.
+
+  The flow integrates in R^V, so the predicted-clean point `p @ E` collapses to
+  `R * p` and the diagonal is never materialized (`_velocity` overrides the one
+  place `step` touches E; [V, V] is 10 GB at V = 50257). Everything else --
+  Gaussian prior, Euler / Euler-Maruyama step, step size, prefix projection,
+  greedy last-step decode -- is inherited unchanged, so GenPPL is measured on
+  exactly the same protocol as the E-FLM arms.
+  """
+
+  def _ambient_dim(self, model):
+    return model.vocab_size
+
+  def _target_probs(self, log_p):
+    """[B, L, V] weights of the predicted-clean point x_hat = R * p."""
+    if self.top_k_velocity > 0:
+      # The same distribution EFLMSampler._select_topk renormalizes over,
+      # written back into the full vocab: zeroed entries add nothing to p @ E.
+      log_p_k, top_idxs = torch.topk(log_p, self.top_k_velocity, dim=-1)
+      p = torch.zeros_like(log_p).scatter_(
+        -1, top_idxs, torch.softmax(log_p_k, dim=-1))
+    else:
+      p = log_p.exp()
+    if self.velocity == 'sample':
+      return F.one_hot(sample_categorical(p), p.shape[-1]).to(p.dtype)
+    if self.velocity != 'exact':
+      raise ValueError(f'Unknown velocity mode: {self.velocity}')
+    return p
+
+  def _velocity(self, model, state, log_p):
+    x = state.xt[:, state.start_idx:]  # [B, Lw, V]
+    if self.lerp_float64:
+      x = x.to(torch.float64)
+    p = self._target_probs(log_p).to(x.dtype)
+    return x, model.vertex_radius * p - x
+
 
 # ════════════════════════════════════════════════════════════════
 #  HFLM Samplers
@@ -1713,6 +1754,16 @@ def get_sampler(config):
 
   if s.predictor == 'eflm':
     return EFLMSampler(noise_removal=s.noise_removal,
+      velocity=s.velocity, use_float64=s.use_float64,
+      lerp_float64=config.algo.slerp_precision=='float64',
+      eps=config.algo.eps, temperature=s.temperature,
+      p_nucleus=s.p_nucleus, top_k=s.top_k,
+      top_k_velocity=s.top_k_velocity,
+      invert_time_convention=config.algo.invert_time_convention,
+      prior_cov=config.algo.prior_cov)
+
+  if s.predictor == 'simpflm':
+    return SimpFLMSampler(noise_removal=s.noise_removal,
       velocity=s.velocity, use_float64=s.use_float64,
       lerp_float64=config.algo.slerp_precision=='float64',
       eps=config.algo.eps, temperature=s.temperature,

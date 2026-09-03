@@ -1,0 +1,13 @@
+predictor: simpflm
+steps: 1024
+noise_removal: ancestral  # 'ancestral' (sample) or 'greedy' (argmax) at the final step
+velocity: exact           # exact (expected v = R*p - x) / sample (one sampled vertex)
+use_float64: false        # log_p is [B, L, V] at V=50k; float64 doubles a ~1.6 GB tensor for no gain
+p_nucleus: 1.0
+top_k: -1
+top_k_velocity: -1        # top-k for velocity computation (-1 = use all vocab)
+eta: 0.0                  # SDE noise scale; 0 = deterministic ODE (experiments/eflm_sde/derivation.md)
+gt_method: linear         # SDE diffusion scale g(t): const / sqrt / linear / quad = (1-t)^{0, 0.5, 1, 2}
+temperature: 1.0
+num_sample_batches: 2
+num_sample_log: 2

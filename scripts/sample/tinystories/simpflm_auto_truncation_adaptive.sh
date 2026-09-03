@@ -6,10 +6,19 @@
 # the model width. R = RHO (algo.rho_min = rho_max = RHO) is E-FLM's own radial
 # rescale applied to the diagonal (rho_min and rho_max must be EQUAL), and it
 # is the only geometric knob.#
-# Truncated LOG-LINEAR schedule: ALPHA_MAX is the Eq.-17 decode point. For the
-# ORTHOGONAL vertices of the diagonal the impostor score is literally Gaussian,
-# so alpha_star_euclidean(V=50257, embed_norm=R) applies verbatim -- 0.840 at
-# R = 1. null = no truncation.
+# AUTONOMOUS clock: 1 - alpha_t = exp(-tau), tau = TAU_MAX * (1 - t), so the
+# bridge drift is the time-invariant v(X) = y - X and every Euler step advances
+# the same d_tau. TAU_MAX *is* the truncation on this clock (noise-fraction
+# floor exp(-TAU_MAX)); tau*(R) = -log(1 - alpha_star_euclidean(V=50257,
+# embed_norm=R)) = log(1 + C/R) stops at the decode point (C = 5.2575, so
+# tau*(1) = 1.834), and TAU_MAX = 6.908 (= -log 1e-3) is the untruncated
+# horizon.#
+# Plus the ADAPTIVE time remap: a spline reweighting of t onto where |dL/dt| is
+# largest (noise_schedules.AdaptiveSchedule). It sits on top of the truncated
+# alpha_t, so the decode point is unchanged -- only the density of visited noise
+# levels moves. Requires the MDLM time convention (invert_time_convention=false),
+# this algo's default. The fitted remap ships in the checkpoint, so train and
+# eval must use the same `noise=` config.
 #
 # Eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL
 # (sample_eval). RHO and the truncation knob must match training.
@@ -21,14 +30,14 @@ export CUDA_VISIBLE_DEVICES=0
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 CKPT_PATH="${CKPT_PATH:?set CKPT_PATH=/abs/path/to/checkpoint.ckpt}"
 CACHE_DIR="${CACHE_DIR:-${REPO_ROOT}/data_cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/simpflm_truncated}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/simpflm_auto_truncation_adaptive}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
 STEPS="${STEPS:-180}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
 RHO="${RHO:-1.0}"                   # R: the simplex-sphere radius; must match training
-ALPHA_MAX="${ALPHA_MAX:-0.840}"       # alpha_star_euclidean(50257, embed_norm=RHO); must match training
+TAU_MAX="${TAU_MAX:-1.834}"          # autonomous horizon; must match training
 ETA="${ETA:-0.0}"                   # SDE noise scale; 0 = deterministic ODE
 GT_METHOD="${GT_METHOD:-linear}"    # SDE g(t): const / sqrt / linear / quad
 TEMPERATURE="${TEMPERATURE:-1.0}"
@@ -44,8 +53,8 @@ MARGS=(
     algo=simpflm
     algo.rho_min=${RHO}
     algo.rho_max=${RHO}
-    noise=log-linear
-    noise.alpha_max=${ALPHA_MAX}
+    noise=autonomous-adaptive
+    noise.tau_max=${TAU_MAX}
     sampler=simpflm
     sampler.velocity=${VELOCITY}
     sampler.top_k_velocity=${TOPK_VELOCITY}

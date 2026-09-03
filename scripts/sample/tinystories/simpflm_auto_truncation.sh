@@ -1,10 +1,24 @@
 #!/bin/bash
-# SimpFLM rescale + AUTONOMOUS clock, truncation sweep — eval ONE TinyStories
-# checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval). RHO and TAU_MAX must
-# match training; TAU_MAX *is* the truncation on this clock (noise-fraction floor
-# exp(-TAU_MAX)), so it is the knob this sweep varies around tau*(R).
+# SimpFLM — E-FLM with the word-embedding matrix replaced by the DIAGONAL
+# R * I_V: every "embedding" is a one-hot simplex vertex, so the Gaussian
+# Euclidean flow x_t = (1 - b_t) e + b_t z runs in the one-hot (logit) space
+# R^V. The small-flm (flm-dit) backbone projects that [B, L, V] blend down to
+# the model width. R = RHO (algo.rho_min = rho_max = RHO) is E-FLM's own radial
+# rescale applied to the diagonal (rho_min and rho_max must be EQUAL), and it
+# is the only geometric knob.#
+# AUTONOMOUS clock: 1 - alpha_t = exp(-tau), tau = TAU_MAX * (1 - t), so the
+# bridge drift is the time-invariant v(X) = y - X and every Euler step advances
+# the same d_tau. TAU_MAX *is* the truncation on this clock (noise-fraction
+# floor exp(-TAU_MAX)); tau*(R) = -log(1 - alpha_star_euclidean(V=50257,
+# embed_norm=R)) = log(1 + C/R) stops at the decode point (C = 5.2575, so
+# tau*(1) = 1.834), and TAU_MAX = 6.908 (= -log 1e-3) is the untruncated
+# horizon.
+#
+# Eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL
+# (sample_eval). RHO and the truncation knob must match training.
 set -euo pipefail
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
+
 export CUDA_VISIBLE_DEVICES=0
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -16,13 +30,10 @@ EVAL_BS="${EVAL_BS:-16}"
 STEPS="${STEPS:-180}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
-RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
-ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257, embed_norm=RHO); null = no truncation
-SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM Eq. 16)
+RHO="${RHO:-1.0}"                   # R: the simplex-sphere radius; must match training
 TAU_MAX="${TAU_MAX:-1.834}"          # autonomous horizon; must match training
-SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
-ETA="${ETA:-0.0}"                    # SDE noise scale; 0 = deterministic ODE
-GT_METHOD="${GT_METHOD:-linear}"     # SDE g(t): const / sqrt / linear / quad
+ETA="${ETA:-0.0}"                   # SDE noise scale; 0 = deterministic ODE
+GT_METHOD="${GT_METHOD:-linear}"    # SDE g(t): const / sqrt / linear / quad
 TEMPERATURE="${TEMPERATURE:-1.0}"
 NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
 RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}" # false: GenPPL pass only
@@ -31,16 +42,11 @@ cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
 
 MARGS=(
-    model=small-sphere-dit
+    model=small-flm
     model.length=${SEQ_LEN:-1024}
-    model.init=ngpt
     algo=simpflm
-    algo.self_conditioning=${SELF_COND}
-    algo.renormalize_weights=False
     algo.rho_min=${RHO}
     algo.rho_max=${RHO}
-    noise.alpha_max=${ALPHA_MAX}
-    algo.snr_weighted_ce=${SNR_CE}
     noise=autonomous
     noise.tau_max=${TAU_MAX}
     sampler=simpflm
