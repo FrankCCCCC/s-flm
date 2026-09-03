@@ -199,3 +199,21 @@ matched entropy, never single points.
 | flm | 5e-3 | 1 | 1.7689 | 0.5704 | 43.39 | 4.517 | 64 | 180 |
 | flm | 5e-3 | 2 | 1.5557 | 0.4419 | 50.80 | 4.553 | 64 | 180 |
 | flm | 5e-3 | 3 | 1.5509 | 0.4388 | 53.42 | 4.573 | 64 | 180 |
+
+## SimpFLM added to the frontier (4th method)
+
+`experiments/simpflm_auto_trunc_tinystories_256` contributes a fourth arm to
+this project's Gen. PPL / entropy frontier: **SimpFLM (auto + trunc)** =
+E-FLM with the word-embedding matrix replaced by the diagonal R*I_V, evaluated
+at the frontier's fixed LR = 1e-3 with R = 1.0 and TAU_MAX = tau*(1) = 1.8338.
+Seeds 2 and 3 were trained for this evaluation; `frontier_sweep.py` gained the
+method (script map, EXTRA_ENV, EVAL_BS=16, `--methods`/`--seeds` staging filters
+and a checkpoint guard), and `frontier_cells.csv` / the figure now carry
+1440 cells (4 x 3 x 8 x 15), all complete.
+
+Headline: **SimpFLM wins the few-step regime and loses the many-step one.**
+Best Gen. PPL at NFE = 1 is 21.16 vs 49.53 (FLM) / 79.30 (DUO) / 87.69 (MDLM);
+DUO overtakes at NFE = 8; by NFE = 256 MDLM reaches 8.44 vs SimpFLM's 19.33.
+SimpFLM also beats FLM at every NFE. Its temperature axis is inert (argmax is
+scale-invariant under top-1 velocity + greedy decode), so it plots as one point
+per panel rather than a curve. Full analysis: that project's `RESULTS.md`, F7.

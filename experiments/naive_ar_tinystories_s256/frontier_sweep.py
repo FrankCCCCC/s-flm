@@ -37,19 +37,28 @@ SEQ_LEN = 256
 NUM_SAMPLES = 512
 
 # Searched axes (setup.md). LR is fixed, see module docstring.
-METHODS = ['mdlm', 'duo', 'flm']
+METHODS = ['mdlm', 'duo', 'flm', 'simpflm']
 LR = '1e-3'
 SEEDS = [1, 2, 3]
 NFES = [1, 4, 8, 16, 32, 64, 128, 256]
 TEMPS = ['0.50', '0.55', '0.60', '0.65', '0.70', '0.75', '0.80', '0.85',
          '0.90', '0.95', '1.00', '1.05', '1.10', '1.15', '1.20']
-# flm carries a dense (B, L, V) float64 sampler state, so it needs a smaller batch.
-EVAL_BS = {'mdlm': 32, 'duo': 32, 'flm': 16}
+# flm/simpflm carry a dense (B, L, V) sampler state, so they need a smaller batch.
+EVAL_BS = {'mdlm': 32, 'duo': 32, 'flm': 16, 'simpflm': 16}
+# Most methods have a same-named sample script; simpflm's arm is the auto+trunc one.
+SCRIPT = {'mdlm': 'mdlm', 'duo': 'duo', 'flm': 'flm',
+          'simpflm': 'simpflm_auto_truncation'}
+# Per-method env the shared sample script needs. simpflm: the simplex radius and
+# the autonomous horizon, pinned at the R=1 decode point tau*(1) = 1.8338
+# (setup.md refers alpha_star_euclidean(V=50257, embed_norm=R) at R=1).
+EXTRA_ENV = {'simpflm': 'RHO=1.0 TAU_MAX=1.8338 '}
 
 
-def jobs():
+def jobs(methods=None, seeds=None):
+    methods = methods or METHODS
+    seeds = seeds or SEEDS
     return [(f'm-{m}_sd-{sd}_nfe-{nfe}', m, sd, nfe)
-            for m in METHODS for sd in SEEDS for nfe in NFES]
+            for m in methods for sd in seeds for nfe in NFES]
 
 
 def run_dir(method, seed):
@@ -77,11 +86,11 @@ def job_body(tag, method, seed, nfe):
             echo "[$(date)] SKIP {tag}_t-{t} (done)"
         else
             echo "[$(date)] CELL {tag}_t-{t}"
-            CKPT_PATH={ckpt} OUTPUT_DIR={cell_dir(method, seed, nfe, t)} \\
+            {EXTRA_ENV.get(method, '')}CKPT_PATH={ckpt} OUTPUT_DIR={cell_dir(method, seed, nfe, t)} \\
                 DEVICES=1 SEQ_LEN={SEQ_LEN} STEPS={nfe} TEMPERATURE={t} \\
                 EVAL_BS={bs} NUM_SAMPLE_BATCHES={NUM_SAMPLES // bs} \\
                 RUN_PPL_EVAL=false \\
-                bash scripts/sample/tinystories/{method}.sh
+                bash scripts/sample/tinystories/{SCRIPT[method]}.sh
         fi''') for t in TEMPS)
     return textwrap.dedent(f'''\
         export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
@@ -90,6 +99,11 @@ def job_body(tag, method, seed, nfe):
         export NCCL_IB_DISABLE=1
         export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
         export PATH={ENVBIN}:$PATH
+        # TMPDIR defaults to a full filesystem on this cluster; keep it short and
+        # on scratch (see simpflm_auto_trunc_tinystories_256/RESULTS.md).
+        export TMPDIR=/share/desa/nfs02/sc3379/tmp/$SLURM_JOB_ID
+        mkdir -p "$TMPDIR"
+        trap 'rm -rf "$TMPDIR"' EXIT
         cd {REPO}
         echo "[$(date)] FRONTIER {tag} on $(hostname)"
         ''') + calls + f'\necho "[$(date)] DONE {tag}"\n'
@@ -98,10 +112,16 @@ def job_body(tag, method, seed, nfe):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--methods', nargs='+', default=None, choices=METHODS,
+                    help='restrict submission (default: all)')
+    ap.add_argument('--seeds', nargs='+', type=int, default=None,
+                    help='restrict submission; use to stage seeds as their '
+                         'pretrained checkpoints land')
     args = ap.parse_args()
-    grid = jobs()
+    grid = jobs(args.methods, args.seeds)
+    ms, ss = args.methods or METHODS, args.seeds or SEEDS
     print(f'naive_ar_tinystories_s256 frontier: {len(grid)} jobs '
-          f'({len(METHODS)} methods x {len(SEEDS)} seeds x {len(NFES)} NFE) '
+          f'({len(ms)} methods x {len(ss)} seeds x {len(NFES)} NFE) '
           f'x {len(TEMPS)} temperatures = {len(grid) * len(TEMPS)} cells, '
           f'{NUM_SAMPLES} samples each')
     if args.dry_run:
@@ -114,6 +134,10 @@ def main():
     n_sub = n_skip = 0
     for tag, method, seed, nfe in grid:
         jobname = f'nar256fr_{tag}'
+        if not os.path.exists(f'{run_dir(method, seed)}/checkpoints/last.ckpt'):
+            print(f'skip {tag}: no pretrained checkpoint yet')
+            n_skip += 1
+            continue
         done = all(os.path.exists(
             f'{cell_dir(method, seed, nfe, t)}/samples_genppl.json')
             for t in TEMPS)

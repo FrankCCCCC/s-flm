@@ -26,7 +26,8 @@ CELL_RE = re.compile(
   r'/m-(?P<method>[^_/]+)_lr-(?P<lr>[^_/]+)_sd-(?P<seed>\d+)'
   r'/frontier/nfe-(?P<nfe>\d+)_t-(?P<temp>[\d.]+)/samples_genppl\.json$')
 STYLE = {'mdlm': ('MDLM', '#1f77b4'), 'duo': ('DUO', '#ff7f0e'),
-         'flm': ('FLM', '#2ca02c'), 'ar': ('AR', '#d62728')}
+         'flm': ('FLM', '#2ca02c'), 'ar': ('AR', '#d62728'),
+         'simpflm': ('SimpFLM (auto+trunc)', '#9467bd')}
 
 
 def load(dir_, lr):
