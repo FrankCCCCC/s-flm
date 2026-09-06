@@ -5,6 +5,14 @@ TinyStories seq-256, 30k steps, global batch 512, bf16, EMA 0.9999, AdamW (wd 0,
 (0.9,0.999), eps 1e-8, grad-clip 1.0), constant schedule + 2500-step warmup. Eval: 180 sampling
 steps for mdlm/duo/flm, 64 samples/cell, gpt2-large retokenized GenPPL.
 
+**Plus a 5th method, `sfmta` (S-FLM + truncation `alpha_max`=0.121 + adaptive schedule),
+added at lr 1e-3 only — 3 / 3 cells.** `setup.md` adds it to the method list; the LR ladder
+was not re-run for it because §3.4 already selects 1e-3 and the frontier evaluation
+(`FRONTIER_RESULTS.md`) needs only that LR. Its seed-1 cell reuses the
+`adv_geo_tinystories_s256/sfm_ada_trunc_lr1e-3` checkpoint (identical recipe; see
+`EXPERIMENT.md`). It trains on 1 GPU with accum 16 rather than 4 GPUs with accum 4 —
+same global batch 512. Run `sweep.py --methods sfmta --lrs 3e-4 5e-3` to fill the ladder.
+
 > **NOTE — this file was written by hand, not by `experiments/report.py`.** Re-running
 > `python experiments/report.py naive_ar_tinystories_s256` will overwrite it with a table that
 > ranks the `Valid PPL` column across all four methods. That ranking is invalid (see
@@ -29,8 +37,14 @@ steps for mdlm/duo/flm, 64 samples/cell, gpt2-large retokenized GenPPL.
 | flm  | 3e-4 | 1.5302 | 0.0045 | 60.28 | 2.01 | 4.588 | 64 |
 | flm  | **1e-3** | 1.5168 | 0.0070 | 51.55 | 3.28 | 4.562 | 64 |
 | flm  | 5e-3 | 1.6252 | 0.1017 | 49.20 | 4.25 | 4.548 | 64 |
+| sfmta | **1e-3** | 11.7265 | 0.4144 | **12.95** | 0.65 | 3.945 | 64 |
 
 `uniq/64` = distinct strings among the 64 generated samples.
+
+`sfmta` posts the **best GenPPL of any method here except AR** (12.95 vs duo's 17.41), and
+unlike AR it does so with 64/64 distinct samples. Its entropy (3.945) is the lowest of the
+five stochastic rows, so this single-temperature number is not a like-for-like win — see
+`FRONTIER_RESULTS.md` for the matched-entropy comparison, which is the one that counts (§3.6).
 
 ---
 
@@ -44,6 +58,12 @@ steps for mdlm/duo/flm, 64 samples/cell, gpt2-large retokenized GenPPL.
 | mdlm | denoising-**ELBO upper bound** (`loss_type: elbo`) | duo only |
 | duo  | denoising-**ELBO upper bound** (`loss_type: elbo`) | mdlm only |
 | flm  | **unweighted denoising CE** (`algo.py:1166`) — neither a likelihood nor a bound | nothing |
+| sfmta | **unweighted denoising CE on the sphere** (`algo=sfm`, `loss_type: ce`) | nothing |
+
+`sfmta`'s 11.73 and `flm`'s 1.52 are both "denoising CE" and are still **not** comparable:
+truncation pins the schedule at `alpha_max` = 0.121, so sfmta's CE is averaged over a
+noisy slice of t while flm's includes the near-clean interpolants that drag its mean to
+~0. The 8× gap is the truncation, not model quality.
 
 FLM's 1.52 is the lowest number in the table and means nothing: a PPL of 1.5 on TinyStories is
 unachievable by any language model. Near-clean interpolants contribute CE ≈ 0 and drag the mean
@@ -199,3 +219,6 @@ matched entropy, never single points.
 | flm | 5e-3 | 1 | 1.7689 | 0.5704 | 43.39 | 4.517 | 64 | 180 |
 | flm | 5e-3 | 2 | 1.5557 | 0.4419 | 50.80 | 4.553 | 64 | 180 |
 | flm | 5e-3 | 3 | 1.5509 | 0.4388 | 53.42 | 4.573 | 64 | 180 |
+| sfmta | 1e-3 | 1 | 12.1771 | 2.4996 | 12.20 | 3.933 | 64 | 180 |
+| sfmta | 1e-3 | 2 | 11.6406 | 2.4545 | 13.39 | 3.956 | 64 | 180 |
+| sfmta | 1e-3 | 3 | 11.3619 | 2.4303 | 13.24 | 3.945 | 64 | 180 |

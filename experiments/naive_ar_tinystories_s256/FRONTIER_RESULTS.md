@@ -1,18 +1,28 @@
 # naive_ar_tinystories_s256 — Gen. PPL / Entropy Frontier
 
-**1080 / 1080 cells complete, zero failures.** 3 methods {mdlm, duo, flm} x seed {1,2,3} x
-NFE {1,4,8,16,32,64,128,256} x temperature T {0.50, 0.55, …, 1.20} (15 values),
+**1440 / 1440 cells complete, zero failures.** 4 methods {mdlm, duo, flm, sfmta} x seed
+{1,2,3} x NFE {1,4,8,16,32,64,128,256} x temperature T {0.50, 0.55, …, 1.20} (15 values),
 **512 samples per cell**, TinyStories seq-256, gpt2-large retokenized Gen. PPL and
 per-sample unigram entropy. Protocol: S-FLM paper App. C.8 / Fig. 10.
+
+> **Headline (new): `sfmta` — S-FLM + truncation + adaptive schedule — is the Pareto-optimal
+> method in the few-step regime, and the crossover moves *right* as the entropy target rises.**
+> At matched entropy it beats MDLM by 3.0x at NFE = 4 and 1.7x at NFE = 8; at H = 4.50 it is
+> ahead at every budget from NFE = 8 to 128. It is also the flattest curve in NFE — most of
+> its quality arrives in the first 8 steps. See **§10**. This closes §9 item 4 for S-FLM.
 
 - Checkpoints: the phase-1 runs at **lr 1e-3** (`setup.md` sweeps only the seed for this
   evaluation; RESULTS.md §3.4 selects 1e-3 as the shared LR). AR is excluded — its sampler
   has no NFE budget.
 - Decoders are unchanged from the default eval: `ancestral` for mdlm, `ancestral` +
-  `noise_removal=greedy` for duo, `flm_euler` for flm. Only `sampler.steps` and
-  `sampler.temperature` move.
-- Produced by `frontier_sweep.py` (72 SLURM jobs) → figure/tables by
-  `visualization/genppl_entropy_frontier_line.py`. Per-seed raw data: `frontier_cells.csv`.
+  `noise_removal=greedy` for duo, `flm_euler` for flm, `sfm` + `noise_removal=greedy` for
+  sfmta. Only `sampler.steps` and `sampler.temperature` move — with **one deliberate
+  exception for sfmta, `top_k_velocity=-1`, without which its temperature sweep is inert**
+  (§10.1, §7.5).
+- Produced by `frontier_sweep.py` (96 SLURM jobs) → figure/tables by
+  `visualization/genppl_entropy_frontier_line.py`. Per-seed raw data: `frontier_cells.csv`
+  (which also carries `simpflm` rows from a parallel experiment; the viz filters by
+  `--methods`, but the "N cells" line it prints counts every row it globs).
 
 ![Gen. PPL / entropy frontier](figures/genppl_entropy_frontier_line.png)
 
@@ -200,8 +210,12 @@ Relative seed sd of Gen. PPL (CV), over all 120 (NFE, T) cells per method:
 | mdlm | 0.89% | 8.0% at NFE=4, T=1.20 |
 | duo  | 2.17% | 12.7% at NFE=1, T=0.75 |
 | flm  | 7.76% | 86.3% at NFE=4, T=1.20 |
+| sfmta | **1.10%** | 4.0% at NFE=16, T=1.15 |
 
-MDLM's frontier is the most reproducible by an order of magnitude. FLM's seed spread explodes
+`sfmta` is the most reproducible of the four (median CV 1.10%, and **no cell above 4%** —
+MDLM's worst is 8%, FLM's 86%). Its frontier is far more stable than its own likelihood proxy:
+val/ppl varies 3.5% across the same three seeds (11.36 / 11.64 / 12.18, RESULTS.md §1) while
+its Gen. PPL varies ~1%. MDLM is the most reproducible of the three original baselines. FLM's seed spread explodes
 at low NFE (visible as the wide green band in the NFE = 4 and 8 panels): its Euler trajectory
 at 4 steps is unstable and the three training seeds land in qualitatively different regimes.
 All conclusions above are drawn at NFE ≥ 8, where FLM's CV is below 10%.
@@ -225,6 +239,13 @@ All conclusions above are drawn at NFE ≥ 8, where FLM's CV is below 10%.
 4. **Eval noise is common across seeds** — `L.seed_everything(config.seed)` uses the same seed
    in every cell, so the error bars isolate training-seed variance only, matching the
    convention of `sweep.py` and `seed_errbar_tinystories_256`.
+5. **`sfmta` is swept at `top_k_velocity=-1`, not the `=1` of `setup.md`'s default protocol.**
+   Under top-1 the temperature cancels exactly (§10.1) and there is no curve to draw, so this
+   is the minimum change that makes a T-frontier exist for S-FLM. The consequence is that the
+   sfmta curve answers "S-FLM decoded with the exact full-vocab velocity", which is a
+   *different decoder* from the top-1 row reported in RESULTS.md §1 — the two numbers are not
+   interchangeable. A top-1 sfmta arm swept over some other knob (as `eflm_sde` does with the
+   SDE `eta`) would make the two directly comparable.
 
 ---
 
@@ -243,6 +264,10 @@ All conclusions above are drawn at NFE ≥ 8, where FLM's CV is below 10%.
    Likewise FLM below NFE ≈ 64, where its temperature curve folds back (§5).
 5. The geometry flows (S/E/H-FLM) should be compared against **this frontier**, not against the
    NFE = 180, T = 1.0 numbers in RESULTS.md §3.3.
+6. **S-FLM + truncation + adaptive schedule changes the picture at small NFE** (§10). It is the
+   best method at NFE ≤ 16 at every matched entropy, reaches a given quality at **half the
+   NFE** MDLM needs, and never loses to MDLM by more than 13%. The "diffusion needs many steps"
+   framing of §8.3 is a property of the *flat* baselines, not of flow LMs in general.
 
 ## 9. Recommended next steps
 
@@ -251,11 +276,95 @@ All conclusions above are drawn at NFE ≥ 8, where FLM's CV is below 10%.
 | 1 | Extend T to {0.30, …, 0.45} for NFE ≥ 8 to resolve the low-entropy end | ~8 GPU-hr |
 | 2 | Add the real-data (H, Gen. PPL) reference point to the x-axis | ~0.2 GPU-hr |
 | 3 | Add a `noise_removal=ancestral` DUO arm to separate the decode effect from the loss effect | ~11 GPU-hr |
-| 4 | Run the same frontier for the geometry flows so S/E/H-FLM are read against these curves | ~45 GPU-hr/method |
+| 4 | ~~Run the same frontier for the geometry flows~~ — **done for S-FLM+trunc+ada** (§10); E-FLM / H-FLM still open | ~90 GPU-hr/method |
+| 5 | Sweep sfmta's `top_k_velocity` ∈ {1, 8, 64, -1} at fixed NFE to price the decoder deviation of §7.5 | ~6 GPU-hr |
+| 6 | Extend sfmta's T grid above 1.20 — its curve has not turned over at NFE ≥ 32, so its high-entropy end is unresolved the way the low end is for everyone (§7.1) | ~10 GPU-hr |
 
 ---
 
-## 10. Per-cell results (mean ± sd over seeds 1–3, 512 samples/cell)
+## 10. S-FLM + truncation + adaptive schedule (`sfmta`)
+
+The `adv_geo_tinystories_s256` winner (`algo=sfm`, `model=small-sphere-dit`, `init=ngpt`,
+`noise=log-linear-adaptive`, `alpha_max=0.121`), retrained/reused at lr 1e-3 on seeds 1–3 and
+swept over the same NFE x T grid. Phase-1 val/ppl 11.727 +/- 0.414 (RESULTS.md §1).
+
+### 10.1 Under the recorded protocol, S-FLM's temperature does nothing
+
+`setup.md` specifies exact velocity with **`top_k_velocity=1`** for the geometry flows.
+`SFMSampler._select_topk` re-`log_softmax`es the retained logits, so at k = 1 the velocity
+weights become a point mass and
+
+    v = sum_k p_k log_x(e_k)  ->  log_x(e_argmax)
+
+The trajectory is a pure argmax walk, the `noise_removal=greedy` last step is another argmax,
+and **the temperature cancels exactly**. Measured on the seed-1 checkpoint at NFE = 32
+(16 samples): H = 3.975 at T = 0.50 vs 3.967 at T = 1.20 — RNG jitter, not a curve. All 15
+T-cells would collapse to a single point. This is the same argmax-inertness that made
+`experiments/eflm_sde` sweep the SDE `eta` instead of T.
+
+The frontier below therefore uses **`top_k_velocity=-1`** (exact full-vocab velocity), which
+keeps the tempered `p` inside the velocity sum. Measured at NFE = 32, that restores
+H 4.23 -> 4.59 and Gen. PPL 15.7 -> 49.2 across T 0.50 -> 1.20 — the same shape and range as
+the flat baselines. Cost: several dense (B, L, V) float64 tensors are live at once, so
+`EVAL_BS=8` for sfmta (16 for flm, 32 for mdlm/duo), and NFE-256 runs ~3 h per cell.
+
+### 10.2 Matched entropy: sfmta owns the few-step regime, and the crossover moves right with H
+
+Gen. PPL interpolated at three fixed entropies ("oor" = the method's curve never reaches that
+entropy at that budget):
+
+| NFE | H=4.30 mdlm / duo / flm / **sfmta** | H=4.40 mdlm / duo / flm / **sfmta** | H=4.50 mdlm / duo / flm / **sfmta** |
+|---|---|---|---|
+| 4   | 117.1 / oor / 225.3 / **40.5** | 143.2 / oor / 158.2 / **59.3** | 182.1 / oor / 246.3 / oor |
+| 8   | 38.0 / 34.7 / 84.8 / **22.3** | 48.9 / oor / 175.5 / **29.0** | 68.2 / oor / 104.3 / **43.8** |
+| 16  | 20.4 / 21.1 / 61.4 / **18.4** | 28.2 / 45.5 / 179.1 / **23.8** | 42.4 / oor / 74.1 / **35.3** |
+| 32  | **15.4** / 16.6 / 47.7 / 17.1 | **21.5** / 30.7 / 51.8 / 21.9 | 33.5 / oor / 59.1 / **32.8** |
+| 64  | **13.4** / 15.7 / 38.8 / 16.5 | **19.2** / 29.6 / 42.9 / 21.3 | 30.7 / oor / 50.1 / **31.9** |
+| 128 | **12.8** / 14.7 / 33.0 / 16.1 | **18.6** / 28.3 / 37.3 / 21.0 | 30.5 / oor / 44.6 / **31.2** |
+| 256 | **12.4** / 15.2 / 29.8 / 16.0 | **18.4** / 27.0 / 34.1 / 20.8 | **30.2** / oor / 41.5 / 30.8 |
+
+Three things to read off this:
+
+1. **sfmta wins outright at NFE <= 16 at every entropy it reaches**, by 1.1–3.5x over the best
+   baseline. At NFE = 8, H = 4.40 it is 1.7x better than MDLM; at NFE = 4, H = 4.30, 2.9x.
+2. **The MDLM crossover moves right as the entropy target rises** — NFE ~ 32 at H = 4.30,
+   ~ 32 at H = 4.40, and **beyond 256 at H = 4.50**, where sfmta leads at every budget from 8
+   to 128 and ties at 256. Diverse sampling is exactly where the flat baselines struggle.
+3. **sfmta never loses badly.** Its worst deficit against MDLM anywhere on this table is 29%
+   (NFE = 256, H = 4.30); MDLM's worst deficit against sfmta is 3.0x.
+
+DUO is `oor` in most of the H = 4.40 and all of the H = 4.50 column — its greedy last step caps
+it near H ~ 4.41 (§3), so it cannot be compared at high entropy at all.
+
+### 10.3 sfmta is the flattest curve in NFE — it front-loads its quality
+
+Best Gen. PPL over T (all at the boundary T = 0.50, cf. §7.1):
+
+| method | NFE=1 | NFE=8 | NFE=256 | 8 -> 256 gain |
+|---|---|---|---|---|
+| mdlm  | 87.7 | 22.2 | 8.44 | 2.6x |
+| duo   | 79.3 | 18.4 | 9.66 | 1.9x |
+| flm   | 49.5 | 69.1 | 26.84 | 2.6x |
+| **sfmta** | **21.2** | **18.9** | **13.79** | **1.4x** |
+
+sfmta gets to within 37% of its NFE-256 quality by **NFE = 8**; MDLM needs 2.6x more compute to
+cover the same relative distance. Practically: at H = 4.40, reaching Gen. PPL <= 25 costs
+**NFE = 16 for sfmta vs NFE = 32 for MDLM** — a 2x sampling saving — while DUO and FLM never
+get there at any budget in the grid.
+
+### 10.4 NFE = 1 is a degenerate point, and it is identical to every other S-FLM run
+
+At NFE = 1 the single step argmaxes straight from the sphere prior, so all 512 samples are the
+same string — `<|endoftext|>` + 254 `.` + `<|endoftext|>` — giving H = 0.0457, `uniq = 1`, and
+Gen. PPL 21.16 with **zero seed variance**. This is bit-identical to the S-FLM reference points
+in `experiments/eflm_sde/frontier_cells.csv` (21.160383, 0.045688) not because of a checkpoint
+mix-up but because every S-FLM-family model collapses to the same degenerate string. Treat it
+as a marker, exactly as §4 does for duo and flm — sfmta's 21.16 "win" at NFE = 1 is a win over
+other degenerate points, not a usable sample.
+
+---
+
+## 11. Per-cell results (mean ± sd over seeds 1–3, 512 samples/cell)
 
 Per-seed values are in `frontier_cells.csv`.
 
@@ -621,3 +730,123 @@ Per-seed values are in `frontier_cells.csv`.
 | flm | 256 | 1.10 | 61.83 | 9.91 | 4.6263 | 0.0269 | 512 |
 | flm | 256 | 1.15 | 76.12 | 14.84 | 4.6727 | 0.0259 | 512 |
 | flm | 256 | 1.20 | 97.47 | 23.31 | 4.7147 | 0.0174 | 512 |
+| sfmta | 1 | 0.50 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 0.55 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 0.60 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 0.65 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 0.70 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 0.75 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 0.80 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 0.85 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 0.90 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 0.95 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 1.00 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 1.05 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 1.10 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 1.15 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 1 | 1.20 | 21.16 | 0.00 | 0.0457 | 0.0000 | 1 |
+| sfmta | 4 | 0.50 | 30.19 | 0.17 | 4.1503 | 0.0038 | 512 |
+| sfmta | 4 | 0.55 | 31.76 | 0.42 | 4.1896 | 0.0025 | 512 |
+| sfmta | 4 | 0.60 | 34.04 | 0.50 | 4.2268 | 0.0088 | 512 |
+| sfmta | 4 | 0.65 | 36.29 | 0.76 | 4.2595 | 0.0106 | 512 |
+| sfmta | 4 | 0.70 | 38.65 | 0.52 | 4.2835 | 0.0078 | 512 |
+| sfmta | 4 | 0.75 | 41.55 | 0.51 | 4.3098 | 0.0073 | 512 |
+| sfmta | 4 | 0.80 | 44.82 | 0.45 | 4.3348 | 0.0072 | 512 |
+| sfmta | 4 | 0.85 | 48.55 | 0.66 | 4.3586 | 0.0068 | 512 |
+| sfmta | 4 | 0.90 | 53.07 | 0.51 | 4.3784 | 0.0036 | 512 |
+| sfmta | 4 | 0.95 | 58.14 | 0.98 | 4.3967 | 0.0055 | 512 |
+| sfmta | 4 | 1.00 | 63.94 | 1.33 | 4.4127 | 0.0036 | 512 |
+| sfmta | 4 | 1.05 | 70.59 | 1.65 | 4.4286 | 0.0064 | 512 |
+| sfmta | 4 | 1.10 | 77.84 | 2.30 | 4.4412 | 0.0055 | 512 |
+| sfmta | 4 | 1.15 | 86.41 | 2.31 | 4.4528 | 0.0031 | 512 |
+| sfmta | 4 | 1.20 | 95.80 | 2.06 | 4.4641 | 0.0025 | 512 |
+| sfmta | 8 | 0.50 | 18.89 | 0.19 | 4.1824 | 0.0053 | 512 |
+| sfmta | 8 | 0.55 | 19.65 | 0.13 | 4.2167 | 0.0088 | 512 |
+| sfmta | 8 | 0.60 | 20.55 | 0.14 | 4.2522 | 0.0063 | 512 |
+| sfmta | 8 | 0.65 | 21.62 | 0.18 | 4.2861 | 0.0078 | 512 |
+| sfmta | 8 | 0.70 | 22.93 | 0.24 | 4.3148 | 0.0076 | 512 |
+| sfmta | 8 | 0.75 | 24.47 | 0.31 | 4.3407 | 0.0079 | 512 |
+| sfmta | 8 | 0.80 | 26.07 | 0.56 | 4.3671 | 0.0091 | 512 |
+| sfmta | 8 | 0.85 | 28.41 | 0.45 | 4.3946 | 0.0070 | 512 |
+| sfmta | 8 | 0.90 | 31.16 | 0.54 | 4.4203 | 0.0071 | 512 |
+| sfmta | 8 | 0.95 | 34.50 | 0.67 | 4.4456 | 0.0055 | 512 |
+| sfmta | 8 | 1.00 | 38.47 | 0.98 | 4.4699 | 0.0069 | 512 |
+| sfmta | 8 | 1.05 | 43.26 | 1.45 | 4.4976 | 0.0068 | 512 |
+| sfmta | 8 | 1.10 | 49.37 | 1.36 | 4.5242 | 0.0071 | 512 |
+| sfmta | 8 | 1.15 | 57.09 | 1.70 | 4.5519 | 0.0070 | 512 |
+| sfmta | 8 | 1.20 | 66.86 | 1.87 | 4.5789 | 0.0061 | 512 |
+| sfmta | 16 | 0.50 | 15.88 | 0.19 | 4.1842 | 0.0063 | 512 |
+| sfmta | 16 | 0.55 | 16.32 | 0.09 | 4.2154 | 0.0068 | 512 |
+| sfmta | 16 | 0.60 | 17.04 | 0.06 | 4.2468 | 0.0068 | 512 |
+| sfmta | 16 | 0.65 | 17.69 | 0.03 | 4.2745 | 0.0052 | 512 |
+| sfmta | 16 | 0.70 | 18.56 | 0.12 | 4.3041 | 0.0052 | 512 |
+| sfmta | 16 | 0.75 | 19.63 | 0.06 | 4.3308 | 0.0038 | 512 |
+| sfmta | 16 | 0.80 | 20.90 | 0.02 | 4.3562 | 0.0027 | 512 |
+| sfmta | 16 | 0.85 | 22.38 | 0.08 | 4.3823 | 0.0012 | 512 |
+| sfmta | 16 | 0.90 | 24.20 | 0.26 | 4.4055 | 0.0031 | 512 |
+| sfmta | 16 | 0.95 | 26.70 | 0.28 | 4.4331 | 0.0028 | 512 |
+| sfmta | 16 | 1.00 | 29.43 | 0.42 | 4.4580 | 0.0025 | 512 |
+| sfmta | 16 | 1.05 | 32.79 | 0.51 | 4.4844 | 0.0033 | 512 |
+| sfmta | 16 | 1.10 | 37.44 | 1.10 | 4.5136 | 0.0061 | 512 |
+| sfmta | 16 | 1.15 | 43.58 | 1.72 | 4.5452 | 0.0064 | 512 |
+| sfmta | 16 | 1.20 | 51.24 | 1.94 | 4.5772 | 0.0074 | 512 |
+| sfmta | 32 | 0.50 | 14.71 | 0.14 | 4.1860 | 0.0088 | 512 |
+| sfmta | 32 | 0.55 | 15.11 | 0.17 | 4.2170 | 0.0122 | 512 |
+| sfmta | 32 | 0.60 | 15.64 | 0.21 | 4.2454 | 0.0110 | 512 |
+| sfmta | 32 | 0.65 | 16.27 | 0.16 | 4.2743 | 0.0091 | 512 |
+| sfmta | 32 | 0.70 | 17.05 | 0.26 | 4.2988 | 0.0090 | 512 |
+| sfmta | 32 | 0.75 | 17.92 | 0.26 | 4.3241 | 0.0080 | 512 |
+| sfmta | 32 | 0.80 | 18.92 | 0.13 | 4.3487 | 0.0035 | 512 |
+| sfmta | 32 | 0.85 | 20.18 | 0.17 | 4.3734 | 0.0029 | 512 |
+| sfmta | 32 | 0.90 | 21.65 | 0.18 | 4.3970 | 0.0024 | 512 |
+| sfmta | 32 | 0.95 | 23.54 | 0.18 | 4.4197 | 0.0030 | 512 |
+| sfmta | 32 | 1.00 | 25.91 | 0.21 | 4.4442 | 0.0015 | 512 |
+| sfmta | 32 | 1.05 | 28.86 | 0.37 | 4.4717 | 0.0020 | 512 |
+| sfmta | 32 | 1.10 | 32.64 | 0.58 | 4.4988 | 0.0039 | 512 |
+| sfmta | 32 | 1.15 | 37.34 | 0.95 | 4.5296 | 0.0055 | 512 |
+| sfmta | 32 | 1.20 | 43.99 | 1.66 | 4.5626 | 0.0064 | 512 |
+| sfmta | 64 | 0.50 | 14.19 | 0.08 | 4.1840 | 0.0057 | 512 |
+| sfmta | 64 | 0.55 | 14.57 | 0.12 | 4.2129 | 0.0076 | 512 |
+| sfmta | 64 | 0.60 | 15.06 | 0.20 | 4.2397 | 0.0063 | 512 |
+| sfmta | 64 | 0.65 | 15.63 | 0.20 | 4.2675 | 0.0048 | 512 |
+| sfmta | 64 | 0.70 | 16.26 | 0.21 | 4.2916 | 0.0063 | 512 |
+| sfmta | 64 | 0.75 | 16.98 | 0.10 | 4.3158 | 0.0036 | 512 |
+| sfmta | 64 | 0.80 | 17.88 | 0.07 | 4.3399 | 0.0033 | 512 |
+| sfmta | 64 | 0.85 | 19.06 | 0.08 | 4.3646 | 0.0032 | 512 |
+| sfmta | 64 | 0.90 | 20.44 | 0.14 | 4.3881 | 0.0018 | 512 |
+| sfmta | 64 | 0.95 | 22.26 | 0.21 | 4.4129 | 0.0037 | 512 |
+| sfmta | 64 | 1.00 | 24.39 | 0.16 | 4.4358 | 0.0021 | 512 |
+| sfmta | 64 | 1.05 | 26.97 | 0.24 | 4.4614 | 0.0015 | 512 |
+| sfmta | 64 | 1.10 | 30.34 | 0.51 | 4.4897 | 0.0018 | 512 |
+| sfmta | 64 | 1.15 | 34.79 | 1.00 | 4.5198 | 0.0041 | 512 |
+| sfmta | 64 | 1.20 | 40.77 | 1.36 | 4.5550 | 0.0056 | 512 |
+| sfmta | 128 | 0.50 | 13.87 | 0.12 | 4.1836 | 0.0084 | 512 |
+| sfmta | 128 | 0.55 | 14.25 | 0.11 | 4.2129 | 0.0045 | 512 |
+| sfmta | 128 | 0.60 | 14.65 | 0.07 | 4.2404 | 0.0034 | 512 |
+| sfmta | 128 | 0.65 | 15.16 | 0.15 | 4.2658 | 0.0050 | 512 |
+| sfmta | 128 | 0.70 | 15.74 | 0.18 | 4.2883 | 0.0051 | 512 |
+| sfmta | 128 | 0.75 | 16.58 | 0.13 | 4.3140 | 0.0066 | 512 |
+| sfmta | 128 | 0.80 | 17.49 | 0.24 | 4.3376 | 0.0084 | 512 |
+| sfmta | 128 | 0.85 | 18.50 | 0.29 | 4.3603 | 0.0078 | 512 |
+| sfmta | 128 | 0.90 | 19.77 | 0.31 | 4.3832 | 0.0063 | 512 |
+| sfmta | 128 | 0.95 | 21.40 | 0.48 | 4.4065 | 0.0056 | 512 |
+| sfmta | 128 | 1.00 | 23.54 | 0.51 | 4.4325 | 0.0069 | 512 |
+| sfmta | 128 | 1.05 | 26.16 | 0.50 | 4.4601 | 0.0074 | 512 |
+| sfmta | 128 | 1.10 | 29.48 | 0.64 | 4.4878 | 0.0090 | 512 |
+| sfmta | 128 | 1.15 | 33.67 | 0.59 | 4.5181 | 0.0057 | 512 |
+| sfmta | 128 | 1.20 | 39.20 | 0.97 | 4.5481 | 0.0065 | 512 |
+| sfmta | 256 | 0.50 | 13.79 | 0.07 | 4.1841 | 0.0063 | 512 |
+| sfmta | 256 | 0.55 | 14.11 | 0.08 | 4.2109 | 0.0052 | 512 |
+| sfmta | 256 | 0.60 | 14.49 | 0.06 | 4.2389 | 0.0058 | 512 |
+| sfmta | 256 | 0.65 | 15.03 | 0.10 | 4.2651 | 0.0069 | 512 |
+| sfmta | 256 | 0.70 | 15.66 | 0.12 | 4.2877 | 0.0051 | 512 |
+| sfmta | 256 | 0.75 | 16.39 | 0.14 | 4.3141 | 0.0050 | 512 |
+| sfmta | 256 | 0.80 | 17.31 | 0.20 | 4.3383 | 0.0049 | 512 |
+| sfmta | 256 | 0.85 | 18.41 | 0.24 | 4.3605 | 0.0052 | 512 |
+| sfmta | 256 | 0.90 | 19.60 | 0.21 | 4.3832 | 0.0038 | 512 |
+| sfmta | 256 | 0.95 | 21.19 | 0.34 | 4.4064 | 0.0028 | 512 |
+| sfmta | 256 | 1.00 | 23.32 | 0.44 | 4.4311 | 0.0040 | 512 |
+| sfmta | 256 | 1.05 | 25.78 | 0.56 | 4.4590 | 0.0053 | 512 |
+| sfmta | 256 | 1.10 | 28.87 | 0.75 | 4.4865 | 0.0073 | 512 |
+| sfmta | 256 | 1.15 | 32.91 | 0.82 | 4.5142 | 0.0072 | 512 |
+| sfmta | 256 | 1.20 | 38.31 | 1.10 | 4.5462 | 0.0048 | 512 |

@@ -15,6 +15,7 @@ TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
 ALPHA_MAX="${ALPHA_MAX:-0.121}"
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
+TEMPERATURE="${TEMPERATURE:-1.0}"
 NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
 RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}" # false: GenPPL pass only
 
@@ -74,7 +75,7 @@ python -u -m main \
     eval.compute_generative_perplexity=True \
     eval.results_json_path="${OUTPUT_DIR}/samples_genppl.json" \
     sampler.num_sample_batches=${NUM_SAMPLE_BATCHES} \
-    sampler.temperature=1.0 \
+    sampler.temperature=${TEMPERATURE} \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
     trainer.num_nodes=1 \

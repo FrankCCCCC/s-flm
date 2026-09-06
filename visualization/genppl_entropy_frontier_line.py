@@ -26,7 +26,8 @@ CELL_RE = re.compile(
   r'/m-(?P<method>[^_/]+)_lr-(?P<lr>[^_/]+)_sd-(?P<seed>\d+)'
   r'/frontier/nfe-(?P<nfe>\d+)_t-(?P<temp>[\d.]+)/samples_genppl\.json$')
 STYLE = {'mdlm': ('MDLM', '#1f77b4'), 'duo': ('DUO', '#ff7f0e'),
-         'flm': ('FLM', '#2ca02c'), 'ar': ('AR', '#d62728')}
+         'flm': ('FLM', '#2ca02c'), 'ar': ('AR', '#d62728'),
+         'sfmta': ('S-FLM (trunc+ada)', '#9467bd')}
 
 
 def load(dir_, lr):
@@ -150,7 +151,7 @@ def main():
   p = argparse.ArgumentParser(description=__doc__)
   p.add_argument('--dir', default='outputs/naive_ar_tinystories_s256')
   p.add_argument('--lr', default='1e-3', help='LR of the pretrained cells')
-  p.add_argument('--methods', default='mdlm,duo,flm')
+  p.add_argument('--methods', default='mdlm,duo,flm,sfmta')
   p.add_argument('--out', default='experiments/naive_ar_tinystories_s256/'
                  'figures/genppl_entropy_frontier_line.png')
   p.add_argument('--csv', default='experiments/naive_ar_tinystories_s256/'
