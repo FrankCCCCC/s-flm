@@ -222,7 +222,149 @@ All conclusions above are drawn at NFE ≥ 8, where FLM's CV is below 10%.
 
 ---
 
-## 7. Limitations
+## 7. EFLM joins the frontier — and owns the low-NFE regime
+
+`experiments/eflm_sde/setup.md` adds **Rescale + Auto + Trunc + EFLM** to this frontier on
+the same grid. 360 cells, 3 seeds, zero failures; sweep
+`experiments/eflm_sde/tfrontier_sweep.py`.
+
+### 7.1 Why `top_k_velocity = -1` — under top-1 velocity temperature does nothing
+
+Temperature enters as `logits / T` in `trainer_base.Diffusion.forward`. With
+`top_k_velocity = 1` the velocity is `E[argmax] - x` and the last step is `argmax`; both are
+invariant to a positive rescaling of the logits, so **T cannot move the sample**. Measured
+(seed 1, NFE 16, 32 samples):
+
+| arm | T = 0.50 | T = 1.00 | T = 1.20 |
+|---|---|---|---|
+| `top_k_v = 1` | 13.54 @ H 3.803 | 13.54 @ H 3.803 | 13.87 @ H 3.802 |
+| `top_k_v = -1` | 14.72 @ H 4.137 | 28.78 @ H 4.469 | 50.30 @ H 4.587 |
+
+T = 0.50 is **bit-identical** to T = 1.00 (0.5 is a power of two, so `logits / T` is exact and
+no argmax can move); T = 1.20 differs only by float rounding flipping near-ties. This is the
+paper's own statement (App. C.8): *"S-FLM with k = 1 velocity does not depend on the
+temperature, so it appears as a single marker rather than a curve."* With
+`top_k_velocity = -1` the velocity is `softmax(logits/T) @ E - x`, so T reshapes the target at
+every Euler step — the paper's **exact velocity** arm. Both are drawn: EFLM as a curve, the
+k = 1 variant as a star.
+
+### 7.2 Matched-entropy Gen. PPL: EFLM wins at NFE 4–16, MDLM at NFE ≥ 32
+
+Interpolated per seed along that seed's curve (every seed must bracket H), then mean ± sd.
+
+| NFE | H | MDLM | DUO | FLM | **EFLM** | EFLM rank |
+|---|---|---|---|---|---|---|
+| 4 | 4.10 | 85.68 ±3.65 | 82.91 ±4.85 | 112.64 ±14.48 | **39.61 ±1.80** | **1/4** |
+| 4 | 4.20 | 98.55 ±3.05 | 161.93 ±25.45 | 162.64 ±60.69 | **46.60 ±3.26** | **1/4** |
+| 8 | 4.20 | 31.08 ±0.70 | 24.19 ±0.69 | 113.54 ±65.55 | **20.44 ±0.73** | **1/4** |
+| 8 | 4.35 | 42.36 ±0.35 | 49.66 ±5.82 | 88.17 ±6.50 | **26.85 ±0.93** | **1/4** |
+| 8 | 4.50 | 68.17 ±0.38 | — | 120.48 ±25.07 | **48.56 ±1.16** | **1/3** |
+| 16 | 4.20 | **16.52 ±0.14** | 15.28 ±0.37 | 63.98 ±11.81 | 15.92 ±0.42 | 2/4 |
+| 16 | 4.35 | 23.89 ±0.48 | 27.80 ±0.62 | 63.58 ±2.71 | **20.72 ±0.58** | **1/4** |
+| 16 | 4.50 | 42.35 ±0.59 | — | 74.09 ±3.75 | **36.29 ±0.77** | **1/3** |
+| 32 | 4.20 | **12.23 ±0.10** | 12.53 ±0.20 | 45.43 ±1.24 | 14.50 ±0.48 | 3/4 |
+| 32 | 4.35 | **17.84 ±0.35** | 21.07 ±0.53 | 49.15 ±1.32 | 18.74 ±0.46 | 2/4 |
+| 32 | 4.50 | 33.47 ±0.27 | — | 58.86 ±1.82 | **32.21 ±0.64** | **1/3** |
+| 64 | 4.20 | **10.77 ±0.06** | 11.59 ±0.16 | 36.61 ±0.70 | 13.96 ±0.49 | 3/4 |
+| 64 | 4.35 | **16.18 ±0.14** | 19.68 ±1.05 | 40.57 ±0.89 | 17.95 ±0.45 | 2/4 |
+| 64 | 4.50 | **30.70 ±0.53** | — | 50.06 ±1.16 | 31.61 ±0.66 | 2/3 |
+| 128 | 4.20 | **10.05 ±0.01** | 11.02 ±0.21 | 30.95 ±0.29 | 13.52 ±0.35 | 3/4 |
+| 128 | 4.35 | **14.97 ±0.15** | 19.08 ±0.75 | 34.89 ±0.61 | 17.68 ±0.29 | 2/4 |
+| 128 | 4.50 | **30.49 ±0.12** | — | 44.55 ±1.02 | 30.87 ±0.70 | 2/3 |
+| 256 | 4.20 | **9.74 ±0.06** | 11.05 ±0.10 | 27.42 ±0.47 | 13.40 ±0.41 | 3/4 |
+| 256 | 4.35 | **15.00 ±0.05** | 18.88 ±0.51 | 31.59 ±0.59 | 17.45 ±0.52 | 2/4 |
+| 256 | 4.50 | **30.24 ±0.39** | — | 41.39 ±1.42 | 30.83 ±0.65 | 2/3 |
+
+Three readings:
+
+1. **At NFE 4–16 EFLM is the best method on this frontier**, at every matched entropy where
+   all four are measurable — by **2.1x** over the best baseline at NFE 4 / H 4.10 (39.6 vs
+   82.9), **16%** at NFE 8 / H 4.20, **13%** at NFE 16 / H 4.35. The one exception is
+   NFE 16 / H 4.20, where DUO edges it by 4%.
+2. **At NFE ≥ 32 MDLM takes the low-entropy region** (H ≤ 4.35) and EFLM falls to 2nd–3rd,
+   5–38% behind (worst at H = 4.20, where the gap grows with NFE: +19% at 32 → +38% at 256;
+   at H = 4.35 it is only +5% to +18%). But at **H = 4.50** EFLM is *ahead* at NFE 32 (−3.8%)
+   and within 1–3% of MDLM at 64–256 — the gap is a low-entropy phenomenon, not a global one.
+3. **EFLM beats FLM at every budget and every matched entropy**, by **1.3–5.6x** — widest at
+   low NFE (5.6x at NFE 8 / H 4.20) and narrowing to 1.3–2.1x at NFE 256, where FLM is still
+   improving and EFLM has saturated (§7.3). The Euclidean flow with truncated autonomous noise
+   is a decisively better continuous-flow generator than FLM on this setup — consistent with
+   `experiments/eflm_sde/RESULTS.md` §2.
+
+### 7.3 EFLM saturates with NFE; the discrete baselines do not
+
+Best cell per method, minimised over T (all land on the T = 0.50 grid boundary — §8.1):
+
+| NFE | MDLM | DUO | FLM | EFLM | EFLM gain vs its own NFE-4 |
+|---|---|---|---|---|---|
+| 4 | 49.08 ±0.31 | 65.68 ±1.08 | 50.60 ±43.65 | **34.61 ±0.32** | 1.00x |
+| 8 | 22.24 ±0.09 | 18.42 ±0.61 | 69.12 ±3.75 | **18.25 ±0.23** | 1.90x |
+| 16 | 13.19 ±0.12 | **12.38 ±0.13** | 56.26 ±1.62 | 14.62 ±0.20 | 2.37x |
+| 32 | **10.47 ±0.03** | 10.60 ±0.14 | 44.99 ±0.94 | 13.37 ±0.12 | 2.59x |
+| 64 | **9.27 ±0.01** | 10.03 ±0.10 | 36.40 ±0.65 | 12.81 ±0.12 | 2.70x |
+| 128 | **8.64 ±0.09** | 9.76 ±0.02 | 30.46 ±0.33 | 12.61 ±0.18 | 2.75x |
+| 256 | **8.44 ±0.02** | 9.66 ±0.08 | 26.84 ±0.34 | 12.44 ±0.14 | 2.78x |
+
+From NFE 4 to 256 MDLM improves **5.8x** and DUO **6.8x**; EFLM improves only **2.8x** and is
+flat past NFE ≈ 64 (12.81 → 12.44, a 3% gain for 4x the compute). **EFLM converts its budget
+almost entirely in the first 16 steps.** That single fact explains the whole ranking flip in
+§7.2: EFLM is not losing at high NFE, it is finished at low NFE while the baselines are still
+improving.
+
+### 7.4 EFLM's temperature window is narrower and shifted right
+
+3-seed intersection of the reachable entropy range over T ∈ [0.50, 1.20]:
+
+| NFE | EFLM (exact vel.) | MDLM | DUO |
+|---|---|---|---|
+| 8 | 4.117 – 4.549 | 3.901 – 4.879 | 4.013 – 4.371 |
+| 16 | 4.130 – 4.554 | 3.987 – 4.763 | 4.062 – 4.404 |
+| 32 | 4.138 – 4.546 | 4.043 – 4.698 | 4.088 – 4.413 |
+| 64 | 4.126 – 4.530 | 4.049 – 4.660 | 4.092 – 4.408 |
+| 128 | 4.140 – 4.521 | 4.065 – 4.625 | 4.111 – 4.406 |
+| 256 | 4.141 – 4.518 | 4.071 – 4.619 | 4.103 – 4.403 |
+
+EFLM's floor sits **0.07–0.10 nats above MDLM's** at NFE ≥ 32 (0.14–0.22 at NFE 8–16), so the
+region where MDLM posts its best numbers (H ≈ 4.04–4.14) is simply **not reachable by EFLM's
+temperature knob** — the comparison at H = 4.10 is unavailable, not lost. Its ceiling is
+**0.12–0.18 nats above DUO's**, so EFLM covers a high-entropy region DUO cannot reach at
+all (§3).
+
+### 7.5 EFLM has three decoding modes, and they cover different entropy bands
+
+The temperature curve is only one of three ways to trade Gen. PPL for entropy in EFLM. The
+other two come from `experiments/eflm_sde`: the T-inert **k = 1 velocity** point, and the
+marginal-preserving **SDE sampler** (`eta > 0`, `g(t) = (1-t)^p`). Best cell of each:
+
+| NFE | k = 1 velocity (T-inert) | exact velocity, best T | eta-SDE, best cell |
+|---|---|---|---|
+| 8 | 16.46 @ H 3.677 | 18.25 @ H 4.086 | **16.12 @ H 3.725** (sqrt) |
+| 16 | 13.06 @ H 3.754 | 14.62 @ H 4.106 | **11.95 @ H 3.899** (sqrt) |
+| 32 | 12.00 @ H 3.783 | 13.37 @ H 4.109 | **10.48 @ H 3.888** (sqrt) |
+| 64 | 11.60 @ H 3.796 | 12.81 @ H 4.108 | **9.56 @ H 3.927** (sqrt) |
+| 128 | 11.41 @ H 3.802 | 12.61 @ H 4.113 | **9.26 @ H 3.923** (sqrt) |
+| 256 | 11.33 @ H 3.806 | 12.44 @ H 4.113 | **9.21 @ H 3.979** (sqrt) |
+
+- The **eta-SDE Pareto-dominates the k = 1 marker outright** at every NFE ≥ 16 (lower Gen. PPL
+  *and* higher entropy), so the paper's "top-1 velocity beats unrestricted decoding" holds only
+  against the ODE; the SDE beats both.
+- But at matched entropy **in the H ≥ 4.2 band the temperature knob beats the SDE knob**, by
+  **7–92% across NFE 16–64** — at NFE 32 / H 4.35, T gives 18.74 vs the best eta cell's 57.2;
+  at NFE 8 / H 4.20, 20.44 vs 33.82. The single exception in the measured grid is
+  NFE 128 / H 4.20, where eta is 4% better. `eta` buys entropy cheaply near H ≈ 3.9–4.1 and
+  then collapses; T buys it smoothly out to H ≈ 4.55.
+- **The two knobs are complementary, not competing**: eta owns H ∈ [3.8, 4.1], temperature owns
+  H ∈ [4.1, 4.55]. Neither alone traces EFLM's full frontier. (This refutes the pre-registered
+  H5 in `experiments/eflm_sde/EXPERIMENT.md`, which expected the SDE to dominate everywhere.)
+
+> Note: the eta values above are recomputed under this section's stricter per-seed
+> interpolation rule, so they differ slightly from `experiments/eflm_sde/RESULTS.md` §2, which
+> interpolated along the seed-mean curve. The stricter rule drops (NFE, H) cells that some
+> seed does not bracket, which is why several eta entries are unavailable at NFE ≥ 128.
+
+---
+
+## 8. Limitations
 
 1. **The low-entropy end of the frontier is not resolved.** For every method at NFE ≥ 8 the
    minimum Gen. PPL over the grid sits at the **boundary** T = 0.50, so the true minimum is
@@ -269,7 +411,7 @@ All conclusions above are drawn at NFE ≥ 8, where FLM's CV is below 10%.
    NFE** MDLM needs, and never loses to MDLM by more than 13%. The "diffusion needs many steps"
    framing of §8.3 is a property of the *flat* baselines, not of flow LMs in general.
 
-## 9. Recommended next steps
+## 10. Recommended next steps
 
 | priority | action | cost |
 |---|---|---|

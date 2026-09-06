@@ -13,8 +13,10 @@ per-seed `frontier_cells.csv` of `naive_ar_tinystories_s256` (same 3-seed,
 512-sample, per-NFE protocol). S-FLM: `seed_errbar` checkpoints (trunc+ada,
 SC), default decode, NFE-swept.
 
-**STATUS: COMPLETE — phases 1-2 + p75 refinement, 461 EFLM cells + 24 S-FLM
-cells, 0 failures.**
+**STATUS: COMPLETE — phases 1-2 + p75 refinement (461 EFLM cells + 24 S-FLM
+cells) and phase 3, the temperature frontier (360 cells + 3 marker cells;
+§6 and `experiments/naive_ar_tinystories_s256/FRONTIER_RESULTS.md` §7).
+824 cells total, 0 failures.**
 
 ![frontier](figures/genppl_entropy_frontier.png)
 
@@ -162,6 +164,156 @@ parent sweep's §4.1. Recommended operating etas sit >= 4x below eta*.
    SDE sampler would make that a fair curve-vs-curve comparison.
 5. Data-entropy anchor for the x-axis still missing (naive_ar limitation #2).
 
+
+---
+
+## 6. Phase 3 — the temperature frontier (exact velocity, `top_k_velocity = -1`)
+
+360 cells (3 seeds x NFE {1,...,256} x T {0.50,...,1.20}), 512 samples each, zero failures.
+Sweep: `tfrontier_sweep.py`. Full analysis and the figure live with the baselines, in
+`experiments/naive_ar_tinystories_s256/FRONTIER_RESULTS.md` §7 — this section records only
+what it changes for *this* project.
+
+**`top_k_velocity = 1` makes temperature a no-op; `-1` makes it a knob.** `logits / T` cannot
+move an argmax, so under top-1 velocity + greedy last step T = 0.50 is bit-identical to
+T = 1.00 (13.54 @ H 3.803 both, NFE 16). Under full-vocab exact velocity the same sweep spans
+14.72 @ H 4.137 → 50.30 @ H 4.587. The paper says the same thing in App. C.8, and draws the
+k = 1 variant as a single marker; those markers are this project's `eta = 0` ODE cells.
+
+**H4 confirmed.** Entropy is strictly monotone in T for every (NFE, seed) — 24/24 curves —
+and Gen. PPL rises with it. T is a well-behaved frontier parameter.
+
+**H5 refuted — the two knobs are complementary, not ranked.** At matched entropy the
+temperature knob *beats* the SDE knob throughout H >= 4.2, by 7-92% at NFE 16-64 (e.g.
+NFE 32 / H 4.35: T 18.74 vs best eta 57.20); the one measured exception is NFE 128 / H 4.20,
+where eta is 4% better. But the SDE owns everything below H ~= 4.1, where
+temperature cannot reach at all: EFLM's T-curve floors at H ~= 4.13-4.14, while the SDE basin
+sits at 9.2-9.8 @ H 3.92-3.99. So:
+
+| band | best EFLM mechanism | Gen. PPL reached |
+|---|---|---|
+| H ~ 3.8 | k = 1 velocity, eta = 0 (T-inert marker) | 11.3-13.1 |
+| H in [3.85, 4.1] | **SDE**, `gt=sqrt`, eta ~ NFE/16 | **9.2-12.0** |
+| H in [4.1, 4.55] | **temperature**, exact velocity | 12.4-48.6 |
+
+**H6 partially confirmed, and superseded.** The k = 1 marker does give lower Gen. PPL than the
+exact-velocity curve at every NFE (11.33 vs 12.44 at NFE 256), reproducing the paper's
+"top-1 beats unrestricted decoding" — but at ~0.3 nats lower entropy, so neither Pareto-
+dominates the other. The SDE Pareto-dominates the k = 1 marker outright at every NFE >= 16
+(lower Gen. PPL *and* higher entropy), so §1's recommendation stands.
+
+**New for the parent comparison:** against MDLM/DUO/FLM the temperature arm makes EFLM the
+**best method on the frontier at NFE 4-16** (2.1x over the best baseline at NFE 4 / H 4.10),
+while MDLM takes H <= 4.35 at NFE >= 32. The cause is saturation, not degradation: EFLM
+improves only 2.8x from NFE 4 to 256 (MDLM 5.8x) and just 3% past NFE 64.
+
+**Open item this creates.** §5 item 2 asked whether a temperature-sensitive decode composed
+with the SDE could reach H >= 4.35 cheaply. Half of it is now answered (temperature alone
+does reach H 4.55, at eta = 0). The composition `eta > 0` **and** `T > 1` is still untested
+and is the natural next sweep — the bands above suggest it could hold the 9.2 basin while
+extending right.
+
+---
+
+## 7. Temperature vs eta, head to head
+
+`compare_knobs.py` puts EFLM's two diversity knobs on the same axes, one panel
+per NFE.
+
+![knobs](figures/knob_comparison_t_vs_eta.png)
+
+*Caveat on what is being compared.* The arms necessarily differ in more than the
+knob: temperature is argmax-invariant under top-1 velocity (§6), so the T-arm
+runs **exact velocity over the full vocab** (`top_k_velocity = -1`, eta = 0)
+while the eta-arm runs **top-1 velocity + SDE** (`top_k_velocity = 1`). "T-knob"
+and "eta-knob" name whole sampler configurations, not one isolated variable.
+
+### 7.1 They swap places at H ~= 4.15-4.25
+
+| NFE | H=4.15 | H=4.20 | H=4.25 | H=4.30 | H=4.35 | H=4.45 |
+|---|---|---|---|---|---|---|
+| 4 | **T** 94% | **T** 97% | **T** 98% | **T** 98% | T only | T only |
+| 8 | **T** 35% | **T** 40% | **T** 57% | **T** 71% | **T** 100% | **T** 100% |
+| 16 | **T** 14% | **T** 22% | **T** 34% | **T** 47% | **T** 53% | **T** 76% |
+| 32 | eta 0% | **T** 25% | **T** 52% | **T** 62% | **T** 67% | **T** 68% |
+| 64 | **eta** 10% | **T** 7% | **T** 35% | **T** 52% | **T** 60% | **T** 62% |
+| 128 | **eta** 14% | **eta** 3% | **T** 25% | **T** 46% | **T** 55% | **T** 58% |
+| 256 | **eta** 19% | T only | T only | T only | T only | T only |
+
+(winner and margin at matched entropy; "eta" = best of sqrt/linear/p75.) The
+crossover **moves right as NFE grows** — T wins from H >= 4.15 at NFE 8-16, from
+4.20 at NFE 32-64, from 4.25 at NFE 128+. More steps give the SDE more room to
+re-absorb its own injected noise, so the band it can hold widens; but it never
+extends past H ~= 4.25.
+
+### 7.2 Temperature is 5-10x cheaper per nat of entropy
+
+Gen. PPL multiplier per +0.1 nats, over the shared H in [4.15, 4.35]:
+
+| NFE | 4 | 8 | 16 | 32 | 64 | 128 | 256 |
+|---|---|---|---|---|---|---|---|
+| temperature | 1.41x | 1.18x | 1.17x | 1.16x | 1.16x | 1.17x | **1.17x** |
+| best eta | 2.39x | 14.32x | 1.58x | 2.04x | 1.93x | 1.89x | — |
+
+Temperature's price is **1.16-1.18x per 0.1 nats and essentially independent of
+NFE** — a remarkably stable exchange rate. eta's is 1.6-2.4x and worsens toward
+the collapse cliff. This is the whole story of §7.1 in one row: the two curves
+start close, and eta's steeper slope loses it the race within ~0.1 nats.
+
+### 7.3 eta reaches the deeper minimum; T reaches further right
+
+| | best Gen. PPL | at H | reachable H window |
+|---|---|---|---|
+| eta (sqrt), NFE 256 | **9.21** | 3.979 | 3.86 – 4.19 (usable) |
+| eta (sqrt), NFE 128 | **9.26** | 3.923 | 3.84 – 4.25 (usable) |
+| temperature, NFE 256 | 12.44 | 4.113 | 4.14 – 4.52 |
+| eta = 0 ODE (k=1 vel.), NFE 256 | 11.33 | 3.806 | single point |
+
+Neither knob spans EFLM's frontier: the T-curve **cannot go below H ~= 4.13-4.14**
+at any NFE (T = 0.50 is the grid edge, and even there the full-vocab velocity
+keeps the sample diverse), and the eta-curve cannot go above H ~= 4.25 without
+collapsing. The Pareto envelope of EFLM is the union — eta for H <= 4.2,
+temperature for H >= 4.25:
+
+| NFE | H=3.95 | H=4.05 | H=4.15 | H=4.25 | H=4.35 | H=4.45 |
+|---|---|---|---|---|---|---|
+| 8 | 18.8 (eta/lin) | 23.1 (eta/lin) | 19.4 (T) | 21.9 (T) | 26.8 (T) | 38.3 (T) |
+| 16 | 12.6 (eta/sqrt) | 14.6 (eta/lin) | 15.1 (T) | 17.0 (T) | 20.7 (T) | 29.0 (T) |
+| 32 | 10.6 (eta/sqrt) | 11.8 (eta/lin) | 13.8 (eta/lin) | 15.3 (T) | 18.7 (T) | 26.0 (T) |
+| 64 | 9.6 (eta/sqrt) | 10.4 (eta/sqrt) | 12.0 (eta/lin) | 14.9 (T) | 18.0 (T) | 25.4 (T) |
+| 128 | 9.3 (eta/sqrt) | 9.7 (eta/sqrt) | 11.1 (eta/sqrt) | 14.3 (T) | 17.7 (T) | 24.8 (T) |
+| 256 | 9.2 (eta/sqrt) | 9.3 (eta/sqrt) | 10.4 (eta/sqrt) | 14.2 (T) | 17.4 (T) | 24.8 (T) |
+
+### 7.4 Temperature is far more stable
+
+Across the entire T sweep the 3-seed sd stays at **2-4% of the mean** (e.g.
+26.85 +- 0.93 at NFE 8 / H 4.35). The eta arm is well behaved inside its basin
+but becomes bimodal near the cliff — 6090 +- 5184 at the same (NFE, H), an 85%
+relative sd, the cliff-edge behavior of §4. **If you need one knob you can turn
+without monitoring, it is temperature.**
+
+### 7.5 At NFE = 4 only temperature works
+
+eta is unusable at 4 steps: the best schedule gives 773 at H 4.15 rising to 5251
+at H 4.45, because four steps cannot denoise any useful injection. Temperature
+delivers 42.6 -> 66.7 over H 4.15-4.30 on the same checkpoints. §5 item 1 said
+"NFE = 4 is not rescued"; with the temperature knob it partly is, and it is what
+makes EFLM the best method on the whole frontier at NFE 4
+(`experiments/naive_ar_tinystories_s256/FRONTIER_RESULTS.md` §7.2).
+
+### 7.6 What to use
+
+| target entropy | knob | setting |
+|---|---|---|
+| H <= 4.10 | **eta**, `top_k_velocity=1` | `gt=sqrt`, eta ~ NFE/16 (NFE >= 32) |
+| H 4.10 - 4.25 | **eta** at NFE >= 32, **T** at NFE <= 16 | see §7.1 |
+| H >= 4.25 | **temperature**, `top_k_velocity=-1` | eta = 0, T in [0.6, 1.2] |
+| NFE <= 4 | **temperature** only | eta collapses |
+
+The obvious untested cell is the **composition** — eta > 0 *and* full-vocab
+velocity with T > 1 — which could hold the 9.2 basin while inheriting
+temperature's cheap 1.17x/0.1-nat slope. Nothing in the data rules it out.
+
 ## Reproduce
 
     python experiments/eflm_sde/frontier_sweep.py                   # pilot
@@ -176,3 +328,9 @@ parent sweep's §4.1. Recommended operating etas sit >= 4x below eta*.
     python experiments/eflm_sde/frontier_sweep.py --sfm --seeds 1 2 3 \
         --nfes 1 4 8 16 32 64 128 256
     python experiments/eflm_sde/analyze.py
+    # phase 3 — the temperature frontier (exact velocity, top_k_velocity = -1)
+    python experiments/eflm_sde/frontier_sweep.py --seeds 1 2 3 --nfes 1 --ode-extra
+    python experiments/eflm_sde/tfrontier_sweep.py --nfes 1 4 8 16 32
+    python experiments/eflm_sde/tfrontier_sweep.py --nfes 64 128 256 --t-chunk 5
+    python visualization/genppl_entropy_frontier_line.py
+    python experiments/eflm_sde/compare_knobs.py   # sec. 7, T vs eta

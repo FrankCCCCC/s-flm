@@ -1,4 +1,4 @@
-# EFLM SDE Sampler + GenPPL - Entropy Frontier Line Evaluation
+# EFLM SDE + Temperature Sampler + GenPPL - Entropy Frontier Line Evaluation
 
 - Pick and load best checkpoints from ``experiments/eflm_rescale_auto_trunc_tinystories_256`` to evaluate the frontier line with various ``eta`` and ``GScheduler``
 - Search for best ``GScheduler`` and ``eta`` that can maintain the same GenPPL with highest entropy, make EFLM become competive to DUO, FLM, MDLM, and S-FLM. Design the best ``GScheduler``
@@ -6,7 +6,7 @@
 
 ---
 
-# Frontier Line Evaluation
+# EFLM SDE + Temperature Sampler + GenPPL - Entropy Frontier Line Evaluation
 
 - GenPPL & Entropy Frontier Evaluation
   - Refer to ``/home/sc3379/workspace/research/s-flm-dev/s-flm/papers/Language Modeling with Hyperspherical Flows.pdf``, Figure 10, draw the GenPPL (Y axis) vs Entropy (X axis) frontier line for each NFE 
@@ -17,6 +17,8 @@
   - Draw 512 samples for each cell
   - Draw the GenPPL (Y axis) vs Entropy (X axis) frontier line for each NFE, output in ``experiments/naive_ar_tinystories_s256``
   - Report the mean and std across 3 seeds as solid line and the shadow of the frontier
+  - Greedy decoding for last sampling step
+- Only for Rescale + Auto + Trunc + EFLM
   - Exact-velocity, top_k_v = -1 (all)
   - Greedy decoding for last sampling step
-  - $\eta = 0$, ``GT=Linear``
+  - Choose best $\eta$, ``GT=Linear`` to achieve best frontier line, incorporating the temperature frontier line
