@@ -8,6 +8,7 @@
   - MDLM
   - DUO
   - FLM
+  - S-FLM + Trunc + Ada
 - Seed: {1, 2, 3}
 ---
 
