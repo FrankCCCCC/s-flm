@@ -75,6 +75,8 @@ def _load_config(run_dir: str, ckpt: str, args):
     cfg.algo.self_conditioning = False  # pre-knob configs: no self-conditioning
   if cfg.algo.get('p_self_cond') is None:
     cfg.algo.p_self_cond = 0.0
+  if cfg.algo.get('snr_weighted_ce') is None:
+    cfg.algo.snr_weighted_ce = False  # pre-knob EFLM configs: unweighted CE
   return cfg
 
 
