@@ -7,12 +7,16 @@ spectral quantities, both plotted here, are
   sigma_i   the d singular values of E
   lambda_i  the d eigenvalues of the Gram matrix E^T E, = sigma_i^2
 
-Two codebook variants per run:
+Codebook variants per run:
   raw       E exactly as trained (the nn.Embedding parameter)
   rescaled  rescale_radius(E, algo.rho_min, algo.rho_max) -- the codebook the
             flow actually embeds into (cf. EFLM.q_xt / _sc_embed_table); for
             rho_min == rho_max == R every row is pinned to norm R, i.e. R times
-            the row-normalized E. Identity when neither rho is set.
+            the row-normalized E. Identity when neither rho is set. Only the
+            sphere-dit backbone has it; skipped for plain DiT / FLM-DiT.
+  normalized             every row projected onto the unit sphere
+  normalized-mean-shift  normalize, then subtract the mean direction
+  mean-shift-normalized  subtract the mean row, then normalize
 
 Weights are the EMA ones, as trainer.validate() sees them.
 
@@ -55,11 +59,22 @@ def embedding_matrices(ckpt: str, args):
   model = main_mod._load_from_checkpoint(
     ALGO_BY_NAME[cfg.algo.name], cfg, tokenizer).eval()
   model._eval_mode()  # swap in EMA weights, as trainer.validate does
-  W = model.backbone.sphere_embed.weight.detach().double()
-  rescaled = model.backbone.rescale_radius(
-    W, cfg.algo.get('rho_min'), cfg.algo.get('rho_max'))
+  bb = model.backbone
+  # sphere/hyperbolic backbones name the codebook `sphere_embed`; the plain DiT
+  # and FLM-DiT ones keep it as the `vocab_embed` parameter.
+  W = (bb.sphere_embed.weight if hasattr(bb, 'sphere_embed')
+       else bb.vocab_embed.embedding).detach().double()
   normalized = torch.nn.functional.normalize(W, p=2.0, dim=-1)
-  return {'raw': W, 'rescaled': rescaled, 'normalized': normalized}, cfg
+  normalized_mean_shift = normalized - normalized.mean(dim=0)
+  mean_shift_normalized = torch.nn.functional.normalize(W - W.mean(dim=0), p=2.0, dim=-1)
+  mats = {'raw': W}
+  if hasattr(bb, 'rescale_radius'):  # sphere-dit only
+    mats['rescaled'] = bb.rescale_radius(
+      W, cfg.algo.get('rho_min'), cfg.algo.get('rho_max'))
+  mats.update({'normalized': normalized,
+               'normalized-mean-shift': normalized_mean_shift,
+               'mean-shift-normalized': mean_shift_normalized})
+  return mats, cfg
 
 
 def spectrum(W: torch.Tensor) -> dict:
@@ -110,6 +125,9 @@ def main():
                  help='output prefix (no extension); default '
                       'experiments/{project}/codebook_eigen_dist_{run}')
   p.add_argument('--bins', type=int, default=200)
+  p.add_argument('--variants', default=None,
+                 help='comma-separated subset of the variants to plot; '
+                      'default: all of them')
   p.add_argument('--cache-dir', default=os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data_cache'))
   args = p.parse_args()
@@ -124,6 +142,8 @@ def main():
   os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
 
   mats, cfg = embedding_matrices(args.ckpt, args)
+  if args.variants:
+    mats = {k: mats[k] for k in args.variants.split(',')}
   print(f'{run}: algo={cfg.algo.name} rho_min={cfg.algo.get("rho_min")} '
         f'rho_max={cfg.algo.get("rho_max")}', flush=True)
   for variant, W in mats.items():
