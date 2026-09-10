@@ -1,0 +1,20 @@
+{
+  "eflmrs256_trunc_ada_r-1_rs1|normalized": {
+    "sigma_med": 5.870913799785026,
+    "sigma_max": 106.65013505599846,
+    "sigma_min": 4.909948681437045,
+    "lambda_med": 34.467632015830226,
+    "lambda_max": 11374.251307462711,
+    "lambda_min": 24.107596054345382,
+    "stable_rank": 4.418576541123675
+  },
+  "eflmrs256_trunc_ada_r-1_rs1|normalized-mean-shift": {
+    "sigma_med": 5.870681179426341,
+    "sigma_max": 76.7352365974996,
+    "sigma_min": 4.9099446308682015,
+    "lambda_med": 34.4649000195354,
+    "lambda_max": 5888.296535674241,
+    "lambda_min": 24.10755627819148,
+    "stable_rank": 7.600383815541562
+  }
+}
