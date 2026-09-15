@@ -974,8 +974,10 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     ce_loss = -log_x_theta.gather(
       -1, x0.unsqueeze(-1)).squeeze(-1)
 
-    return ce_loss * weight
-
+    if weight is not None:
+      return ce_loss * weight
+    else:
+      return ce_loss
 
   def nll(self, x0, output_tokens, context,
           current_accumulation_step=None, train_mode=False,
