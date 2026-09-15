@@ -477,6 +477,177 @@ class GeoUtils:
         return scale.unsqueeze(-1) * direction
 
     @staticmethod
+    def poincare_cartesian_to_hyperbolic_polar(
+        z: torch.Tensor,
+        gaussian_curvature: float=-1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Convert Poincare-ball Cartesian `z` to polar `(rho, u)`: the inverse of
+        [`hyperbolic_polar_to_poincare_cartesian`].
+
+        `rho = 2R * atanh(||z|| / R)` is the geodesic distance to the origin of the
+        ball of radius `R = 1/sqrt(|K|)` and `u = z / ||z||` its direction. `||z|| / R`
+        is clamped one ulp below 1 -- exactly where the forward map caps its `tanh`
+        -- so a point on (or numerically past) the boundary reads as the largest
+        finite radius the forward map emits (`~36.7 R` in float64) instead of inf.
+        The ball encodes `rho` through `1 - ||z||/R ~ 2 e^{-rho/R}`, so the round
+        trip recovers `rho` to an absolute error of `~eps R e^{rho/R} / 2` in either
+        dtype: exact for `rho <~ 18 R` in float64 (`<~ 8 R` in float32), and only a
+        rough ordinal past that -- where the Poisson posterior is already
+        saturated. The Lorentz route (`poincare_cartesian_to_lorentz_cartesian`
+        then `lorentz_cartesian_to_hyperbolic_polar`) has the same limit.
+
+        Args:
+            z (`torch.FloatTensor` of shape `(..., d)`): Poincare-ball Cartesian coordinates.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit ball model.
+
+        Returns:
+            `Tuple[torch.Tensor, torch.Tensor]`:
+                - `rhos` of shape `(...)`, `>= 0`.
+                - `u` of shape `(..., d)`, unit direction on `S^{d-1}` (zero at the origin).
+        """
+        R = GeoUtils._curvature_scale(gaussian_curvature)
+        direction = GeoUtils._polar_direction(thetas=z)
+        one_minus_eps = 1.0 - torch.finfo(z.dtype).eps
+        scale = (z.norm(dim=-1) / R).clamp(max=one_minus_eps)
+        rhos = 2.0 * R * torch.atanh(scale)
+        return rhos, direction
+
+    @staticmethod
+    def validate_prod_factors(
+        prod_factor_dim: Optional[Union[int, List[int]]],
+        prod_factor_gaussian_curvature: Optional[Union[float, List[float]]],
+        embedding_size: int,
+    ):
+        """
+        Resolve and validate the product-factor split of a boundary of dimension
+        `embedding_size`.
+
+        Returns:
+            `tuple[List[int], List[float]]`: the per-factor dimensions `d_i >= 2`
+                (summing to `embedding_size`) and curvatures `K_i < 0`.
+        """
+        dims = prod_factor_dim
+        curvatures = prod_factor_gaussian_curvature
+        if dims is None and curvatures is None:
+            return [embedding_size], [-1.0]
+        if not (isinstance(dims, list) and isinstance(curvatures, list)):
+            raise TypeError(
+                "prod_factor_dim and prod_factor_gaussian_curvature must both be "
+                f"lists or both be None; got {type(dims)} and {type(curvatures)}."
+            )
+        if len(dims) != len(curvatures):
+            raise ValueError(
+                f"prod_factor_dim {dims} and prod_factor_gaussian_curvature "
+                f"{curvatures} must have the same length."
+            )
+        if sum(dims) != embedding_size:
+            raise ValueError(
+                f"prod_factor_dim {dims} should sum to the embedding size {embedding_size}."
+            )
+        for factor_dim, factor_curvature in zip(dims, curvatures):
+            if factor_dim < 2:
+                raise ValueError(f"Each product factor needs dim >= 2, not {factor_dim}.")
+            if factor_curvature >= 0.0:
+                raise ValueError(f"Hyperbolic curvature should be negative, not {factor_curvature}.")
+        return dims, curvatures
+
+    @staticmethod
+    def hyperbolic_polar_to_poincare_cartesian_prod(
+        rhos: torch.Tensor,
+        thetas: torch.Tensor,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ) -> torch.Tensor:
+        """Product-manifold form of [`hyperbolic_polar_to_poincare_cartesian`].
+
+        Factor `i` maps its own `(rho_i, u_i)` into the ball of radius
+        `R_i = 1/sqrt(|K_i|)` and the blocks are concatenated in factor order --
+        the same layout as [`poincare_bridge_prod`]'s `CARTESIAN` output, from its
+        `HYPERBOLIC_POLAR` one.
+
+        Args:
+            rhos (`torch.Tensor` of shape `(..., num_factors)`):
+                Intrinsic radial coordinate of each factor.
+            thetas (`torch.Tensor` of shape `(..., embedding_size)`):
+                Per-factor unit directions, concatenated.
+            prod_factor_dim (`List[int]`, *optional*):
+                Dimension `d_i >= 2` of each factor; must sum to `embedding_size`.
+            prod_factor_gaussian_curvature (`List[float]`, *optional*):
+                Curvature `K_i < 0` of each factor; same length as `prod_factor_dim`.
+                Both lists default together to the single factor `[embedding_size]` at
+                `[-1.0]`, which reproduces [`hyperbolic_polar_to_poincare_cartesian`].
+
+        Returns:
+            `torch.Tensor` of shape `(..., embedding_size)`: the per-factor
+            Poincare-ball points concatenated; block `i` satisfies `||z_i|| < R_i`.
+        """
+        prod_factor_dim, prod_factor_gaussian_curvature = GeoUtils.validate_prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=thetas.shape[-1],
+        )
+        assert rhos.shape[-1] == len(prod_factor_dim), (
+            f"rhos must carry one radial coordinate per factor ({len(prod_factor_dim)}); "
+            f"got {rhos.shape[-1]}"
+        )
+        return torch.cat(
+            [
+                GeoUtils.hyperbolic_polar_to_poincare_cartesian(
+                    rhos[..., i], u_i, gaussian_curvature=factor_curv
+                )
+                for i, (u_i, factor_curv) in enumerate(
+                    zip(thetas.split(prod_factor_dim, dim=-1), prod_factor_gaussian_curvature)
+                )
+            ],
+            dim=-1,
+        )
+
+    @staticmethod
+    def poincare_cartesian_to_hyperbolic_polar_prod(
+        z: torch.Tensor,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Product-manifold form of [`poincare_cartesian_to_hyperbolic_polar`]: the
+        inverse of [`hyperbolic_polar_to_poincare_cartesian_prod`].
+
+        Block `i` of `z` is read in the ball of radius `R_i = 1/sqrt(|K_i|)`; the
+        radii are stacked and the directions concatenated in factor order -- the
+        same layout as [`poincare_bridge_prod`]'s `HYPERBOLIC_POLAR` output, from
+        its `CARTESIAN` one.
+
+        Args:
+            z (`torch.Tensor` of shape `(..., embedding_size)`):
+                Per-factor Poincare-ball points concatenated.
+            prod_factor_dim (`List[int]`, *optional*):
+                Dimension `d_i >= 2` of each factor; must sum to `embedding_size`.
+            prod_factor_gaussian_curvature (`List[float]`, *optional*):
+                Curvature `K_i < 0` of each factor; same length as `prod_factor_dim`.
+                Both lists default together to the single factor `[embedding_size]` at
+                `[-1.0]`, which reproduces [`poincare_cartesian_to_hyperbolic_polar`].
+
+        Returns:
+            `Tuple[torch.Tensor, torch.Tensor]`:
+                - `rhos` of shape `(..., num_factors)`, one intrinsic radius per factor.
+                - `u` of shape `(..., embedding_size)`, the per-factor unit directions
+                  concatenated.
+        """
+        prod_factor_dim, prod_factor_gaussian_curvature = GeoUtils.validate_prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=z.shape[-1],
+        )
+        rhos, us = zip(
+            *[
+                GeoUtils.poincare_cartesian_to_hyperbolic_polar(z_i, gaussian_curvature=factor_curv)
+                for z_i, factor_curv in zip(
+                    z.split(prod_factor_dim, dim=-1), prod_factor_gaussian_curvature
+                )
+            ]
+        )
+        return torch.stack(rhos, dim=-1), torch.cat(us, dim=-1)
+
+    @staticmethod
     def hyperbolic_polar_to_lorentz_cartesian(
         rhos: torch.FloatTensor,
         thetas: torch.FloatTensor,
