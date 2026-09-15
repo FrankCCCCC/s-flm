@@ -10,9 +10,11 @@ import utils
 import flm_utils
 import candi_utils
 import models.flm_dit
+from hyper_model import HyperbolicModelBase
 from geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, BinaryHyperbolicHeatKernel,
   Coordinate, Geometry)
+from loss import HyperBridge, Loss, LossGeometry, Proposal
 
 
 class AR(trainer_base.TrainerBase):
@@ -830,31 +832,92 @@ class HFLM(SelfConditioning, trainer_base.Diffusion):
       self._rho_clamp(w.norm(p=2, dim=-1)), utils.sphere_normalize(w),
       gaussian_curvature=self.gaussian_curvature)
 
-class HyperbolicBoundaryFM(trainer_base.Diffusion):
+class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
+  """Hyperbolic bridge DLM: the sequence form of unigram2/main_refactor.py.
+
+  Every token runs a Brownian bridge on a product of Poincaré balls from the
+  origin toward its word's boundary point, and the model predicts each word
+  from the bridge states of all positions. The heat time t is the noise
+  level: `loss.Proposal` draws one per sequence, `HyperBridge.bridge_prod`
+  draws the polar state z_t = (rhos, thetas), the backbone consumes its
+  Poincaré-Cartesian image, and its logits are a RESIDUAL that
+  `_process_model_output` adds to the horosphere (Busemann) log-densities, so
+  `forward` returns the full log-posterior (Invariant 1). The loss is the
+  importance-weighted heat-time integral of the denoising CE or the path-KL
+  (`loss.Loss.weighted_loss_prod`). `self.noise` is inherited but unused, and
+  since the posterior does not depend on t the backbone is not
+  time-conditioned by default (`algo.time_conditioning`).
+  """
+
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
-    self.eps = config.algo.eps
     self.renormalize_weights = config.algo.renormalize_weights
-    self.invert_time_convention = config.algo.invert_time_convention
+    self.prod_factor_dim, self.prod_factor_gaussian_curvature = (
+      self._resolve_prod_factors(config.algo, self.backbone.embed_dim))
+    # Precision of the (B, L, V) readout / loss; the bridge state itself stays
+    # float64 (see HyperBridge._prod_geometry for when float32 is adequate).
+    self.readout_dtype = {'float64': torch.float64,
+                          'float32': torch.float32}[config.algo.readout_precision]
     self._validate_configuration()
 
+  @staticmethod
+  def _resolve_prod_factors(algo_config, embed_dim):
+    return self.prod_factors()
+
   def _validate_configuration(self):
+    super()._validate_configuration()
     if self.invert_time_convention and self.config.noise.adaptive:
       raise ValueError('Adaptive noise schedule requires '
                        'invert_time_convention=false '
                        '(MDLM-like convention).')
-    backbone_type = self.config.model.type
-    if backbone_type == 'sphere-arch' and not self.renormalize_weights:
-      raise ValueError('Backbone sphere-arch requires '
-                       'algo.renormalize_weights=True.')
+    if self.config.model.type == 'hyperbolic-arch':
+      raise ValueError('hyperbolic-arch justnorms the radial away; '
+                       'use hyperbolic-dit.')
+    if self.loss_geometry not in {LossGeometry.POINCARE_POLAR,
+                                  LossGeometry.CROSS_ENTROPY,
+                                  LossGeometry.HYP_CROSS_ENTROPY}:
+      raise ValueError(self.loss_geometry)
+
+  @property
+  def word_embedding(self):
+    return self.backbone.sphere_embed.weight
 
   def _process_model_output(self, model_output, xt, sigma,
                             context=None):
-    return model_output.float().log_softmax(-1)
+    del xt, sigma
+    if self.config.forward_type == "naive":
+      output = model_output
+    elif self.config.forward_type == "horosphere":
+      horo = self.horosphere_geometry(
+        theta=context.theta,
+        radius=context.radius,
+        prod_factor_dim=self.prod_factor_dim,
+        prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
+      )
+      # `forward` has already divided the residual by the temperature; scale
+      # the geometry too, so it tempers the whole log-posterior.
+      if 'temperature' in context:
+        horo = horo / context.temperature
+      output = (model_output.to(horo.dtype) + horo)
+    else:
+      raise ValueError(f"Unknown forward_type: {self.config.forward_type}")
+    return output.log_softmax(-1)
 
-  def _sample_prior(self, e_clean):
-    e_noisy = torch.randn_like(e_clean)
-    return utils.sphere_normalize(e_noisy)
+  @staticmethod
+  def time_conversion(
+    t,
+    invert_time_convention: bool,
+    exp_rate: float = 1.0
+  ):
+    return ts, weights
+    if invert_time_convention:
+      samples = - torch.log(t) / exp_rate
+      weights = 1.0 / (exp_rate * t)
+      return samples, weights
+    else:
+      samples = - torch.log(1.0 - t) / exp_rate
+      weights = 1.0 / (exp_rate * (1.0 - t))
+      return samples, weights
 
   def q_xt(
     self,
@@ -865,18 +928,38 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion):
     output_coordinate=''
   ):
     e_clean = self.backbone.get_sphere_embeddings(x)  # [B, L, d]
-    e_noisy = self._sample_prior(e_clean)
 
     if use_pure_noise:
-      x_t = e_noisy
+      raise NotImplementedError('HyperbolicBoundaryFM does not support pure-noise training.')
     else:
-      slerp_t = alpha_t if self.invert_time_convention else 1 - alpha_t
-      x_t = self._slerp(e_clean, e_noisy, slerp_t)
+      lerp_t = alpha_t if self.invert_time_convention else 1 - alpha_t
+      infinite_timestep, weight = HyperbolicBoundaryFM.time_conversion(
+        lerp_t, self.invert_time_convention, self.config.algo.time_exp_rate)
+      x_t = HyperbolicHeatKernel.poincare_bridge_prod(
+        ts=infinite_timestep,
+        targets=x,
+        word_embedding=self.word_embedding,
+        output_coord=output_coordinate,
+        prod_factor_dim=self.prod_factor_dim,
+        prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
+      )
+
+    if output_coordinate == Coordinate.POLAR:
+      rhos, thetas = x_t
 
     if valid_tokens is not None:
-      x_t = torch.where(valid_tokens.bool().unsqueeze(-1),
-                        x_t, e_clean)
-    return x_t
+      if output_coord == Coordinate.CARTESIAN:
+        x_t = torch.where(valid_tokens.bool().unsqueeze(-1),
+                          x_t, e_clean)
+      else:
+        raise NotImplementedError('valid_tokens masking is only implemented for Cartesian output.') 
+
+    if output_coord == Coordinate.CARTESIAN:
+      return x_t, weight
+    elif output_coord == Coordinate.POLAR:
+      return (rhos, thetas), weight
+    else:
+      raise ValueError(f"Unknown output_coordinate: {output_coordinate}")
 
   def optimizer_step(self, *args, **kwargs):
     out = super().optimizer_step(*args, **kwargs)
@@ -885,31 +968,14 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion):
     return out
 
   def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
-                    low_var=False, context=None, train_mode=False):
+                    weight, low_var=False, context=None, train_mode=False):
     del xt, alpha_t, dalpha_t, low_var, context
 
     ce_loss = -log_x_theta.gather(
       -1, x0.unsqueeze(-1)).squeeze(-1)
 
-    return ce_loss
+    return ce_loss * weight
 
-  def _slerp(self, clean, noisy, alpha_t):
-    # alpha_t = 0 -> clean, alpha_t = 1 -> noisy
-    orig_dtype = None
-    if self.config.algo.slerp_precision == 'float64':
-      orig_dtype = clean.dtype
-      alpha_t = alpha_t.to(torch.float64)
-      clean = clean.to(torch.float64)
-      noisy = noisy.to(torch.float64)
-    out = utils.slerp(
-      clean=clean,
-      noisy=noisy,
-      alpha_t=alpha_t,
-      eps=self.eps)
-
-    if orig_dtype is not None:
-      out = out.to(orig_dtype)
-    return out
 
   def nll(self, x0, output_tokens, context,
           current_accumulation_step=None, train_mode=False,
@@ -926,9 +992,9 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion):
     alpha_t = alpha_t.unsqueeze(-1)
     dalpha_t = dalpha_t.unsqueeze(-1)
 
-    xt = self.q_xt(
+    xt, weight = self.q_xt(
       x0, alpha_t, use_pure_noise=use_pure_noise,
-      valid_tokens=valid_tokens)
+      valid_tokens=valid_tokens, output_coordinate=Coordinate.CARTESIAN)
 
     sigma = self._sigma_from_alphat(alpha_t)
     log_x_theta = self.forward(
@@ -939,9 +1005,8 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion):
       log_x_theta=log_x_theta, xt=xt, x0=x0,
       alpha_t=alpha_t, dalpha_t=dalpha_t,
       low_var=train_mode and self.loss_type == 'low_var',
-      context=context, train_mode=train_mode)
-
-    return loss, t
+      context=context, train_mode=train_mode, weight=weight)
+    return loss, t.to(torch.float32)
 
 
 # ════════════════════════════════════════════════════════════════
