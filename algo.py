@@ -14,7 +14,7 @@ from hyper_model import HyperbolicModelBase
 from geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, BinaryHyperbolicHeatKernel,
   Coordinate, Geometry)
-from loss import HyperBridge, Loss, LossGeometry, Proposal
+from loss import HyperBridge
 
 
 class AR(trainer_base.TrainerBase):
@@ -838,13 +838,15 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
   Every token runs a Brownian bridge on a product of Poincaré balls from the
   origin toward its word's boundary point, and the model predicts each word
   from the bridge states of all positions. The heat time t is the noise
-  level: `loss.Proposal` draws one per sequence, `HyperBridge.bridge_prod`
-  draws the polar state z_t = (rhos, thetas), the backbone consumes its
-  Poincaré-Cartesian image, and its logits are a RESIDUAL that
-  `_process_model_output` adds to the horosphere (Busemann) log-densities, so
-  `forward` returns the full log-posterior (Invariant 1). The loss is the
-  importance-weighted heat-time integral of the denoising CE or the path-KL
-  (`loss.Loss.weighted_loss_prod`). `self.noise` is inherited but unused, and
+  level: `time_conversion` maps the noise schedule's alpha_t to it by -log,
+  which under the log-linear schedule is loss.Proposal's exp proposal and
+  lets AdaptiveSchedule / TruncatedScheduleWrapper reshape or truncate it.
+  `HyperbolicHeatKernel.poincare_bridge_prod` draws the Poincaré-Cartesian
+  state z_t the backbone consumes, and its logits are a RESIDUAL that
+  `_process_model_output` adds to the horosphere (Busemann) log-densities of
+  z_t's polar coordinates, so `forward` returns the full log-posterior
+  (Invariant 1). The loss is the importance-weighted heat-time
+  integral of the denoising CE. `self.noise` supplies alpha_t only, and
   since the posterior does not depend on t the backbone is not
   time-conditioned by default (`algo.time_conditioning`).
   """
@@ -852,17 +854,53 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
     self.renormalize_weights = config.algo.renormalize_weights
+    self.invert_time_convention = config.algo.invert_time_convention
     self.prod_factor_dim, self.prod_factor_gaussian_curvature = (
       self._resolve_prod_factors(config.algo, self.backbone.embed_dim))
+    # sample_radial forms the heat-kernel marginal in linear float64, which
+    # overflows past _radial_t_max(d) -- stated in UNIT time, so a factor of
+    # radius R tolerates R^2 times as much physical time. Clamping t there is
+    # a statistical no-op: by then the direction identifies the target to full
+    # float64 precision (see HyperBridge.bridge).
+    self.max_heat_time = min(
+      HyperBridge._radial_t_max(d) * GeoUtils._curvature_scale(k) ** 2
+      for d, k in zip(self.prod_factor_dim,
+                      self.prod_factor_gaussian_curvature))
     # Precision of the (B, L, V) readout / loss; the bridge state itself stays
-    # float64 (see HyperBridge._prod_geometry for when float32 is adequate).
+    # float64.
     self.readout_dtype = {'float64': torch.float64,
                           'float32': torch.float32}[config.algo.readout_precision]
     self._validate_configuration()
 
   @staticmethod
   def _resolve_prod_factors(algo_config, embed_dim):
-    return self.prod_factors()
+    """`prod_factor_dim` / `prod_factor_gaussian_curvature` as plain lists.
+
+    An int splits embed_dim into equal factors and a float shares the
+    curvature; lists spell the factors out; null means one factor of the full
+    embed_dim at curvature -1. Plain python lists, not ListConfig:
+    `HyperbolicModelBase.prod_factors` dispatches on `isinstance(x, list)`.
+    """
+    dims = algo_config.prod_factor_dim
+    curvatures = algo_config.prod_factor_gaussian_curvature
+    if dims is None:
+      dims = [embed_dim]
+    elif isinstance(dims, int):
+      if embed_dim % dims != 0:
+        raise ValueError(f'algo.prod_factor_dim={dims} must divide '
+                         f'model.embed_dim={embed_dim}.')
+      dims = [dims] * (embed_dim // dims)
+    else:
+      dims = [int(d) for d in dims]
+    if curvatures is None:
+      curvatures = [-1.0] * len(dims)
+    elif isinstance(curvatures, (int, float)):
+      curvatures = [float(curvatures)] * len(dims)
+    else:
+      curvatures = [float(k) for k in curvatures]
+    return HyperbolicModelBase.prod_factors(
+      prod_factor_dim=dims, prod_factor_gaussian_curvature=curvatures,
+      embedding_size=embed_dim)
 
   def _validate_configuration(self):
     super()._validate_configuration()
@@ -873,93 +911,104 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     if self.config.model.type == 'hyperbolic-arch':
       raise ValueError('hyperbolic-arch justnorms the radial away; '
                        'use hyperbolic-dit.')
-    if self.loss_geometry not in {LossGeometry.POINCARE_POLAR,
-                                  LossGeometry.CROSS_ENTROPY,
-                                  LossGeometry.HYP_CROSS_ENTROPY}:
-      raise ValueError(self.loss_geometry)
 
   @property
   def word_embedding(self):
     return self.backbone.sphere_embed.weight
 
+  def model_forward(self, z, t):
+    # HyperbolicModelBase's trunk hook.
+    return self.backbone(None, z, t, None)
+
   def _process_model_output(self, model_output, xt, sigma,
                             context=None):
-    del xt, sigma
-    if self.config.forward_type == "naive":
-      output = model_output
-    elif self.config.forward_type == "horosphere":
+    del sigma
+    if self.config.algo.forward_type == "naive":
+      output = model_output.to(self.readout_dtype)
+    elif self.config.algo.forward_type == "horosphere":
+      rhos, thetas = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
+        xt, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
       horo = self.horosphere_geometry(
-        theta=context.theta,
-        radius=context.radius,
+        theta=thetas,
+        radius=rhos,
         prod_factor_dim=self.prod_factor_dim,
         prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
       )
       # `forward` has already divided the residual by the temperature; scale
       # the geometry too, so it tempers the whole log-posterior.
-      if 'temperature' in context:
+      if context is not None and 'temperature' in context:
         horo = horo / context.temperature
-      output = (model_output.to(horo.dtype) + horo)
+      output = (model_output + horo).to(self.readout_dtype)
     else:
-      raise ValueError(f"Unknown forward_type: {self.config.forward_type}")
+      raise ValueError(f"Unknown forward_type: {self.config.algo.forward_type}")
     return output.log_softmax(-1)
 
   @staticmethod
   def time_conversion(
-    t,
+    alpha_t,
     invert_time_convention: bool,
     exp_rate: float = 1.0
   ):
-    return ts, weights
+    """alpha_t in [0, 1] -> bridge heat time in [0, inf) and importance weight.
+
+    With u the noise fraction (alpha_t under invert_time_convention,
+    1 - alpha_t otherwise; u = 1 is the origin, u -> 0 the boundary),
+    t = -log(u) / exp_rate and weight = 1 / (exp_rate * u): for uniform u
+    (the log-linear schedule) exactly loss.Proposal's exp proposal and its
+    1 / q(t). `nll` multiplies the weight by |alpha'_t|, so under the
+    AdaptiveSchedule's remaps or the TruncatedScheduleWrapper's range
+    [-log(1 - alpha_min), -log(1 - alpha_max)] / exp_rate the loss stays the
+    same heat-time integral. Both float64, alpha_t's shape.
+    """
     if invert_time_convention:
-      samples = - torch.log(t) / exp_rate
-      weights = 1.0 / (exp_rate * t)
-      return samples, weights
+      u = alpha_t
     else:
-      samples = - torch.log(1.0 - t) / exp_rate
-      weights = 1.0 / (exp_rate * (1.0 - t))
-      return samples, weights
+      u = 1.0 - alpha_t
+    # An AdaptiveSchedule refit can return alpha_t == 1 exactly (u = 0) on a
+    # band of small t; floor u like loss.Proposal's exp proposal floors its
+    # uniform draw, so the weight stays finite instead of 0 * inf = NaN.
+    u = u.to(torch.float64).clamp_min(1e-12)
+    samples = - torch.log(u) / exp_rate
+    weights = 1.0 / (exp_rate * u)
+    return samples, weights
 
-  def q_xt(
-    self,
-    x,
-    alpha_t,
-    use_pure_noise,
-    valid_tokens=None,
-    output_coordinate=''
-  ):
-    e_clean = self.backbone.get_sphere_embeddings(x)  # [B, L, d]
+  def _clean_state(self, x):
+    """Clean end of the bridge for word ids `x` ([B, L]), Poincaré-Cartesian:
+    each factor's boundary direction (the word's embedding block, normalized
+    by the conversion) at the largest radius the bridge emits
+    (`HyperBridge.RHO_MAX`, dimensionless, scaled by the factor's radius R)."""
+    thetas = self.word_embedding[x].to(torch.float64)
+    rhos = thetas.new_tensor([
+      HyperBridge.RHO_MAX * GeoUtils._curvature_scale(k)
+      for k in self.prod_factor_gaussian_curvature]).expand(*x.shape, -1)
+    return GeoUtils.hyperbolic_polar_to_poincare_cartesian_prod(
+      rhos, thetas, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
 
+  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
+    """Bridge state at the heat time of `alpha_t` ([B, 1], one per sequence)
+    and its importance weight: `(xt, weight)` with `xt` the per-factor
+    Poincaré-ball points concatenated, [B, L, sum(d_m)] float64 (the
+    `Coordinate.CARTESIAN` output of `poincare_bridge_prod`), and the weight
+    [B, 1]. Positions with `valid_tokens == 0` (the sudoku prompt) are pinned
+    at the clean end of the bridge.
+    """
     if use_pure_noise:
       raise NotImplementedError('HyperbolicBoundaryFM does not support pure-noise training.')
-    else:
-      lerp_t = alpha_t if self.invert_time_convention else 1 - alpha_t
-      infinite_timestep, weight = HyperbolicBoundaryFM.time_conversion(
-        lerp_t, self.invert_time_convention, self.config.algo.time_exp_rate)
-      x_t = HyperbolicHeatKernel.poincare_bridge_prod(
-        ts=infinite_timestep,
-        targets=x,
-        word_embedding=self.word_embedding,
-        output_coord=output_coordinate,
-        prod_factor_dim=self.prod_factor_dim,
-        prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
-      )
-
-    if output_coordinate == Coordinate.POLAR:
-      rhos, thetas = x_t
+    infinite_timestep, weight = HyperbolicBoundaryFM.time_conversion(
+      alpha_t, self.invert_time_convention, self.config.algo.time_exp_rate)
+    xt = HyperbolicHeatKernel.poincare_bridge_prod(
+      ts=infinite_timestep.reshape(-1).clamp_max(self.max_heat_time),
+      targets=x,
+      word_embedding=self.word_embedding,
+      output_coord=Coordinate.CARTESIAN,
+      prod_factor_dim=self.prod_factor_dim,
+      prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
+    )
 
     if valid_tokens is not None:
-      if output_coord == Coordinate.CARTESIAN:
-        x_t = torch.where(valid_tokens.bool().unsqueeze(-1),
-                          x_t, e_clean)
-      else:
-        raise NotImplementedError('valid_tokens masking is only implemented for Cartesian output.') 
-
-    if output_coord == Coordinate.CARTESIAN:
-      return x_t, weight
-    elif output_coord == Coordinate.POLAR:
-      return (rhos, thetas), weight
-    else:
-      raise ValueError(f"Unknown output_coordinate: {output_coordinate}")
+      xt = torch.where(valid_tokens.bool().unsqueeze(-1),
+                       xt, self._clean_state(x))
+    return xt, weight
 
   def optimizer_step(self, *args, **kwargs):
     out = super().optimizer_step(*args, **kwargs)
@@ -996,7 +1045,13 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
 
     xt, weight = self.q_xt(
       x0, alpha_t, use_pure_noise=use_pure_noise,
-      valid_tokens=valid_tokens, output_coordinate=Coordinate.CARTESIAN)
+      valid_tokens=valid_tokens)
+    # Consider t \sim U([0, 1]), p(t) = U([0, 1]), with parametrized time u = - \log t / exp_rate
+    # according to change of variable, p(u) = p(t) * |dt/du| = 1 * exp_rate * exp(-exp_rate * u) = exp_rate * t.
+    # Furthermore, consider p(t) is not uniform, then, p(u) = p(t) * |dt/du| = p(t) * exp_rate * exp(-exp_rate * u) = p(t) * exp_rate * t.
+    # Formally, consider a ada noise scheduler f(t') = t, p(t') = Unif([0, 1]), then p(u) = p(t') * |dt'/du| = p(t') * |dt'/dt dt/du| = p(t') * df(t')/dt' * |dt/du| = p(t') * df(t')/dt' * exp_rate * t.
+    # dalpha_t is df(t')/dt', and wieght is |dt/du| = exp_rate * t, so the final weight is dalpha_t * exp_rate * t = dalpha_t * weight.
+    weight = weight * dalpha_t.abs().to(weight.dtype)
 
     sigma = self._sigma_from_alphat(alpha_t)
     log_x_theta = self.forward(
@@ -1008,7 +1063,7 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       alpha_t=alpha_t, dalpha_t=dalpha_t,
       low_var=train_mode and self.loss_type == 'low_var',
       context=context, train_mode=train_mode, weight=weight)
-    return loss, t.to(torch.float32)
+    return loss, t
 
 
 # ════════════════════════════════════════════════════════════════
