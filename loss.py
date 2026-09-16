@@ -1,14 +1,81 @@
 import math
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
 
 from geo_bridge import GeoUtils, HyperbolicHeatKernel
-from model import HyperbolicModelBase, uniform_sphere_points
+from hyper_model import HyperbolicModelBase
 
 def isnan_or_inf(x):
     return torch.logical_or(torch.isnan(x), torch.isinf(x))
+
+def vocab_points(V: int, device: Union[str, torch.device], dtype) -> torch.Tensor:
+    """
+    Construct evenly spaced vocabulary anchor points on the unit circle.
+
+    Args:
+        V (`int`):
+            Vocabulary size.
+        device (`str` or `torch.device`):
+            Device for the returned tensor.
+        dtype:
+            Tensor dtype for the returned tensor.
+
+    Returns:
+        `torch.Tensor` of shape `(V, 2)`:
+            Vocabulary anchor points in Cartesian coordinates. Internally,
+            `phi` has shape `(V,)`. For example, when `V = 2`, `phi` has
+            shape `(2,)` and the returned tensor has shape `(2, 2)`.
+    """
+    phi = (torch.arange(V, device=device, dtype=dtype) + 0.5) * (2 * math.pi / V)
+    return torch.stack([phi.cos(), phi.sin()], dim=-1)
+
+def uniform_sphere_points(
+    V: int,
+    d: int,
+    device: Union[str, torch.device] = "cpu",
+    dtype=torch.float32,
+    seed: int = 0,
+) -> torch.Tensor:
+    """
+    Construct `V` unit vectors spread uniformly over the unit sphere in `R^d`.
+
+    For `d == 2` the evenly spread configuration is known in closed form -- the
+    equally spaced angles `(v + 0.5) * 2*pi / V` of `vocab_points` -- and is
+    used directly, so the 2-D case reproduces the fixed angles the loss falls
+    back to (see `HyperBridge._binary_vocab_angles` with `word_embedding=None`). For
+    `d > 2` no exact even packing exists for general `V`, so the rows are drawn
+    uniformly from the sphere by normalizing isotropic Gaussians: exact in
+    distribution, `O(V*d)`, and seeded so the table is reproducible.
+
+    Args:
+        V (`int`):
+            Number of points (vocabulary size).
+        d (`int`):
+            Ambient dimension; the points lie on the `(d-1)`-sphere.
+        device (`str` or `torch.device`, *optional*, defaults to `"cpu"`):
+            Device for the returned tensor.
+        dtype (*optional*, defaults to `torch.float32`):
+            Dtype for the returned tensor.
+        seed (`int`, *optional*, defaults to `0`):
+            Seed for the `d > 2` draw. Unused when `d == 2`.
+
+    Returns:
+        `torch.Tensor` of shape `(V, d)`:
+            Unit-norm rows. For example, `V = 10`, `d = 4` returns shape
+            `(10, 4)` with every row satisfying `||x|| = 1`.
+    """
+    if V < 1:
+        raise ValueError(f"V must be >= 1; got {V}")
+    if d < 2:
+        raise ValueError(f"d must be >= 2; got {d}")
+    if d == 2:
+        return vocab_points(V, device=device, dtype=dtype)
+    generator = torch.Generator().manual_seed(seed)
+    x = torch.randn(V, d, generator=generator, dtype=torch.float64)
+    x = x / x.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+    return x.to(device=device, dtype=dtype)
 
 @dataclass
 class LossGeometry:
