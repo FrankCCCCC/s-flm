@@ -80,7 +80,10 @@ class HyperbolicModelBase(ABC):
         for factor_dim, factor_curvature in zip(dims, curvatures):
             if factor_dim < 2:
                 raise ValueError(f"Each product factor needs dim >= 2, not {factor_dim}.")
-            if factor_curvature >= 0.0:
+            if not (factor_curvature < 0.0):
+                # float('nan') >= 0.0 is False, so if k >= 0.0: raise lets a NaN curvature through silently
+                # current implementation is equivalent to:
+                # if math.isnan(factor_curvature) or factor_curvature >= 0.0:
                 raise ValueError(f"Hyperbolic curvature should be negative, not {factor_curvature}.")
         return dims, curvatures
 
@@ -209,6 +212,9 @@ class HyperbolicModelBase(ABC):
             # (theta, u), not on rho). horosphere_geometry below still receives
             # the intrinsic radius and applies kappa itself -- rescaling here
             # only, so the curvature is never applied twice.
+            if prod_factor_dim is None and prod_factor_gaussian_curvature is None:
+                prod_factor_dim = self.prod_factor_dim
+                prod_factor_gaussian_curvature = self.prod_factor_gaussian_curvature
             _, curvatures = HyperbolicModelBase.prod_factors(
                 prod_factor_dim=prod_factor_dim,
                 prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
@@ -425,16 +431,25 @@ class HyperbolicModelBase(ABC):
                 "The horosphere readout needs the polar state (theta, radius) to "
                 "evaluate the Busemann terms."
             )
+        if prod_factor_dim is None and prod_factor_gaussian_curvature is None:
+            prod_factor_dim = self.prod_factor_dim
+            prod_factor_gaussian_curvature = self.prod_factor_gaussian_curvature
+        # forward_naive takes the state in ONE coordinate system (Cartesian z
+        # when given, else polar); the polar pair is still needed below.
+        if z is not None:
+            trunk_state = dict(z=z, theta=None, radius=None)
+        else:
+            trunk_state = dict(z=None, theta=theta, radius=radius)
         pred_radius = None
         if return_radial:
             pred_logit, pred_radius = self.forward_naive(
-                z=z, theta=theta, radius=radius, t=t, return_radial=True,
+                **trunk_state, t=t, return_radial=True,
                 prod_factor_dim=prod_factor_dim,
                 prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
             )
         else:
             pred_logit = self.forward_naive(
-                z=z, theta=theta, radius=radius, t=t, return_radial=False,
+                **trunk_state, t=t, return_radial=False,
                 prod_factor_dim=prod_factor_dim,
                 prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
             )

@@ -481,20 +481,15 @@ class GeoUtils:
         z: torch.Tensor,
         gaussian_curvature: float=-1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Convert Poincare-ball Cartesian `z` to polar `(rho, u)`: the inverse of
-        [`hyperbolic_polar_to_poincare_cartesian`].
+        """Inverse of [`hyperbolic_polar_to_poincare_cartesian`]: Poincare-ball
+        Cartesian `z` -> polar `(rho, u)` with `rho = 2R atanh(||z|| / R)`,
+        `u = z / ||z||`, `R = 1 / sqrt(|K|)`.
 
-        `rho = 2R * atanh(||z|| / R)` is the geodesic distance to the origin of the
-        ball of radius `R = 1/sqrt(|K|)` and `u = z / ||z||` its direction. `||z|| / R`
-        is clamped one ulp below 1 -- exactly where the forward map caps its `tanh`
-        -- so a point on (or numerically past) the boundary reads as the largest
-        finite radius the forward map emits (`~36.7 R` in float64) instead of inf.
-        The ball encodes `rho` through `1 - ||z||/R ~ 2 e^{-rho/R}`, so the round
-        trip recovers `rho` to an absolute error of `~eps R e^{rho/R} / 2` in either
-        dtype: exact for `rho <~ 18 R` in float64 (`<~ 8 R` in float32), and only a
-        rough ordinal past that -- where the Poisson posterior is already
-        saturated. The Lorentz route (`poincare_cartesian_to_lorentz_cartesian`
-        then `lorentz_cartesian_to_hyperbolic_polar`) has the same limit.
+        Asssume a polar cooridnate on hyperbolic, (R, \theta); a Poincare ball coordinate (\rho, \theta),
+        The conversion from R -> \rho -> R has rounding errors, therefore, we cannot reverse the R back accurately since
+        \rho = \tanh(R/2) and R = 2 * R * \atanh(\rho) is numerically unstable while \rho is close to boundary 1.0. Thus, 
+        we clamp the \rho to 1.0 - 8.0 * torch.finfo(z.dtype).eps to avoid the numerical instability. 8.0 is heuristic, since
+        1 - torch.finfo(z.dtype).eps is not enough to avoid the numerical instability.
 
         Args:
             z (`torch.FloatTensor` of shape `(..., d)`): Poincare-ball Cartesian coordinates.
@@ -507,8 +502,8 @@ class GeoUtils:
         """
         R = GeoUtils._curvature_scale(gaussian_curvature)
         direction = GeoUtils._polar_direction(thetas=z)
-        one_minus_eps = 1.0 - torch.finfo(z.dtype).eps
-        scale = (z.norm(dim=-1) / R).clamp(max=one_minus_eps)
+        cap = 1.0 - 8.0 * torch.finfo(z.dtype).eps
+        scale = (z.norm(dim=-1) / R).clamp(max=cap)
         rhos = 2.0 * R * torch.atanh(scale)
         return rhos, direction
 
@@ -547,7 +542,10 @@ class GeoUtils:
         for factor_dim, factor_curvature in zip(dims, curvatures):
             if factor_dim < 2:
                 raise ValueError(f"Each product factor needs dim >= 2, not {factor_dim}.")
-            if factor_curvature >= 0.0:
+            if not (factor_curvature < 0.0):
+                # float('nan') >= 0.0 is False, so if k >= 0.0: raise lets a NaN curvature through silently
+                # current implementation is equivalent to:
+                # if math.isnan(factor_curvature) or factor_curvature >= 0.0:
                 raise ValueError(f"Hyperbolic curvature should be negative, not {factor_curvature}.")
         return dims, curvatures
 
