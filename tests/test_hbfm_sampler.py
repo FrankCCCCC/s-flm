@@ -105,7 +105,9 @@ class _OracleModel:
     self.word_embedding = torch.randn(V, sum(dims), dtype=torch.float64)
     self.backbone = type('B', (), {'embed_dim': sum(dims)})()
     self.config = type('C', (), {'sampler': type('S', (), {'steps': steps})(),
-                                 'algo': type('A', (), {'time_exp_rate': 1.0})()})()
+                                 'algo': type('A', (), {
+                                   'time_exp_rate': 1.0, 'time_conversion_mode': 'exp',
+                                   'time_range_upper_bound': 1.0})()})()
     self.invert_time_convention = False
     self.log_prior = log_prior
     self._readout = self._Readout(self.word_embedding, dims, curvs)
@@ -205,6 +207,8 @@ def _build_model(monkeypatch, overrides=()):
   ['sampler.velocity=sample'],
   ['sampler.top_k_velocity=2'],
   ['sampler.noise_removal=ancestral', 'sampler.temperature=0.5'],
+  ['algo.time_conversion_mode=unif'],   # sampler.t_max=1.0 == time_range_upper_bound
+  ['algo.time_conversion_mode=trunc_exp'],
 ])
 def test_real_model_sampler_contract(monkeypatch, overrides):
   model = _build_model(monkeypatch, overrides)

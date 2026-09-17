@@ -198,6 +198,69 @@ def test_time_conversion_on_refit_adaptive_schedule():
   assert not torch.allclose(s, s_base)  # the refit actually moved the proposal
 
 
+def test_time_conversion_unif_is_the_unif_proposal():
+  """mode='unif': heat time uniform on [0, range_upper_bound] under the
+  log-linear schedule, decreasing in the noise fraction like the exp map
+  (u = 1 is the origin), weighted by the interval (loss.Proposal's unif
+  proposal's 1 / q(t)); float64 tensors of alpha_t's shape."""
+  from algo import HyperbolicBoundaryFM as H
+  from noise_schedules import LogLinear
+  eps, ub = 1e-3, 2.5
+  t = torch.linspace(1e-3, 1.0, 200001, dtype=torch.float64)
+  _, alpha = LogLinear(eps)(t)
+  s, w = H.time_conversion(alpha.float(), False, mode='unif', range_upper_bound=ub)
+  assert s.dtype == torch.float64 and w.dtype == torch.float64
+  assert s.shape == alpha.shape and w.shape == alpha.shape
+  assert torch.allclose(s, alpha * ub, atol=1e-6)
+  assert (s >= 0).all() and (s <= ub).all()
+  assert (s[1:] < s[:-1]).all()          # noisier t -> smaller heat time
+  assert torch.equal(w, torch.full_like(s, ub))
+  # E_t[w f(s(t))] == int f(s) ds / (1 - eps): the exp map's quadrature identity.
+  s, w = H.time_conversion(alpha, False, mode='unif', range_upper_bound=ub)
+  lhs = torch.trapezoid(w * torch.exp(-s), t)
+  rhs = (torch.exp(-s[-1]) - torch.exp(-s[0])) / (1 - eps)
+  assert abs(lhs - rhs) < 1e-4 * rhs, (lhs, rhs)
+  # SFM convention: u = alpha_t.
+  s2, _ = H.time_conversion(alpha, True, mode='unif', range_upper_bound=ub)
+  assert torch.allclose(s2, (1.0 - alpha) * ub)
+  with pytest.raises(ValueError):
+    H.time_conversion(alpha, False, mode='bogus')
+
+
+def test_time_conversion_trunc_exp_is_the_truncated_exp_proposal():
+  """mode='trunc_exp': loss.Proposal's truncated_exp proposal on
+  [0, range_upper_bound] with uniform draw 1 - u and its 1 / q(t) weight,
+  the exp map's quadrature identity, and the exp map itself as
+  range_upper_bound -> inf."""
+  from algo import HyperbolicBoundaryFM as H
+  from noise_schedules import LogLinear
+  eps, rate, ub = 1e-3, 3.0, 1.5
+  t = torch.linspace(1e-3, 1.0, 200001, dtype=torch.float64)
+  _, alpha = LogLinear(eps)(t)
+  s, w = H.time_conversion(alpha, False, rate, mode='trunc_exp', range_upper_bound=ub)
+  normalizer = 1.0 - math.exp(-rate * ub)
+  s_ref = -torch.log1p(-alpha * normalizer) / rate      # the uniform draw is alpha_t
+  w_ref = normalizer / (rate * torch.exp(-rate * s_ref))
+  assert s.dtype == torch.float64 and w.dtype == torch.float64
+  assert torch.allclose(s, s_ref) and torch.allclose(w, w_ref)
+  assert (s >= 0).all() and (s <= ub).all()
+  assert (s[1:] < s[:-1]).all()          # noisier t -> smaller heat time
+  lhs = torch.trapezoid(w * torch.exp(-s), t)
+  rhs = (torch.exp(-s[-1]) - torch.exp(-s[0])) / (1 - eps)
+  assert abs(lhs - rhs) < 1e-4 * rhs, (lhs, rhs)
+  # SFM convention: u = alpha_t.
+  s2, _ = H.time_conversion(alpha, True, rate, mode='trunc_exp', range_upper_bound=ub)
+  assert torch.allclose(s2, -torch.log1p(-(1.0 - alpha) * normalizer) / rate)
+  # alpha_t == 1 exactly (u = 0) lands at the truncation point, finite weight.
+  s1, w1 = H.time_conversion(torch.tensor([1.0]), False, rate, mode='trunc_exp',
+                             range_upper_bound=ub)
+  assert s1.item() == pytest.approx(ub, rel=1e-6) and torch.isfinite(w1).all()
+  # range_upper_bound -> inf is the exp map.
+  s_exp, w_exp = H.time_conversion(alpha, False, rate)
+  s_inf, w_inf = H.time_conversion(alpha, False, rate, mode='trunc_exp', range_upper_bound=1e3)
+  assert torch.allclose(s_inf, s_exp) and torch.allclose(w_inf, w_exp)
+
+
 # ---------------------------------------------------------------------------
 # q_xt: polar bridge state on the product manifold
 # ---------------------------------------------------------------------------
@@ -415,6 +478,28 @@ def test_nll_end_to_end_is_finite_and_differentiable(monkeypatch):
 
 
 @needs_gpu
+@pytest.mark.parametrize('mode', ['unif', 'trunc_exp'])
+def test_nll_end_to_end_bounded_time_conversion(monkeypatch, mode):
+  model, _ = _build_model(monkeypatch, [
+    f'algo.time_conversion_mode={mode}', 'algo.time_range_upper_bound=3.0'])
+  B, L = 2, 8
+  x = _tokens(model, B, L)
+  alpha = torch.tensor([[0.2], [0.9]], dtype=torch.float64, device=model.device)
+  xt, weight = model.q_xt(x, alpha, use_pure_noise=False)
+  assert xt.dtype == torch.float64 and weight.shape == (B, 1)
+  assert (weight > 0).all()
+  if mode == 'unif':
+    assert torch.allclose(weight, torch.full_like(weight, 3.0))
+  # alpha_t = 1 is clean: the higher alpha_t lands further out on the bridge.
+  ball = xt.unflatten(-1, (4, 3)).norm(dim=-1)
+  assert ball[1].mean() > ball[0].mean()
+  loss, t = model.nll(x, None, None)
+  assert loss.shape == (B, L) and torch.isfinite(loss).all()
+  loss.sum().backward()
+  assert torch.isfinite(model.backbone.sphere_embed.weight.grad).all()
+
+
+@needs_gpu
 def test_trainer_base_loss_with_sudoku_mask(monkeypatch):
   model, _ = _build_model(monkeypatch)
   B, L = 2, 8
@@ -533,6 +618,10 @@ def test_adaptive_schedule_composes(monkeypatch):
 @pytest.mark.parametrize('overrides', [
   ['noise=log-linear-adaptive', 'algo.invert_time_convention=true'],
   ['algo.prod_factor_dim=5'],
+  ['algo.time_conversion_mode=unif', 'algo.time_range_upper_bound=0'],
+  ['algo.time_conversion_mode=unif', 'sampler.t_max=2.0'],  # > time_range_upper_bound=1.0
+  ['algo.time_conversion_mode=trunc_exp', 'sampler.t_max=2.0'],
+  ['algo.time_exp_rate=0'],
 ])
 def test_validate_configuration_rejects(monkeypatch, overrides):
   with pytest.raises(ValueError):
