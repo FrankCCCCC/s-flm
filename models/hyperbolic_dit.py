@@ -215,7 +215,9 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
               context=None) -> torch.Tensor:
     del x0
 
-    x = xt  # [B, L, embed_dim], a Poincaré-ball point consumed as-is
+    # [B, L, embed_dim], a Poincaré-ball point consumed as-is; the HBFM bridge
+    # state arrives in float64, the trunk runs at the parameters' precision.
+    x = xt.to(self.sphere_embed.weight.dtype)
     if self.in_proj is not None:
       x = self.in_proj(x)
     lf = context if hasattr(context, 'z_sc') else None
