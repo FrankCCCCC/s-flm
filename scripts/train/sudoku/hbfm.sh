@@ -21,6 +21,7 @@ LR="${LR:-3e-4}"
 SEED="${SEED:-1}"
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-20}"    # exp rate in unit-model time
 READOUT_PRECISION="${READOUT_PRECISION:-float32}" # float64 / float32 (u stays < 3 here)
+FORWARD_TYPE="${FORWARD_TYPE:-horosphere}"  # horosphere: logits are a residual on the Busemann log-densities / naive: plain logits
 MAX_STEPS="${MAX_STEPS:-20000}"
 CKPT_EVERY="${CKPT_EVERY:-5000}"
 PER_GPU_BS="${PER_GPU_BS:-256}"

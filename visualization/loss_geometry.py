@@ -31,7 +31,7 @@ from omegaconf import OmegaConf
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)  # repo-root imports below need this bootstrap first
 import algo, dataloader, main as main_mod  # main registers omegaconf resolvers
-from geo_bridge import GeoUtils  # curvature-aware manifold coordinate converters
+from numeric.geo_bridge import GeoUtils  # curvature-aware manifold coordinate converters
 
 # Dispatch on config.algo.name (same mapping main.main() uses).
 ALGO_BY_NAME = {'ar': algo.AR, 'mdlm': algo.MDLM, 'duo_base': algo.DUO_BASE,

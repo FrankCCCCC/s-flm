@@ -30,7 +30,7 @@ prod_factor_gaussian_curvature: -1.0
 # schedules every refit. t is clamped per factor at
 # _radial_t_max(d) * R^2, past which the state already identifies the word.
 time_exp_rate: 0.01
-forward_type: naive      # horosphere: the backbone's logits are a residual on the Busemann log-densities / naive: plain logits
+forward_type: horosphere      # horosphere: the backbone's logits are a residual on the Busemann log-densities / naive: plain logits
 horosphere_forward_chunked: True  # chunk the horosphere readout to reduce memory; only needed for large batch sizes / long sequences
 # Precision of the (B, L, V) horosphere readout / loss (the bridge state stays
 # float64). float64 is the numerics.md default; float32 is adequate -- and ~50x

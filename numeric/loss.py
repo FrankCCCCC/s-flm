@@ -4,8 +4,7 @@ from typing import List, Optional, Union
 
 import torch
 
-from geo_bridge import GeoUtils, HyperbolicHeatKernel
-from hyper_model import HyperbolicModelBase
+from numeric.geo_bridge import GeoUtils, HyperbolicHeatKernel
 
 def isnan_or_inf(x):
     return torch.logical_or(torch.isnan(x), torch.isinf(x))
@@ -778,7 +777,7 @@ class Loss:
         assert word_embedding is None or tuple(word_embedding.shape) == (V, embedding_size)
         if rhos.ndim == 2:
             rhos = rhos[..., None]
-        dims, curvatures = HyperbolicModelBase.prod_factors(
+        dims, curvatures = GeoUtils.validate_prod_factors(
             prod_factor_dim=prod_factor_dim,
             prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
             embedding_size=embedding_size,

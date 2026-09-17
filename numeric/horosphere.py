@@ -1,11 +1,9 @@
-import math
-from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple, Union
+import contextlib
+from typing import List, Optional, Union
 
 import torch
-import torch.nn as nn
 
-from geo_bridge import GeoUtils
+from numeric.geo_bridge import GeoUtils
 
 @contextlib.contextmanager
 def _fp32_matmul():
@@ -27,7 +25,7 @@ def _horosphere_block(us, ss, decay, phis, factor_dim):
     `us` (B, L, m, d) unit bridge directions, `ss` (B, L, m) dimensionless
     radials, `decay` = exp(-2 ss), `phis` (Vc, m, d) unit boundary directions
     of the chunk's words; returns (B, L, Vc). The formula of
-    `HyperbolicModelBase.horosphere_geometry` on the chunk -- the
+    `horosphere_geometry_tensor` on the chunk -- the
     cancellation-free squared-difference half angles -- as one compiled
     reduction over the (B, L, Vc, m, d) broadcast.
     """
@@ -75,7 +73,7 @@ class _HorosphereChunk(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, us, ss, decay, phis, factor_dim):
-        """
+        r"""
         Squared-difference form (the base class): sin^2(a/2) = |u - \phi|^2/4. Cancellation-free, 
         so it is exact for the target word even when the state has nearly resolved it. 
         But autograd through it, even compiled, becomes inductor reduction kernels 
@@ -88,8 +86,8 @@ class _HorosphereChunk(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out):
-        """
-        Inner-product form: sin²(a/2) = (1 - \langle u, \phi\rangle)/2. Its backward is 
+        r"""
+        Inner-product form: sin^2(a/2) = (1 - \langle u, \phi\rangle)/2. Its backward is 
         two skinny matmuls per factor (cuBLAS), 365 ms forward+backward. But in float32 
         its forward loses the target word's tiny sin² to cancellation once the radial reaches s \approx 5; 
         it fails the repo's fp32 Bayes-posterior test (test_horosphere_readout_is_bayes_posterior, atol 1e-4) 
@@ -98,10 +96,11 @@ class _HorosphereChunk(torch.autograd.Function):
         us, ss, decay, phis = ctx.saved_tensors
         block = _horosphere_block_dot_compiled if us.is_cuda else _horosphere_block_dot
         with torch.enable_grad(), _fp32_matmul():
-        leaves = [t.detach().requires_grad_(True) for t in (us, ss, decay, phis)]
-        out = block(*leaves, ctx.factor_dim)
-        grads = torch.autograd.grad(out, leaves, grad_out)
+            leaves = [t.detach().requires_grad_(True) for t in (us, ss, decay, phis)]
+            out = block(*leaves, ctx.factor_dim)
+            grads = torch.autograd.grad(out, leaves, grad_out)
         return (*grads, None)
+
 
 class HorosphereGeometry:
     # Words per block of `horosphere_geometry`: the forward's (B, L, READOUT_CHUNK, m)
@@ -118,7 +117,7 @@ class HorosphereGeometry:
         prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = None,
         readout_dtype: torch.dtype = torch.float64,
     ):
-        """Memory-bounded `HyperbolicModelBase.horosphere_geometry`.
+        """Memory-bounded `horosphere_geometry_tensor`.
 
         The same quantity -- per word v the sum over factors i of
         `-(d-1) (s_i + log(sin^2(a_iv/2) + cos^2(a_iv/2) e^{-2 s_i}))`, the
@@ -133,19 +132,18 @@ class HorosphereGeometry:
         factor instead of a reduction over (B, L, Vc, m, d)), so the live memory
         is O(B L V) whatever the number of factors and a 16 x 256 micro-batch
         costs ~0.4 s forward + backward on an RTX A5000 (base form: 147 GB,
-        out of memory). Returned in
-        float64 like the base class, computed in `readout_dtype`: float32 is
-        adequate while the dimensionless radial stays below ~8
-        (configs/algo/hbfm.yaml).
+        out of memory). Computed and returned in `readout_dtype`, like
+        `horosphere_geometry_tensor`: float32 is adequate while the dimensionless
+        radial stays below ~8 (configs/algo/hbfm.yaml).
         """
         embedding = word_embedding
-        dims, curvatures = HyperbolicModelBase.prod_factors(
-        prod_factor_dim=prod_factor_dim,
-        prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
-        embedding_size=embedding.shape[-1])
+        dims, curvatures = GeoUtils.validate_prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=embedding.shape[-1])
         if len(set(dims)) != 1:
-        raise ValueError(
-            f'horosphere_geometry needs one shared factor dimension; got {dims}.')
+            raise ValueError(
+                f'horosphere_geometry needs one shared factor dimension; got {dims}.')
         factor_dim, num_factors = dims[0], len(dims)
         dtype = readout_dtype
         tiny = torch.finfo(dtype).tiny
@@ -153,14 +151,12 @@ class HorosphereGeometry:
         phis = phis / phis.norm(dim=-1, p=2, keepdim=True).clamp_min(tiny)
         us = theta.to(dtype).unflatten(-1, (num_factors, factor_dim))
         kappas = radius.new_tensor(
-        [1.0 / GeoUtils._curvature_scale(k) for k in curvatures], dtype=dtype)
+            [1.0 / GeoUtils._curvature_scale(k) for k in curvatures], dtype=dtype)
         ss = radius.to(dtype) * kappas
         decay = (-2.0 * ss).exp()
         outs = [_HorosphereChunk.apply(us, ss, decay, phis_c, factor_dim)
                 for phis_c in phis.split(HorosphereGeometry.READOUT_CHUNK, dim=0)]
-        # float64 like the base class (its callers compare against float64);
-        # the values carry `readout_dtype` precision.
-        return torch.cat(outs, dim=-1).to(torch.float64)
+        return torch.cat(outs, dim=-1)
 
     @staticmethod
     def horosphere_geometry_tensor(
@@ -217,7 +213,7 @@ class HorosphereGeometry:
                 "OptimalModelRefactor's frozen uniform_sphere_points buffer."
             )
         embedding = embedding.to(readout_dtype)
-        dims, curvatures = HyperbolicModelBase.prod_factors(
+        dims, curvatures = GeoUtils.validate_prod_factors(
             prod_factor_dim=prod_factor_dim,
             prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
             embedding_size=embedding.shape[-1],
@@ -274,10 +270,10 @@ class HorosphereGeometry:
         forward_chunked: bool = True,
     ):
         if forward_chunked:
-            return Horosphere.horosphere_geometry_chunk(
+            return HorosphereGeometry.horosphere_geometry_chunk(
                 theta, radius, word_embedding, prod_factor_dim, prod_factor_gaussian_curvature, readout_dtype
             )
         else:
-            return Horosphere.horosphere_geometry_tensor(
+            return HorosphereGeometry.horosphere_geometry_tensor(
                 theta, radius, word_embedding, prod_factor_dim, prod_factor_gaussian_curvature, readout_dtype
             )

@@ -10,7 +10,7 @@ import utils
 import flm_utils
 import candi_utils
 import models.flm_dit
-from geo_bridge import (
+from numeric.geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, BinaryHyperbolicHeatKernel,
   Coordinate, Geometry)
 

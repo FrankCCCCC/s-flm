@@ -15,7 +15,7 @@ from numeric.geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, BinaryHyperbolicHeatKernel,
   Coordinate, Geometry)
 from numeric.horosphere import HorosphereGeometry
-from loss import HyperBridge
+from numeric.loss import HyperBridge
 
 
 class AR(trainer_base.TrainerBase):
@@ -880,7 +880,7 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     An int splits embed_dim into equal factors and a float shares the
     curvature; lists spell the factors out; null means one factor of the full
     embed_dim at curvature -1. Plain python lists, not ListConfig:
-    `HyperbolicModelBase.prod_factors` dispatches on `isinstance(x, list)`.
+    `GeoUtils.validate_prod_factors` dispatches on `isinstance(x, list)`.
     """
     dims = algo_config.prod_factor_dim
     curvatures = algo_config.prod_factor_gaussian_curvature
@@ -899,7 +899,7 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       curvatures = [float(curvatures)] * len(dims)
     else:
       curvatures = [float(k) for k in curvatures]
-    return HyperbolicModelBase.prod_factors(
+    return GeoUtils.validate_prod_factors(
       prod_factor_dim=dims, prod_factor_gaussian_curvature=curvatures,
       embedding_size=embed_dim)
 

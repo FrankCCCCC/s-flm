@@ -22,6 +22,7 @@ SEED="${SEED:-1}"
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-20}"    # exp rate in unit-model time
 READOUT_PRECISION="${READOUT_PRECISION:-float32}" # float64 / float32 (u stays < 3 here)
 FORWARD_TYPE="${FORWARD_TYPE:-horosphere}"  # horosphere: logits are a residual on the Busemann log-densities / naive: plain logits
+ALPHA_MAX="${ALPHA_MAX:-null}"              # noise.alpha_max: null = untruncated; a value < 1 drops the LATE heat times (u = 1 - alpha >= 1 - alpha_max)
 MAX_STEPS="${MAX_STEPS:-20000}"
 CKPT_EVERY="${CKPT_EVERY:-5000}"
 PER_GPU_BS="${PER_GPU_BS:-256}"
@@ -32,9 +33,6 @@ DEVICES="${DEVICES:-1}"
 PROPOSAL_RATE=$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")
 
 cd "${REPO_ROOT}"
-ADA_ARGS=""
-case "${NOISE}" in *adaptive*) ADA_ARGS="noise.adaptive_refit_every=${ADA_REFIT_EVERY} noise.adaptive_ema=${ADA_EMA} noise.adaptive_buffer_size=$((50 * GLOBAL_BATCH))";; esac
-
 python -u -m main \
     data=sudoku \
     data.cache_dir="${CACHE_DIR}" \
@@ -54,7 +52,7 @@ python -u -m main \
     noise=log-linear-adaptive \
     noise.alpha_max=${ALPHA_MAX} \
     noise.adaptive_refit_every=50 \
-    noise.adaptive_buffer_size=25600 \
+    noise.adaptive_buffer_size=$((50 * GLOBAL_BATCH)) \
     noise.adaptive_ema=0.9 \
     noise.adaptive_uniform_mix=1e-3 \
     loader.global_batch_size=${GLOBAL_BATCH} \

@@ -32,6 +32,7 @@ FACTOR_DIM="${FACTOR_DIM:-3}"             # H^FACTOR_DIM factors, EMBED_DIM/FACT
 GAUSS_CURV="${GAUSS_CURV:--1.0}"          # Gaussian curvature K < 0 of every factor
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-5}"     # exp rate in unit-model time (see below)
 READOUT_PRECISION="${READOUT_PRECISION:-float64}"  # float64 / float32 (see configs/algo/hbfm.yaml)
+ALPHA_MAX="${ALPHA_MAX:-null}"            # noise.alpha_max: null = untruncated; a value < 1 drops the LATE heat times (u = 1 - alpha >= 1 - alpha_max)
 PROPOSAL_RATE=$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")
 
 cd "${REPO_ROOT}"

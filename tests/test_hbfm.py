@@ -338,6 +338,37 @@ def test_horosphere_readout_is_bayes_posterior(monkeypatch, precision, atol):
   assert torch.allclose(log_p_T.double(), (horo / 2).log_softmax(-1), atol=atol)
 
 
+@pytest.mark.parametrize('precision,atol', [('float64', 1e-10), ('float32', 1e-4)])
+def test_chunked_horosphere_readout_matches_base(monkeypatch, precision, atol):
+  """HyperbolicBoundaryFM.horosphere_geometry (one factor at a time, the
+  vocabulary in recomputed chunks, computed in readout_dtype) equals the (B, L, V, m, d)
+  broadcast of HyperbolicModelBase.horosphere_geometry in value and in the
+  boundary-table gradient."""
+  import hyper_model
+  model, _ = _build_model(monkeypatch, [
+    'algo.prod_factor_dim=[3,3,3,3]',
+    'algo.prod_factor_gaussian_curvature=[-1.0,-4.0,-0.25,-2.0]',
+    f'algo.readout_precision={precision}'])
+  model.READOUT_CHUNK = 5   # V = 12 -> chunks of 5, 5, 2
+  B, L = 2, 8
+  theta = torch.randn(B, L, 4, 3, dtype=torch.float64, device=model.device)
+  theta = (theta / theta.norm(dim=-1, keepdim=True)).flatten(-2)
+  radius = torch.rand(B, L, 4, dtype=torch.float64, device=model.device) * 3
+  kw = dict(theta=theta, radius=radius, prod_factor_dim=model.prod_factor_dim,
+            prod_factor_gaussian_curvature=model.prod_factor_gaussian_curvature)
+  out = model.horosphere_geometry(**kw)
+  ref = hyper_model.HyperbolicModelBase.horosphere_geometry(model, **kw)
+  assert out.dtype == torch.float64 and ref.dtype == torch.float64
+  assert out.shape == (B, L, model.vocab_size)
+  assert torch.allclose(out.double(), ref, atol=atol)
+  g_out = torch.autograd.grad(out.sum(), model.word_embedding)[0]
+  g_ref = torch.autograd.grad(ref.sum(), model.word_embedding)[0]
+  assert torch.allclose(g_out.double(), g_ref.double(), atol=atol, rtol=1e-4)
+  # no_grad path (sampling) takes the un-checkpointed branch
+  with torch.no_grad():
+    assert torch.allclose(model.horosphere_geometry(**kw).double(), ref, atol=atol)
+
+
 def test_naive_readout_is_plain_log_softmax(monkeypatch):
   model, _ = _build_model(monkeypatch, ['algo.forward_type=naive'])
   logits = torch.randn(2, 8, model.vocab_size)

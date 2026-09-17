@@ -5,7 +5,7 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from geo_bridge import GeoUtils
+from numeric.geo_bridge import GeoUtils
 from numeric.horosphere import HorosphereGeometry
 
 class HyperbolicModelBase(ABC):
@@ -46,48 +46,6 @@ class HyperbolicModelBase(ABC):
     def word_embedding(self) -> torch.Tensor:
         pass
 
-    @staticmethod
-    def prod_factors(
-        prod_factor_dim: Optional[Union[int, List[int]]],
-        prod_factor_gaussian_curvature: Optional[Union[float, List[float]]],
-        embedding_size: int,
-    ):
-        """
-        Resolve and validate the product-factor split of a boundary of dimension
-        `embedding_size`.
-
-        Returns:
-            `tuple[List[int], List[float]]`: the per-factor dimensions `d_i >= 2`
-                (summing to `embedding_size`) and curvatures `K_i < 0`.
-        """
-        dims = prod_factor_dim
-        curvatures = prod_factor_gaussian_curvature
-        if dims is None and curvatures is None:
-            return [embedding_size], [-1.0]
-        if not (isinstance(dims, list) and isinstance(curvatures, list)):
-            raise TypeError(
-                "prod_factor_dim and prod_factor_gaussian_curvature must both be "
-                f"lists or both be None; got {type(dims)} and {type(curvatures)}."
-            )
-        if len(dims) != len(curvatures):
-            raise ValueError(
-                f"prod_factor_dim {dims} and prod_factor_gaussian_curvature "
-                f"{curvatures} must have the same length."
-            )
-        if sum(dims) != embedding_size:
-            raise ValueError(
-                f"prod_factor_dim {dims} should sum to the embedding size {embedding_size}."
-            )
-        for factor_dim, factor_curvature in zip(dims, curvatures):
-            if factor_dim < 2:
-                raise ValueError(f"Each product factor needs dim >= 2, not {factor_dim}.")
-            if not (factor_curvature < 0.0):
-                # float('nan') >= 0.0 is False, so if k >= 0.0: raise lets a NaN curvature through silently
-                # current implementation is equivalent to:
-                # if math.isnan(factor_curvature) or factor_curvature >= 0.0:
-                raise ValueError(f"Hyperbolic curvature should be negative, not {factor_curvature}.")
-        return dims, curvatures
-
     def forward_combined(
         self,
         z: torch.Tensor,
@@ -98,6 +56,7 @@ class HyperbolicModelBase(ABC):
         return_radial: bool=False,
         prod_factor_dim: Optional[Union[int, List[int]]] = None,
         prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = None,
+        readout_dtype: torch.dtype = torch.float64,
     ) -> Tuple[torch.Tensor]:
         """
         Predict vocabulary logits from a time-conditioned state.
@@ -121,6 +80,8 @@ class HyperbolicModelBase(ABC):
                 back to the model's own factors.
             prod_factor_gaussian_curvature (`Union[float, List[float]]`, *optional*):
                 Curvature `K_i < 0` of each factor.
+            readout_dtype (`torch.dtype`, *optional*, defaults to `torch.float64`):
+                The data type of the output logits.
 
         Returns:
             `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
@@ -137,6 +98,7 @@ class HyperbolicModelBase(ABC):
                 prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
                 t=t,
                 return_radial=return_radial,
+                readout_dtype=readout_dtype
             )
         elif forward_type == "horosphere":
             return self.forward_horosphere(
@@ -147,6 +109,7 @@ class HyperbolicModelBase(ABC):
                 prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
                 t=t,
                 return_radial=return_radial,
+                readout_dtype=readout_dtype
             )
         else:
             raise ValueError(f"forward_type, {forward_type}, is not supported.")
@@ -167,7 +130,8 @@ class HyperbolicModelBase(ABC):
         prod_factor_dim: Optional[Union[int, List[int]]] = None,
         prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = None,
         t: Optional[torch.Tensor] = None,
-        return_radial: bool=False
+        return_radial: bool=False,
+        readout_dtype: torch.dtype = torch.float64,
     ) -> Tuple[torch.Tensor]:
         """
         Predict vocabulary logits from a time-conditioned state.
@@ -187,6 +151,8 @@ class HyperbolicModelBase(ABC):
                 Per-example time values, optional
             return_radial (`bool`, *optional*, defaults to `False`):
                 Also return the trunk's radial prediction.
+            readout_dtype (`torch.dtype`, *optional*, defaults to `torch.float64`):
+                The data type of the output logits.
 
         Returns:
             `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
@@ -216,7 +182,7 @@ class HyperbolicModelBase(ABC):
             if prod_factor_dim is None and prod_factor_gaussian_curvature is None:
                 prod_factor_dim = self.prod_factor_dim
                 prod_factor_gaussian_curvature = self.prod_factor_gaussian_curvature
-            _, curvatures = HyperbolicModelBase.prod_factors(
+            _, curvatures = GeoUtils.validate_prod_factors(
                 prod_factor_dim=prod_factor_dim,
                 prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
                 embedding_size=theta.shape[-1],
@@ -232,9 +198,10 @@ class HyperbolicModelBase(ABC):
         # keeps output_radial_dim == 0 -- a model that predicts no radius -- from
         # slicing the features away entirely.
         split = output.shape[-1] - self.output_radial_dim
+        logits = self.lm_head(output[..., :split]).to(readout_dtype)
         if return_radial:
-            return self.lm_head(output[..., :split]), output[..., split:]
-        return self.lm_head(output[..., :split])
+            return logits, output[..., split:]
+        return logits
 
     @staticmethod
     def radius_conversion(
@@ -295,7 +262,8 @@ class HyperbolicModelBase(ABC):
         prod_factor_dim: Optional[Union[int, List[int]]] = None,
         prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = None,
         t: Optional[torch.Tensor] = None,
-        return_radial: bool=False
+        return_radial: bool=False,
+        readout_dtype: torch.dtype = torch.float64,
     ) -> Tuple[torch.Tensor]:
         """
         Predict vocabulary logits from a time-conditioned state.
@@ -321,10 +289,12 @@ class HyperbolicModelBase(ABC):
                 Per-example time values, optional
             return_radial (`bool`, *optional*, defaults to `False`):
                 Also return the trunk's radial prediction.
+            readout_dtype (`torch.dtype`, *optional*, defaults to `torch.float64`):
+                The data type of the output logits.
 
         Returns:
             `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
-                Vocabulary logits, float64.
+                Vocabulary logits, `readout_dtype`.
             `torch.Tensor` of shape `(batch_size, max_seq_len, output_radial_dim)`:
                 if return_radial, the predicted radius
         """
@@ -348,12 +318,14 @@ class HyperbolicModelBase(ABC):
                 **trunk_state, t=t, return_radial=True,
                 prod_factor_dim=prod_factor_dim,
                 prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+                readout_dtype=readout_dtype,
             )
         else:
             pred_logit = self.forward_naive(
                 **trunk_state, t=t, return_radial=False,
                 prod_factor_dim=prod_factor_dim,
                 prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+                readout_dtype=readout_dtype,
             )
         horo_dist = HorosphereGeometry.compute_horosphere(
             word_embedding=self.word_embedding,
@@ -361,7 +333,7 @@ class HyperbolicModelBase(ABC):
             radius=radius,
             prod_factor_dim=prod_factor_dim,
             prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
-            readout_dtype=self.readout_dtype,
+            readout_dtype=readout_dtype,
         )
         pred_logit = pred_logit.to(horo_dist.dtype) + horo_dist
 
