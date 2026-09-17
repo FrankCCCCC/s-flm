@@ -1,0 +1,38 @@
+name: hbfm
+diffusion_type: hyperbolic    # label only; reuses the trainer_base.Diffusion path
+backbone: hyperbolic-dit
+parameterization: mean
+time_conditioning: False      # the bridge posterior q(y | z_s) does not depend on the heat time
+loss_type: ce
+T: 0
+causal_attention: False
+adaLN: True
+renormalize_weights: False
+invert_time_convention: false # alpha_t=1 is clean (MDLM-like; required by the adaptive noise schedule)
+
+# Product manifold H^{d_1}_{K_1} x ... x H^{d_M}_{K_M} over the backbone's embed_dim.
+# An int splits embed_dim into equal factors (a float shares the curvature);
+# lists spell the factors out; null = one factor of the full embed_dim. The
+# radial sampler's float64 ceiling _radial_t_max(d) shrinks like 700/(d-1),
+# so keep the factors small (2 <= d <= ~16).
+prod_factor_dim: 2
+prod_factor_gaussian_curvature: -1.0
+
+# Heat time t = -log(u) / time_exp_rate, u = 1 - alpha_t the noise schedule's
+# noise fraction, weighted by |alpha'_t| / (time_exp_rate * u)
+# (algo.HyperbolicBoundaryFM.time_conversion + nll): under noise=log-linear
+# this is loss.Proposal's exp proposal of rate time_exp_rate and its 1 / q(t);
+# noise=*-adaptive reshapes the proposal and noise.alpha_min / alpha_max
+# truncate the heat-time range, and the |alpha'_t| factor (MDLM's weight over
+# the rate) keeps the loss the same integral under both. Use the repo's
+# adaptive recipe (noise.adaptive_refit_every=50, adaptive_ema=0.9, an explicit
+# adaptive_buffer_size): with adaptive_ema=0 the refit alternates between two
+# schedules every refit. t is clamped per factor at
+# _radial_t_max(d) * R^2, past which the state already identifies the word.
+time_exp_rate: 0.01
+forward_type: horosphere      # horosphere: the backbone's logits are a residual on the Busemann log-densities / naive: plain logits
+# Precision of the (B, L, V) horosphere readout / loss (the bridge state stays
+# float64). float64 is the numerics.md default; float32 is adequate -- and ~50x
+# faster on 1/64-rate-fp64 GPUs -- only while the states stay below u ~ 8, e.g.
+# many-factor manifolds whose summed evidence resolves the word at u < 1.
+readout_precision: float64
