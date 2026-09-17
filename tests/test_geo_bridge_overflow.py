@@ -18,7 +18,7 @@ import math
 import pytest
 import torch
 
-import geo_bridge
+import numeric.geo_bridge as geo_bridge
 from conftest import REPO_ROOT  # noqa: F401  (ensures repo root on sys.path)
 
 PRIMARY_D = 512

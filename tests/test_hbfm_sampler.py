@@ -20,9 +20,10 @@ import pytest
 import torch
 from scipy import stats
 
-import hyper_model
+import numeric.hyper_model as hyper_model
+from numeric.horosphere import HorosphereGeometry
 import samplers
-from geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
+from numeric.geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
 from conftest import REPO_ROOT  # noqa: F401
 
 torch.manual_seed(0)
@@ -120,8 +121,9 @@ class _OracleModel:
   def forward(self, *, xt, sigma, context):
     rhos, thetas = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
       xt, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
-    horo = self._readout.horosphere_geometry(
-      theta=thetas, radius=rhos, prod_factor_dim=self.prod_factor_dim,
+    horo = HorosphereGeometry.compute_horosphere(
+      theta=thetas, radius=rhos, word_embedding=self._readout.word_embedding,
+      prod_factor_dim=self.prod_factor_dim,
       prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature)
     self.last_log_p = (horo + self.log_prior).log_softmax(-1)
     return self.last_log_p
