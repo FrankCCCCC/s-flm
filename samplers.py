@@ -740,113 +740,72 @@ class SFMSampler(Sampler):
     state.step_idx += 1
     return state
 
-# ==========
-# HBFM
-# ==========
+# ════════════════════════════════════════════════════════════════
+#  HBFM Sampler
+# ════════════════════════════════════════════════════════════════
 
 @dataclass(kw_only=True)
 class HBFMState(BaseState):
-  # [B, L, d] float sphere embeddings during integration;
-  # replaced by [B, L] int token ids at the final decoding step.
+  # [B, L, E] float64 Poincaré-Cartesian bridge state (per-factor ball points
+  # concatenated) during integration; [B, L] int token ids after decoding.
   xt: torch.Tensor
-  t_schedule: torch.Tensor
+  t_schedule: torch.Tensor  # [N+1] heat times, 0 -> t_max
+  boundary: torch.Tensor    # [V, E] per-factor unit boundary directions of the vocabulary
   start_idx: int
   step_idx: int
   nfe: int
   done: bool
-  prefix_lengths: torch.Tensor = None  # [B] per-sample lengths
-  prefix_tokens: torch.Tensor = None  # [B, L]
-  prefix_embeds: torch.Tensor = None  # [B, P, d] sphere embeddings of prefix
-  z_sc: torch.Tensor = None  # [B, L, d] self-cond carry (None when off / at k=0)
-
-
-@dataclass
-class HBFMContext:
-  temperature: float = 0.0
-  z_sc: torch.Tensor | None = None
-
-
-def flow_self_cond_carry(model, log_p, out_dtype):
-  """Next-step self-cond carry: the SOFT full-vocab predicted-clean embedding
-  in the model-input space, matching training (algo.SelfConditioning). None
-  when the model was trained without self-conditioning."""
-  if not getattr(model, 'self_conditioning', False):
-    return None
-  E = model._sc_embed_table().detach().to(log_p.dtype)
-  return torch.einsum('blv,vd->bld', log_p.exp(), E).to(out_dtype)
-
-@torch.compile
-def hbfm_compute_velocity(x, E, log_p, mode, eps):
-  p = log_p.exp()
-  if mode == 'exact':
-    if E.ndim == 2:  # [V, d]
-      ein_fwd = 'bld,vd->blv'
-      ein_bwd = 'blv,vd->bld'
-    else:           # [B, L, k, d]
-      ein_fwd = 'bld,blkd->blk'
-      ein_bwd = 'blk,blkd->bld'
-    cos_omega = torch.einsum(ein_fwd, x, E)
-    cos_omega = cos_omega.clamp(-1 + eps, 1 - eps)
-    omega = torch.acos(cos_omega)
-    scale = omega / omega.sin().clamp(min=eps)
-    p_scale = p * scale
-    term1 = torch.einsum(ein_bwd, p_scale, E)
-    term2 = x * (p_scale * cos_omega).sum(dim=-1, keepdim=True)
-    return term1 - term2
-  elif mode == 'sample':
-    target_idx = sample_categorical(p)
-    if E.ndim == 2:  # [V, d]
-      target = E[target_idx]
-    else:            # [B, L, k, d]
-      B, L = target_idx.shape
-      target = E[
-        torch.arange(B, device=E.device)[:, None],
-        torch.arange(L, device=E.device)[None, :],
-        target_idx]
-    return utils.log_map(x, target, eps)
-  else:
-    raise ValueError(f'Unknown velocity mode: {mode}')
-
-
-def hbfm_step_size(alpha_t, alpha_s, invert_time_convention, eps):
-  if invert_time_convention:
-    # slerp param = alpha_t, decreasing along schedule
-    return (alpha_t - alpha_s) / alpha_t.clamp(min=eps)
-  else:
-    # slerp param = 1 - alpha_t, decreasing along schedule
-    return (alpha_s - alpha_t) / (1 - alpha_t).clamp(min=eps)
+  prefix_lengths: torch.Tensor = None  # [B]
+  prefix_tokens: torch.Tensor = None   # [B, P]
+  prefix_embeds: torch.Tensor = None   # [B, P, E] clean (boundary) states of the prefix
 
 
 class HBFMSampler(Sampler):
-  def __init__(self, noise_removal, velocity, use_float64,
-               slerp_float64, eps, temperature, p_nucleus,
-               top_k,
-               top_k_velocity,
-               invert_time_convention):
+  """Euler-Maruyama sampler of the learned bridge SDE on a product of Poincaré balls.
+
+  Per factor m (curvature K_m = -kappa_m^2; unit-ball coordinates w = z / R_m) the
+  Brownian bridge toward the boundary word v has drift (slides/aug26_2026,
+  unigram2 model.bridge_drift)
+
+      b_v(w) = kappa^2 [ (d-1)/2 (1-|w|^2)^2 (e_v - w)/|e_v - w|^2 - d/4 (1-|w|^2) w ]
+
+  and diffusion kappa (1-|w|^2)/2 dB. The learned bridge is the posterior mixture
+  sum_v p(v | z_t) b_v(w) -- velocity=exact, over the whole vocabulary or the
+  top_k_velocity words -- or b_v for one v ~ p(v | z_t) (velocity=sample), with
+  p(v | z_t) the model's full log-posterior (horosphere + residual). The state
+  starts at the origin and walks the uniform heat-time grid 0, dt, ..., t_max
+  (dt = t_max / steps): `steps` forward passes, of which the first steps - 1
+  are followed by an Euler-Maruyama update and the last decodes the posterior
+  at t_max - dt (argmax / a sample). dt sets the discretization bias of the
+  decoded law, so t_max and steps are coupled (see configs/sampler/hbfm.yaml).
+  Prompt positions are pinned at the clean boundary state throughout.
+  """
+  def __init__(self, noise_removal, velocity, use_float64, temperature,
+               p_nucleus, top_k, top_k_velocity, t_max):
     self.noise_removal = noise_removal
     self.velocity = velocity
     self.use_float64 = use_float64
-    self.slerp_float64 = slerp_float64
-    self.eps = eps
     self.temperature = temperature
     self.p_nucleus = p_nucleus
     self.top_k = top_k
     self.top_k_velocity = top_k_velocity
-    self.invert_time_convention = invert_time_convention
+    self.t_max = t_max
 
   def init_state(self, model, num_samples, *,
                  num_steps=None, eps=1e-5, prefix_tokens=None,
                  prefix_lengths=None):
+    del eps  # the heat-time grid starts exactly at the origin, t = 0
     self._validate_prefix_args(prefix_tokens, prefix_lengths)
-    xt = torch.randn(num_samples, model.num_tokens,
-      model.backbone.embed_dim, device=model.device,
-      dtype=torch.float32)
-    xt = utils.sphere_normalize(xt)
+    xt = torch.zeros(num_samples, model.num_tokens, model.backbone.embed_dim,
+                     dtype=torch.float64, device=model.device)
+    boundary = torch.cat([
+      GeoUtils._polar_direction(e) for e in
+      model.word_embedding.detach().to(torch.float64).split(
+        model.prod_factor_dim, dim=-1)], dim=-1)
 
     prefix_embeds = None
     if prefix_tokens is not None:
-      prefix_embeds = model.backbone.get_sphere_embeddings(
-        prefix_tokens)
+      prefix_embeds = model._clean_state(prefix_tokens).detach()
       self._project_prefix(xt, prefix_embeds, prefix_lengths)
       start_idx = int(prefix_lengths.min())
     else:
@@ -854,19 +813,12 @@ class HBFMSampler(Sampler):
 
     if num_steps is None:
       num_steps = model.config.sampler.steps
-
-    if self.invert_time_convention:
-      t_schedule = torch.linspace(eps, 1.0, num_steps + 1,
-                                  device=model.device)
-    else:
-      t_schedule = torch.linspace(1.0, eps, num_steps + 1,
-                                  device=model.device)
-    state = SFMState(xt=xt, t_schedule=t_schedule,
+    t_schedule = torch.linspace(0.0, self.t_max, num_steps + 1,
+                                dtype=torch.float64, device=model.device)
+    return HBFMState(xt=xt, t_schedule=t_schedule, boundary=boundary,
       start_idx=start_idx, step_idx=0, nfe=0, done=False,
-      prefix_lengths=prefix_lengths,
-      prefix_embeds=prefix_embeds,
-      prefix_tokens=prefix_tokens)
-    return state
+      prefix_lengths=prefix_lengths, prefix_tokens=prefix_tokens,
+      prefix_embeds=prefix_embeds)
 
   def _last_step_decode(self, state, log_p):
     if self.noise_removal == 'greedy':
@@ -877,68 +829,97 @@ class HBFMSampler(Sampler):
       raise ValueError(self.noise_removal)
 
     if state.prefix_embeds is not None:
-      self._project_prefix(tokens, state.prefix_tokens, 
+      self._project_prefix(tokens, state.prefix_tokens,
                            state.prefix_lengths)
-    state.xt = tokens  # replace continuous [B,L,d] with int [B,L]
+    state.xt = tokens  # replace continuous [B,L,E] with int [B,L]
     state.done = True
     return state
-  
-  def _select_topk(self, log_p, E, k):
-    log_p_k, top_idxs = torch.topk(log_p, k, dim=-1)
-    return torch.log_softmax(log_p_k, dim=-1), F.embedding(top_idxs, E)
 
-  def _compute_velocity(self, x, E, log_p):
-    return sfm_compute_velocity(
-      x, E, log_p, mode=self.velocity, eps=self.eps)
+  @staticmethod
+  def euler_maruyama_step(z, endpoints, probs, dt, prod_factor_dim,
+                          prod_factor_gaussian_curvature):
+    """One Euler-Maruyama step of the bridge SDE on every factor.
 
-  def _get_step_size(self, model, state):
-    _, alpha_t = model.noise(state.t_schedule[state.step_idx])
-    _, alpha_s = model.noise(state.t_schedule[state.step_idx + 1])
-    return sfm_step_size(
-      alpha_t, alpha_s, self.invert_time_convention, self.eps)
+    Args:
+      z: [..., E] Poincaré-Cartesian state (float64).
+      endpoints: unit boundary directions of the candidate words, per factor
+        concatenated: [V, E] (posterior over the whole vocabulary), [..., k, E]
+        (a per-position candidate set) or [..., E] (one endpoint per position).
+      probs: posterior weights matching `endpoints`, [..., V] or [..., k], or
+        None for one endpoint per position.
+      dt: scalar heat-time step.
+    """
+    tiny = torch.finfo(z.dtype).tiny
+    one_minus_eps = 1.0 - torch.finfo(z.dtype).eps
+    out = []
+    for z_m, e_m, K in zip(z.split(prod_factor_dim, dim=-1),
+                           endpoints.split(prod_factor_dim, dim=-1),
+                           prod_factor_gaussian_curvature):
+      d = z_m.shape[-1]
+      R = GeoUtils._curvature_scale(K)
+      kappa = 1.0 / R
+      w = z_m / R  # unit ball
+      # The difference form |e_v - w|^2 keeps full relative precision as the
+      # state closes in on a word (unigram2 numerics.md §2).
+      if probs is None:
+        diff = e_m - w
+        expectation = diff / diff.square().sum(-1, keepdim=True).clamp_min(tiny)
+      else:
+        diff = e_m - w.unsqueeze(-2)                       # [..., V|k, d]
+        sq = diff.square().sum(-1, keepdim=True).clamp_min(tiny)
+        expectation = (probs.unsqueeze(-1) * diff / sq).sum(-2)
+      g2 = 1.0 - w.square().sum(-1, keepdim=True)
+      drift = kappa ** 2 * (
+        (d - 1) / 2 * g2.square() * expectation - d / 4 * g2 * w)
+      noise = kappa * g2 / 2 * torch.randn_like(w) * dt.sqrt()
+      w = w + drift * dt + noise
+      # Stay strictly inside the ball, at the forward map's own cap.
+      norm = w.norm(dim=-1, keepdim=True)
+      w = w * (one_minus_eps / norm).clamp(max=1.0)
+      out.append(R * w)
+    return torch.cat(out, dim=-1)
 
   def step(self, model, state):
     num_steps = len(state.t_schedule) - 1
     is_last_step = (state.step_idx == num_steps - 1)
+    B = state.xt.shape[0]
 
-    _, alpha_t = model.noise(state.t_schedule[state.step_idx])
-    sigma_t = model._sigma_from_alphat(alpha_t).reshape(-1, 1)
+    # The schedule's alpha_t at this heat time (time_conversion inverted), for
+    # a time-conditioned backbone; zeroed by _process_sigma otherwise.
+    t = state.t_schedule[state.step_idx]
+    u = torch.exp(-model.config.algo.time_exp_rate * t)
+    alpha_t = u if model.invert_time_convention else 1.0 - u
+    sigma_t = model._sigma_from_alphat(alpha_t.clamp_min(1e-12)).expand(B, 1)
 
-    context = SFMContext(temperature=self.temperature, z_sc=state.z_sc)
-    log_p = model.forward(xt=state.xt, sigma=sigma_t,
-                          context=context)
-    if self.use_float64:
-      log_p = log_p.to(torch.float64)
+    context = SFMContext(temperature=self.temperature, z_sc=None)
+    log_p = model.forward(xt=state.xt, sigma=sigma_t, context=context)
+    log_p = log_p.to(torch.float64)
     state.nfe += 1
 
     if self.p_nucleus != 1.0 or self.top_k != -1:
-      log_p = utils.top_k_top_p_filtering(log_p, 
+      log_p = utils.top_k_top_p_filtering(log_p,
         top_k=self.top_k, top_p=self.p_nucleus).log_softmax(-1)
 
     if is_last_step:
       return self._last_step_decode(state, log_p)
-    state.z_sc = flow_self_cond_carry(model, log_p, state.xt.dtype)
-    # Arguments to compute the velocity field:
-    #  v = sum_k p_k * log_{x}(e_k).
-    log_p_window = log_p[:, state.start_idx:]  # [B, L, V]
-    E = utils.sphere_normalize(
-      model.backbone.sphere_embed.weight.detach())  # [V, d]
-    x = state.xt[:, state.start_idx:].to(E)  # [B, L, d]
 
-    if self.slerp_float64:
-      E = E.to(torch.float64)
-      x = x.to(torch.float64)
-
-    if self.top_k_velocity > 0:
-      log_p_v, E = self._select_topk(log_p_window, E, self.top_k_velocity)
+    log_p_window = log_p[:, state.start_idx:]  # [B, Lw, V]
+    if self.velocity == 'sample':
+      v = sample_categorical(log_p_window.exp())          # [B, Lw]
+      endpoints, probs = state.boundary[v], None          # [B, Lw, E]
+    elif self.velocity == 'exact':
+      if self.top_k_velocity > 0:
+        log_p_k, idx = torch.topk(log_p_window, self.top_k_velocity, dim=-1)
+        endpoints, probs = state.boundary[idx], log_p_k.softmax(-1)  # [B, Lw, k, E], [B, Lw, k]
+      else:
+        endpoints, probs = state.boundary, log_p_window.exp()        # [V, E], [B, Lw, V]
     else:
-      log_p_v = log_p_window
+      raise ValueError(self.velocity)
 
-    vel = self._compute_velocity(x, E, log_p_v)
-
-    dt = self._get_step_size(model, state)
-    x_new = utils.exp_map(x, dt * vel, self.eps)
-    state.xt[:, state.start_idx:] = x_new.to(state.xt.dtype)
+    dt = state.t_schedule[state.step_idx + 1] - state.t_schedule[state.step_idx]
+    state.xt[:, state.start_idx:] = self.euler_maruyama_step(
+      state.xt[:, state.start_idx:], endpoints, probs, dt,
+      model.prod_factor_dim, model.prod_factor_gaussian_curvature)
     self._project_prefix(
       state.xt, state.prefix_embeds, state.prefix_lengths)
     state.step_idx += 1
@@ -1937,6 +1918,12 @@ def get_sampler(config):
       invert_time_convention=config.algo.invert_time_convention,
       prior_cov=config.algo.prior_cov, rho_max=config.algo.rho_max,
       gaussian_curvature=config.algo.gaussian_curvature)
+
+  if s.predictor == 'hbfm':
+    return HBFMSampler(noise_removal=s.noise_removal,
+      velocity=s.velocity, use_float64=s.use_float64,
+      temperature=s.temperature, p_nucleus=s.p_nucleus, top_k=s.top_k,
+      top_k_velocity=s.top_k_velocity, t_max=s.t_max)
 
   if s.predictor == 'flm_euler':
     return FLMEulerSampler(
