@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from dataclass_patch import dataclass
 import candi_utils
 import utils
-from geo_bridge import (
+from numeric.geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, Coordinate, Geometry)
 from noise_schedules import GT_Method, get_gscheduler
 

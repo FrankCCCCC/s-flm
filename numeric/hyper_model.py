@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from geo_bridge import GeoUtils
+from numeric.horosphere import HorosphereGeometry
 
 class HyperbolicModelBase(ABC):
     """Shared readout for models whose state lives on a product of Poincare balls.
@@ -286,105 +287,6 @@ class HyperbolicModelBase(ABC):
         )
         return model_radius * torch.tanh(radius / (2.0 * model_radius))
 
-    def horosphere_geometry(
-        self,
-        theta: torch.Tensor,
-        radius: torch.Tensor,
-        prod_factor_dim: Optional[Union[int, List[int]]] = None,
-        prod_factor_gaussian_curvature: Optional[Union[float, List[float]]] = None,
-    ):
-        """
-        Horocycle distance (Poisson kernel) for each word embedding.
-
-        `horosphere_dists[..., v] = sum_i -(d_i - 1) B^i_v(z_i)` -- `B^i_v` the
-        Busemann function of word `v`'s boundary point in factor `i`. It is the
-        log density of the bridge direction at word `v`, up to a `v`-independent
-        constant, so `softmax(horosphere_dists + log p)` is exactly the Bayes
-        posterior `q(y | z_t)`; the factors are independent Brownian motions, so
-        their Busemann terms simply add. This is the product-manifold form of
-        `HyperBridge.horosphere_geometry`, and every consumer of the naive logits
-        must treat them as a RESIDUAL on top of this term.
-
-        The half-angle form is the load-bearing one (Invariant 5):
-        `cosh s - sinh s <u, phi_v> = e^{+s} sin^2(a_v/2) + e^{-s} cos^2(a_v/2)`,
-        with `s = rho_i / R_i` the DIMENSIONLESS radial -- curvature enters only
-        here, exactly as in `HyperbolicHeatKernel._angular_boost`. Pulling
-        `e^{+s}` out of the log makes it overflow-free, the squared-difference
-        forms are cancellation-free, and `clamp_min` keeps the log finite once
-        both terms underflow (`s > ~372`, where `sin_half_sq` is exactly 0 for
-        the target word). Computed in float64 per Invariant 3.
-
-        Args:
-            theta (`torch.Tensor` of shape `(batch_size, max_seq_len, input_theta_dim)`):
-                Per-factor unit boundary directions, concatenated.
-            radius (`torch.Tensor` of shape `(batch_size, max_seq_len, input_radius_dim)`):
-                Intrinsic radial coordinate of each product factor.
-            prod_factor_dim (`Union[int, List[int]]`, *optional*):
-                Dimension of each factor; they must all be EQUAL here. Both
-                lists `None` means the single factor `[embedding_size]` at
-                `[-1.0]`.
-            prod_factor_gaussian_curvature (`Union[float, List[float]]`, *optional*):
-                Curvature `K_i < 0` of each factor, free to differ per factor.
-
-        Returns:
-            `torch.Tensor` of shape `(batch_size, max_seq_len, vocab_size)`:
-                Horosphere (Busemann) log-densities, float64.
-        """
-        embedding = self.word_embedding
-        if embedding is None:
-            raise ValueError(
-                f"{type(self).__name__}.word_embedding is None; the horosphere "
-                "readout needs the per-word boundary directions. Every model on "
-                "this path owns a table -- MLPLMRefactor's lm_head.weight, "
-                "OptimalModelRefactor's frozen uniform_sphere_points buffer."
-            )
-        embedding = embedding.to(torch.float64)
-        dims, curvatures = HyperbolicModelBase.prod_factors(
-            prod_factor_dim=prod_factor_dim,
-            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
-            embedding_size=embedding.shape[-1],
-        )
-        if theta.shape[-1] != embedding.shape[-1]:
-            raise ValueError(
-                f"theta must carry one direction per factor, {embedding.shape[-1]} "
-                f"channels in total; got {theta.shape[-1]}."
-            )
-        if radius.shape[-1] != len(dims):
-            raise ValueError(
-                f"radius must carry one radial coordinate per product factor "
-                f"({len(dims)}); got {radius.shape[-1]}."
-            )
-        if len(set(dims)) != 1:
-            raise ValueError(
-                f"horosphere_geometry needs one shared factor dimension; got {dims}."
-            )
-        theta = theta.to(torch.float64)
-        radius = radius.to(torch.float64)
-        tiny = torch.finfo(torch.float64).tiny
-
-        # No python loop over factors: one shared factor dimension splits the
-        # concatenated boundary axis by a reshape, and the whole formula is
-        # elementwise in the resulting factor axis, which the final sum
-        # contracts away. Curvature stays per-factor, as the `kappas` vector.
-        factor_dim, num_factors = dims[0], len(dims)
-        # us: (..., 1, m, d) against phis: (V, m, d) -> (..., V, m, d)
-        us = theta.unflatten(-1, (num_factors, factor_dim)).unsqueeze(-3)
-        phis = embedding.unflatten(-1, (num_factors, factor_dim))
-        phis = phis / phis.norm(dim=-1, p=2, keepdim=True).clamp_min(tiny)
-        #   sin^2(a_v/2) = (1 - <u, phi_v>) / 2 = ||u - phi_v||^2 / 4
-        #   cos^2(a_v/2) = (1 + <u, phi_v>) / 2 = ||u + phi_v||^2 / 4
-        sin_half_sq = (us - phis).square().sum(-1) / 4
-        cos_half_sq = (us + phis).square().sum(-1) / 4
-        kappas = radius.new_tensor(
-            [1.0 / GeoUtils._curvature_scale(k) for k in curvatures]
-        )
-        ss = (radius * kappas).unsqueeze(-2)
-        return -(factor_dim - 1) * (
-            ss + (
-                sin_half_sq + cos_half_sq * (-2.0 * ss).exp()
-            ).clamp_min(tiny).log()
-        ).sum(-1)
-
     def forward_horosphere(
         self,
         z: torch.Tensor,
@@ -453,11 +355,13 @@ class HyperbolicModelBase(ABC):
                 prod_factor_dim=prod_factor_dim,
                 prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
             )
-        horo_dist = self.horosphere_geometry(
+        horo_dist = HorosphereGeometry.compute_horosphere(
+            word_embedding=self.word_embedding,
             theta=theta,
             radius=radius,
             prod_factor_dim=prod_factor_dim,
             prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            readout_dtype=self.readout_dtype,
         )
         pred_logit = pred_logit.to(horo_dist.dtype) + horo_dist
 

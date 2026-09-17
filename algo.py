@@ -10,10 +10,11 @@ import utils
 import flm_utils
 import candi_utils
 import models.flm_dit
-from hyper_model import HyperbolicModelBase
-from geo_bridge import (
+from numeric.hyper_model import HyperbolicModelBase
+from numeric.geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, BinaryHyperbolicHeatKernel,
   Coordinate, Geometry)
+from numeric.horosphere import HorosphereGeometry
 from loss import HyperBridge
 
 
@@ -928,11 +929,14 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     elif self.config.algo.forward_type == "horosphere":
       rhos, thetas = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
         xt, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
-      horo = self.horosphere_geometry(
+      horo = HorosphereGeometry.compute_horosphere(
         theta=thetas,
         radius=rhos,
+        word_embedding=self.word_embedding,
         prod_factor_dim=self.prod_factor_dim,
         prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
+        readout_dtype=self.readout_dtype,
+        forward_chunked=self.config.algo.horosphere_forward_chunked
       )
       # `forward` has already divided the residual by the temperature; scale
       # the geometry too, so it tempers the whole log-posterior.
