@@ -29,7 +29,9 @@ prod_factor_gaussian_curvature: -0.5
 # adaptive_buffer_size): with adaptive_ema=0 the refit alternates between two
 # schedules every refit. t is clamped per factor at
 # _radial_t_max(d) * R^2, past which the state already identifies the word.
+time_conversion_mode: exp  # exp | trunc_exp (exp truncated to [0, time_range_upper_bound]) | unif (uniform on [0, time_range_upper_bound])
 time_exp_rate: 3.0
+time_range_upper_bound: 1.0
 forward_type: naive      # horosphere: the backbone's logits are a residual on the Busemann log-densities / naive: plain logits
 horosphere_forward_chunked: True  # chunk the horosphere readout to reduce memory; only needed for large batch sizes / long sequences
 # Precision of the (B, L, V) horosphere readout / loss (the bridge state stays
