@@ -32,13 +32,8 @@ FACTOR_DIM="${FACTOR_DIM:-3}"             # H^FACTOR_DIM factors, EMBED_DIM/FACT
 GAUSS_CURV="${GAUSS_CURV:--1.0}"          # Gaussian curvature K < 0 of every factor
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-5}"     # exp rate in unit-model time (see below)
 READOUT_PRECISION="${READOUT_PRECISION:-float64}"  # float64 / float32 (see configs/algo/hbfm.yaml)
-FORWARD_TYPE="${FORWARD_TYPE:-naive}"     # naive: plain logits / horosphere: residual on the Busemann log-densities
-TIME_CONVERSION_MODE="${TIME_CONVERSION_MODE:-exp}"        # exp | trunc_exp | unif (algo.time_conversion_mode)
-TIME_RANGE_UPPER_BOUND="${TIME_RANGE_UPPER_BOUND:-1.0}"    # physical heat-time range of trunc_exp / unif (unused by exp)
-KEEP_EVERY="${KEEP_EVERY:-5000}"          # persistent keep-{step}.ckpt every N steps (0 = off); must differ from CKPT_EVERY
-UNIT_T_MAX="${UNIT_T_MAX:-2}"             # sampler horizon in unit time (as scripts/sample/tinystories/hbfm.sh)
-PROPOSAL_RATE="${PROPOSAL_RATE:-$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")}"  # physical algo.time_exp_rate
-T_MAX="${T_MAX:-$(python -c "print(${UNIT_T_MAX} / abs(${GAUSS_CURV}))")}"   # physical sampler.t_max; trunc_exp / unif require T_MAX <= TIME_RANGE_UPPER_BOUND (validated at init)
+ALPHA_MAX="${ALPHA_MAX:-null}"            # noise.alpha_max: null = untruncated; a value < 1 drops the LATE heat times (u = 1 - alpha >= 1 - alpha_max)
+PROPOSAL_RATE=$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")
 
 cd "${REPO_ROOT}"
 python -u -m main \
@@ -53,13 +48,14 @@ python -u -m main \
     algo.prod_factor_dim=${FACTOR_DIM} \
     algo.prod_factor_gaussian_curvature=${GAUSS_CURV} \
     algo.time_exp_rate=${PROPOSAL_RATE} \
-    algo.time_conversion_mode=${TIME_CONVERSION_MODE} \
-    algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND} \
-    algo.forward_type=${FORWARD_TYPE} \
     algo.readout_precision=${READOUT_PRECISION} \
     sampler=hbfm \
-    sampler.t_max=${T_MAX} \
-    noise=log-linear \
+    noise=log-linear-adaptive \
+    noise.alpha_max=${ALPHA_MAX} \
+    noise.adaptive_refit_every=50 \
+    noise.adaptive_buffer_size=25600 \
+    noise.adaptive_ema=0.9 \
+    noise.adaptive_uniform_mix=1e-3 \
     optim.lr=${LR} \
     loader.global_batch_size=${GLOBAL_BATCH} \
     loader.batch_size=${PER_GPU_BS} \

@@ -480,3 +480,283 @@ run sees:
   `logs/hyp/` (rate-1/3 and F1/F2 5k probe job scripts and logs), `logs/naive/` (readout probes
   and `score.out`). Copied from the session scratchpad; the 5k probe checkpoints themselves were
   not kept.
+
+---
+
+# Round 3 — heat-time proposal: range × shape (`mode-*` cells)
+
+Design and hypotheses: `EXPERIMENT.md`, section "Round 3". Sweep `sweep_mode.py`, table
+`report_mode.py`. All cells: hard Sudoku, 20k steps, optimizer batch 256 (`PER_GPU_BS=128` × 2
+accumulation — the 11 GB 2080 Ti OOMs at 256 in one micro-batch), log-linear, EMA 0.9999,
+grad-clip 1.0, 2000-board eval with 180 steps / exact velocity / greedy last step.
+Reference (round 2, not re-run): `exp`, rate 3, K −0.5, horosphere, `t_max` 6, LR 3e-4 →
+**61.1 ± 1.8 %** (60.4 / 59.8 / 63.2).
+
+**Status 2026-09-18 00:00 EDT.** Stage 1 submitted: 13 seed-1 cells (jobs 399207-399219) + the
+eval-only horizon control (399744) on the 8x 2080 Ti of `desa-compute-01`; 6 training, 8 queued,
+no failures. Pre-flight on a 2080 Ti (jobs 398387 / 399202): `unif`, `trunc_exp`, `trunc_exp` at the
+spec's rate 0.01 and `forward_type=naive` all train; `sampler.t_max > time_range_upper_bound` is
+correctly rejected; a bounded-mode `sudoku_eval` runs end to end (718 s for 2000 boards). Measured
+1.53 s / optimizer step (naive) and 1.55 s (horosphere) at `PER_GPU_BS=128` x 2 accumulation --
+batch 256 in one micro-batch OOMs at 11 GB -- so a cell is ~8.6 h + ~12 min of eval.
+
+## ROUND 3 CONCLUSION — stage 2 complete, 2026-09-18 20:30 EDT
+
+Stage 2 ran seeds 2 and 3 of the four cells at/above the stage-1 baseline plus the near-identical
+`trunc_exp(0.01, ub 2.3)` / `unif(2.3)` pair. 12/12 finished.
+
+| cell | seed 1 | seed 2 | seed 3 | mean ± std | vs baseline |
+|---|---:|---:|---:|---:|---:|
+| `trunc_exp` r3 ub 6 (≡ `exp` r3; **the baseline**) | 65.0 | 66.9 | 59.4 | **63.8 ± 3.9** | — |
+| `exp` r6, K −1 | 65.0 | 64.0 | 59.1 | 62.7 ± 3.2 | −1.1 (0.4σ) |
+| `exp` r3, LR 5e-4 | 67.1 | 57.9 | 61.5 | 62.2 ± 4.6 | −1.6 (0.5σ) |
+| `exp` r1.5, K −0.25 | 68.2 | 49.5 | 57.0 | 58.2 ± 9.4 | −5.5 (0.9σ) |
+| `trunc_exp` r0.01 ub 2.3 | 33.7 | 35.2 | 37.0 | 35.3 ± 1.7 | −28.5 (**11.6σ**) |
+| `unif` ub 2.3 | 39.7 | 28.4 | 38.8 | 35.6 ± 6.3 | −28.1 (**6.6σ**) |
+
+### 1. The stage-1 ranking was a seed artefact — and stage 2 was right to doubt it
+
+`exp` r1.5 @ K −0.25 led stage 1 at **68.2 %** and finishes **last of the four at 58.2 ± 9.4** (seeds 2
+and 3 give 49.5 and 57.0). Its seed-1 number was a lucky draw. **No cell beats the baseline**; the three
+runners-up sit 0.4–0.9σ below it, i.e. statistically indistinguishable, with the point estimate favouring
+the baseline. Pooled per-seed σ = 5.4, so a 3-seed mean carries SEM ≈ 3.1 and only gaps ≳ 6 points
+between 3-seed means are real.
+
+### 2. The noise-floor control worked exactly as designed
+
+`trunc_exp(0.01, ub 2.3)` and `unif(2.3)` are near-identical by construction. At seed 1 they differed by
+6.0 points, which is what forced the conservative reading of stage 1. Over 3 seeds they land at
+**35.3 ± 1.7 vs 35.6 ± 6.3 — a difference of 0.3 points, 0.09σ.** The configurations are the same and the
+measurement now says so. That validates the whole comparison procedure and confirms the 6-point seed-1
+gap was noise, not a systematic effect. Building this pair into stage 2 is what makes every other number
+here interpretable.
+
+### 3. Final answers to `setup.md`
+
+| axis | verdict |
+|---|---|
+| `time_conversion_mode` | **`exp` wins.** `trunc_exp` equals it only when truncation is inactive (`rate·ub ≳ 7`, where it is numerically the same proposal); every genuinely truncated setting is worse. `unif` loses by ~28 points at 6.6–11.6σ. |
+| `time_range_upper_bound` | **No value helps.** It also caps the sampler (`t_max ≤ ub`), so a small `ub` is penalised twice. |
+| `time_exp_rate` | Unit rate ≈ 6 remains best; 8 and 13.8 are no better, and flattening below it degrades monotonically. |
+| curvature | **No effect** at fixed unit rate: K −0.25 / −0.5 / −1 all within 1σ. The (rate, K) equivalence holds at 20k steps, so curvature needs no separate tuning. |
+| `forward_type` | **`horosphere` beats `naive` by ~9 points** (55.9 vs 65.0 at seed 1). |
+| LR | 3e-4 and 5e-4 indistinguishable (0.5σ); 1e-3 worse. |
+| **best configuration** | **the incumbent**: `exp`, physical rate 3 (unit 6), K −0.5, log-linear, `forward_type=horosphere`, LR 3e-4 → **63.8 ± 3.9 %** on this harness. |
+
+### 4. What the round actually contributes
+
+The negative result is sharp and mechanistic rather than merely "nothing worked":
+
+- **The heat-time proposal is a training-mass allocator, not a variance-reduction device.** The
+  confound-free ladder (same `ub` 6, same `t_max` 6, only the shape varying) falls monotonically
+  65.0 → 55.0 → 52.4 → 34.3 as mean trained `t` rises 0.33 → 0.95 → 1.6 → 3.0. This is why the
+  ESS/coverage-optimal proposal predicted the wrong winner: coverage is not the objective, concentration
+  in the decision zone `t ≲ 1` is.
+- **`unif` fails by a cliff, not a slope** (between `ub` 1 and 1.67), and the `eflm_rescale_auto_sudoku`
+  transfer — tune the horizon to the decode time `tau*` — **loses to mass-matching by 21 points**. That
+  study's autonomous clock is structurally `unif`, so the analogy is exact and the failure is informative.
+- **Two measurement facts** that any follow-up must carry: a **+4.6 pt harness offset** between Turing/
+  emulated-bf16 (batch 128×2) and Ampere/native-bf16 (batch 256×1), so round-2 and round-3 numbers are not
+  comparable; and a **per-seed σ of 5.4**, which makes single-seed screening unreliable at this task's
+  effect sizes — the stage-1 leader is the proof.
+
+### Actionable
+
+`configs/algo/hbfm.yaml` sets `forward_type: naive` (flipped in 03bb642). For sudoku that costs ~9
+points; `horosphere` should be the default here, or the choice made per dataset.
+
+## STAGE 1 COMPLETE — 18/18 cells (2026-09-18 11:55 EDT)
+
+All seed 1, 20k steps, batch 256, log-linear, 2000-board eval, 180 steps. Δ = observed − (anchor
+re-sampled at that cell's own `t_max` + the 4.6 pt harness offset), so the sampler horizon is
+corrected for and round-2 numbers are never used as a baseline.
+
+| # | cell | acc | Δ |
+|---|---|---:|---:|
+| 1 | `exp` r1.5, **K −0.25**, tm 12 | **68.2** | +1.8 |
+| 2 | `exp` r3, **LR 5e-4** | 67.1 | +2.1 |
+| 3 | `exp` r6, **K −1**, tm 3 | 65.0 | **−0.1** |
+| 4 | `trunc_exp` r3 ub 6 (≡ `exp`; the baseline) | 65.0 | 0 |
+| 5 | `exp` r6.9 | 62.6 | −2.4 |
+| 6 | `trunc_exp` r3 ub 1 | 62.2 | −2.5 |
+| 7 | `trunc_exp` r3 ub 2.3 | 59.2 | −6.5 |
+| 8 | `exp` r3, **LR 1e-3** | 58.6 | −6.4 |
+| 9 | `unif` ub 0.44 | 57.9 | −4.4 |
+| 10 | `unif` ub 1 | 57.6 | −7.1 |
+| 11 | `exp` r4 | 57.6 | −7.4 |
+| 12 | `exp` r3, **naive** | 55.9 | −9.1 |
+| 13 | `trunc_exp` r1 ub 6 | 55.0 | −10.0 |
+| 14 | `trunc_exp` r0.5 ub 6 | 52.4 | −12.6 |
+| 15 | `unif` ub 2.3 | 39.7 | −26.0 |
+| 16 | `unif` ub 1.67 | 37.0 | −28.5 |
+| 17 | `unif` ub 6 | 34.3 | −30.7 |
+| 18 | `trunc_exp` r0.01 ub 2.3 | 33.7 | −32.0 |
+
+### The headline: a confound-free shape ladder
+
+Rows 4, 13, 14 and 17 share **the same range (`ub` 6) and the same sampler horizon (`t_max` 6)** and
+differ only in how the proposal distributes training mass over that identical range. Nothing else moves:
+
+| proposal | mean trained `t` | acc |
+|---|---:|---:|
+| `trunc_exp` rate 3 (≡ `exp`) | 0.33 | **65.0** |
+| `trunc_exp` rate 1 | 0.95 | 55.0 |
+| `trunc_exp` rate 0.5 | 1.60 | 52.4 |
+| `unif` (rate → 0) | 3.00 | 34.3 |
+
+Perfectly monotone, spanning **30.7 points**. With coverage and horizon held identical, the only thing
+that varies is concentration near the origin — so **the heat-time proposal acts as a training-mass
+allocator, not as a variance-reduction device**, and the decision zone `t ≲ 1` is where the mass has to
+be. This is the round's central result, and it is measured where no confound exists.
+
+### What is and is not established (noise floor ≈ 6 pt, measured not assumed)
+
+**Established** (effect > the ~6 pt run-to-run floor):
+- The shape ladder above: −10.0 / −12.6 / −30.7 for successive flattening.
+- **`unif` collapses**, −26 to −31, with a *cliff* between `ub` 1 and `ub` 1.67 (57.6 → 37.0) rather
+  than a slope. Below the cliff it is merely mediocre; above it, it is broken.
+- **`forward_type=naive` is ~9 pt worse than `horosphere`** (55.9 vs 65.0). The repo's yaml default was
+  flipped to `naive` in 03bb642 — **for sudoku that default is wrong.**
+- **No new `time_conversion_mode` beats plain `exp`.** The best `trunc_exp` ties it at best (and only
+  when truncation is inactive); the best `unif` is 7 pt below.
+
+**Not established** (inside the noise floor — reported as null results, not effects):
+- **Curvature does nothing once unit rate is held fixed.** At unit rate 6: K −0.25 → +1.8,
+  K −0.5 → 0 (baseline), K −1 → **−0.1**. The K −1 delta is now measured rather than interpolated —
+  the anchor's missing `t_max` 3 row was run and gives 60.5 / 59.3 / 62.2 (60.7 ± 1.5), so the
+  comparison is like-for-like. Three curvatures spanning 4x in |K| land within 2 points of each other:
+  a clean 20k-step confirmation of the (rate, K) equivalence, and it means the curvature axis in
+  `setup.md` is fully absorbed by `time_exp_rate`.
+- LR 5e-4 (+2.1). LR 1e-3 (−6.4) and `exp` rate 4 (−7.4) are borderline.
+
+### Answers to `setup.md`
+
+| axis | answer |
+|---|---|
+| `time_conversion_mode` | `exp` wins. `trunc_exp` only matches it when truncation is inactive; `unif` is catastrophic unless `ub` is shrunk until it mimics a concentrated `exp`. |
+| `time_range_upper_bound` | No value helps. It also silently caps the sampler (`t_max ≤ ub`), so small `ub` is penalised twice. |
+| `time_exp_rate` | Unit rate ~6 remains best; 8 and 13.8 are no better. |
+| curvature | No effect at fixed unit rate — the equivalence holds. |
+| `forward_type` | `horosphere` > `naive` by ~9 pt. |
+| LR | 3e-4 and 5e-4 indistinguishable; 1e-3 is worse. |
+| best cell | `exp` rate 1.5, K −0.25, `t_max` 12 → **68.2 %**, but inside the noise floor of the baseline's 65.0 — stage 2 decides. |
+
+**Stage 2 submitted** (12 cells, seeds 2-3): the three cells at/above baseline, the baseline itself, and
+the `trunc_exp(0.01, ub 2.3)` / `unif(2.3)` near-identical pair — the last of these to *measure* the
+noise floor rather than assume it, since every claim above is quoted against it.
+
+
+**Incident (2026-09-18 07:00-08:55): `snavely-compute-01` failed and took 4 cells with it.** Its GPU
+died (`NVML: Failed to get usage(15): GPU is lost`); SLURM has since drained the node
+(`State=MIXED+DRAIN+NOT_RESPONDING, Reason=GPU_Error_Detected`). One cell (`trunc_exp(0.5, ub 6)`) hit
+the fault directly and three more (`trunc_exp(1, ub 6)`, `exp` rate 4, `exp` rate 6 @ K −1) were
+`CANCELLED by 0` (admin) at 06:59. All four had `last.ckpt` at step 15000/20000, so resubmission costs
+~25 % of a run, not a whole one; resubmitted as jobs 430546 / 439067-439069.
+**Two detection lessons, both now folded into the babysit loop:**
+(a) the directly-faulted job was recorded by SLURM as `COMPLETED 0:0` — the wrapper exits cleanly after
+the Python process dies, so **job state is useless for failure detection; only `eval/results.json`
+counts**; (b) the other three left no trace in their own logs beyond a `CANCELLED` line buried in a
+multi-megabyte single-line progress-bar stream, so the reliable check is `squeue` membership plus
+`sacct -j <id> --format=State`, not grepping the log.
+
+**Status 2026-09-18 03:40 EDT — the sampler-horizon control is COMPLETE (24/24 evals, 3 seeds), and
+it found 1.5 free points.** The round-2 anchor checkpoints (`exp` rate 3, K −0.5, horosphere, LR 3e-4,
+trained on `t <= 2.3`) re-sampled with 180 steps at nine physical horizons, no retraining:
+
+| `t_max` | 0.44 | 0.5 | 1 | 1.67 | 2.3 | 4 | **6 (round-2 choice)** | 9 | 12 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| unit | 0.22 | 0.25 | 0.5 | 0.835 | 1.15 | 2 | **3** | 4.5 | 6 |
+| acc | 58.4 ± 1.3 | 58.8 ± 1.3 | 60.3 ± 1.5 | 60.9 ± 1.8 | 60.8 ± 1.4 | 60.9 ± 1.5 | **61.1 ± 1.8** | 62.1 ± 1.9 | **62.6 ± 2.2** |
+
+1. **Shortening the horizon barely matters.** 1 through 6 are statistically one number
+   (60.3–61.1, seed std 1.4–1.8); even the extreme 13.6x cut to 0.44 costs only **2.7 pt ≈ 1.5 sigma**.
+   Horizon correction to subtract from a bounded cell's deficit: `ub` >= 1.67 → **0 pt**, `ub` 1 →
+   **~0.8 pt**, `ub` 0.44 → **~2.7 pt**. A bounded cell more than ~3 pt off the anchor is being moved by
+   its training proposal, not its sampler — which is what this control was built to establish.
+2. **Lengthening it past the trained range is a small free win.** The model never saw `t > 2.3`, yet
+   6 → 9 → 12 rises 61.1 → 62.1 → 62.6, and **every seed improves** (60.4→61.8, 59.8→60.9, 63.2→65.0;
+   paired +1.4 ± 0.35, ~4 sigma). So the round-2 headline of 61.1 % is really **62.6 %** at
+   `t_max` 12 with no retraining and no change to any spec parameter. `t_max` 18 / 24 / 36 are now
+   running (job 409261) to find where it turns over; at 36 the step size `dt = 0.2` physical starts to
+   approach the regime where Euler–Maruyama bias is documented to appear, so a fall there would be
+   discretization rather than geometry.
+3. **The curve rises past the trained range, peaks at `t_max` ≈ 48, then turns over.** All 12
+   horizons now have 3 seeds: 61.1 ± 1.8 (t 6) → 62.1 ± 1.9 (9) → 62.6 ± 2.2 (12) → 63.3 ± 2.3 (18) →
+   63.4 ± 2.1 (24) → 63.9 ± 2.0 (36) → **64.3 ± 2.3 (48)** → 63.7 ± 2.6 (72) → 62.8 ± 3.0 (108).
+   Best horizon **`t_max` 48 (unit 24) → 64.3 ± 2.3, i.e. +3.2 pt over the round-2 setting of 6**.
+   Two independent signatures of the mechanism: (a) the turnover itself — a bias that first helps
+   (commit harder to the right leader) and then hurts (commit to a wrong one); (b) **the seed spread
+   grows monotonically with the horizon**, 1.8 → 2.0 → 2.3 → 2.6 → 3.0, exactly what over-commitment
+   predicts and the opposite of what a genuine modelling improvement would look like.
+   **Read this as sharpening, not better modelling.** `steps` is pinned at the spec's 180, so `dt`
+   grows with `t_max` — 0.4 physical at `t_max` 72, ~40x the `dt <~ 0.05/|K|` guidance in
+   `configs/sampler/hbfm.yaml`, which documents that past it "the decoded law is biased toward the
+   early leader and states freeze at the float64 ball cap" (measured there as chi2 p = 0 against the
+   prior on the Bayes oracle). So the long-horizon gain is almost certainly the sampler committing
+   harder to its early leader, which *helps exact-match board accuracy* while making the decoded
+   distribution wrong. It is a legitimate answer to "maximise accuracy" and an illegitimate one to
+   "sample the model's law" — and it means **the round-2 t_max of 6 was not a mis-set knob so much as
+   the honest setting**. Any headline that uses the long horizon must carry this caveat.
+4. **`time_range_upper_bound` is therefore not only a training knob — it caps the sampler horizon**
+   (`t_max <= ub`), and the horizon is worth ~3 points. A bounded cell with a small `ub` is handicapped
+   twice over: its proposal is narrower AND it may not sample past `ub`. For "which proposal trains the
+   better model" compare at matched `t_max`; for "what is the best achievable accuracy" the unbounded
+   modes have a structural advantage that is a property of the method, not of the tuning.
+
+5. Practical consequence for the rest of round 3: the bounded cells (`ub` 6) sample at `t_max` 6, i.e.
+   1.5 pt *below* what the anchor can reach. When comparing a `ub = 6` cell to the anchor, compare at
+   equal `t_max` (6), which the table's `61.1 ± 1.8` row provides.
+
+**Status 2026-09-18 01:50 EDT.** All 21 round-3 jobs now run concurrently — 18 training cells plus the
+three eval-only sampler-horizon controls — after the sweep was widened (user-approved) to
+`--partition=desa,thickstun,gpu` with the 2080 Ti gres pin kept, which reaches ~50 idle 2080 Ti on
+`cuvl-compute-05`, `snavely-compute-01`, `goodfellow`, `badjak`, `bala-compute-01` besides
+`desa-compute-01`. Still no contention with the TinyStories sweep (it holds the A5000/A6000/6000-Ada
+nodes). Stage 1 therefore lands in one wave (~10-14 h) instead of three.
+
+<!-- report3:begin -->
+30 round-3 cells evaluated (2000 boards each).
+
+| mode | rate | K | unit rate | ub | t_max | fwd | LR | seed 1 | seed 2 | seed 3 | mean ± std |
+|---|---|---|---|---|---|---|---|---:|---:|---:|---:|
+| exp | 1.5 | -0.25 | 6 | na | 12 | horo | 3e-4 | 68.2% | 49.5% | 57.0% | **58.2 ± 9.4** (n=3) |
+| exp | 3 | -0.5 | 6 | na | 6 | horo | 5e-4 | 67.1% | 57.9% | 61.5% | **62.2 ± 4.6** (n=3) |
+| exp | 3 | -0.5 | 6 | na | 6 | horo | 1e-3 | 58.6% | pending | pending | 58.6 (n=1) |
+| exp | 3 | -0.5 | 6 | na | 6 | naive | 3e-4 | 55.9% | pending | pending | 55.9 (n=1) |
+| exp | 4 | -0.5 | 8 | na | 6 | horo | 3e-4 | 57.6% | pending | pending | 57.6 (n=1) |
+| exp | 6 | -1 | 6 | na | 3 | horo | 3e-4 | 65.0% | 64.0% | 59.1% | **62.7 ± 3.2** (n=3) |
+| exp | 6.9 | -0.5 | 13.8 | na | 6 | horo | 3e-4 | 62.6% | pending | pending | 62.6 (n=1) |
+| texp | 0.01 | -0.5 | 0.02 | 2.3 | 2.3 | horo | 3e-4 | 33.7% | 35.2% | 37.0% | **35.3 ± 1.7** (n=3) |
+| texp | 0.5 | -0.5 | 1 | 6 | 6 | horo | 3e-4 | 52.4% | pending | pending | 52.4 (n=1) |
+| texp | 1 | -0.5 | 2 | 6 | 6 | horo | 3e-4 | 55.0% | pending | pending | 55.0 (n=1) |
+| texp | 3 | -0.5 | 6 | 1 | 1 | horo | 3e-4 | 62.2% | pending | pending | 62.2 (n=1) |
+| texp | 3 | -0.5 | 6 | 2.3 | 2.3 | horo | 3e-4 | 59.2% | pending | pending | 59.2 (n=1) |
+| texp | 3 | -0.5 | 6 | 6 | 6 | horo | 3e-4 | 65.0% | 66.9% | 59.4% | **63.8 ± 3.9** (n=3) |
+| unif | 3 | -0.5 | 6 | 0.44 | 0.44 | horo | 3e-4 | 57.9% | pending | pending | 57.9 (n=1) |
+| unif | 3 | -0.5 | 6 | 1 | 1 | horo | 3e-4 | 57.6% | pending | pending | 57.6 (n=1) |
+| unif | 3 | -0.5 | 6 | 1.67 | 1.67 | horo | 3e-4 | 37.0% | pending | pending | 37.0 (n=1) |
+| unif | 3 | -0.5 | 6 | 2.3 | 2.3 | horo | 3e-4 | 39.7% | 28.4% | 38.8% | **35.6 ± 6.3** (n=3) |
+| unif | 3 | -0.5 | 6 | 6 | 6 | horo | 3e-4 | 34.3% | pending | pending | 34.3 (n=1) |
+
+### Sampler-horizon control (eval only, round-2 anchor checkpoints)
+
+| physical t_max | unit t_max | seed 1 | seed 2 | seed 3 | mean ± std |
+|---|---|---:|---:|---:|---:|
+| 0.44 | 0.22 | 57.6% | 57.8% | 60.0% | **58.4 ± 1.3** |
+| 0.5 | 0.25 | 58.1% | 57.9% | 60.4% | **58.8 ± 1.3** |
+| 1 | 0.5 | 60.1% | 58.9% | 61.9% | **60.3 ± 1.5** |
+| 1.67 | 0.835 | 60.9% | 59.2% | 62.8% | **60.9 ± 1.8** |
+| 2.3 | 1.15 | 61.1% | 59.4% | 62.1% | **60.8 ± 1.4** |
+| 3 | 1.5 | 60.5% | 59.3% | 62.2% | **60.6 ± 1.4** |
+| 4 | 2 | 60.8% | 59.4% | 62.4% | **60.9 ± 1.5** |
+| 6 (trained horizon) | 3 | 60.4% | 59.8% | 63.2% | **61.1 ± 1.8** |
+| 9 | 4.5 | 61.2% | 60.9% | 64.2% | **62.1 ± 1.9** |
+| 12 | 6 | 61.8% | 60.9% | 65.0% | **62.6 ± 2.2** |
+| 18 | 9 | 62.6% | 61.5% | 65.8% | **63.3 ± 2.3** |
+| 24 | 12 | 62.5% | 61.8% | 65.8% | **63.4 ± 2.1** |
+| 36 | 18 | 63.3% | 62.1% | 66.1% | **63.9 ± 2.0** |
+| 48 | 24 | 63.9% | 62.2% | 66.8% | **64.3 ± 2.3** |
+| 72 | 36 | 64.3% | 60.9% | 66.0% | **63.7 ± 2.6** |
+| 108 | 54 | 63.3% | 59.6% | 65.5% | **62.8 ± 3.0** |
+
+<!-- report3:end -->

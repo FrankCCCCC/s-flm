@@ -19,7 +19,7 @@ import pytest
 import torch
 
 import samplers
-from geo_bridge import GeoUtils
+from numeric.geo_bridge import GeoUtils
 from conftest import REPO_ROOT  # noqa: F401
 
 torch.manual_seed(0)

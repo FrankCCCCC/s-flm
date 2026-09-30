@@ -15,8 +15,8 @@ invert_time_convention: false # alpha_t=1 is clean (MDLM-like; required by the a
 # lists spell the factors out; null = one factor of the full embed_dim. The
 # radial sampler's float64 ceiling _radial_t_max(d) shrinks like 700/(d-1),
 # so keep the factors small (2 <= d <= ~16).
-prod_factor_dim: 2
-prod_factor_gaussian_curvature: -1.0
+prod_factor_dim: 3
+prod_factor_gaussian_curvature: -0.5
 
 # Heat time t = -log(u) / time_exp_rate, u = 1 - alpha_t the noise schedule's
 # noise fraction, weighted by |alpha'_t| / (time_exp_rate * u)
@@ -29,10 +29,13 @@ prod_factor_gaussian_curvature: -1.0
 # adaptive_buffer_size): with adaptive_ema=0 the refit alternates between two
 # schedules every refit. t is clamped per factor at
 # _radial_t_max(d) * R^2, past which the state already identifies the word.
-time_exp_rate: 0.01
-forward_type: horosphere      # horosphere: the backbone's logits are a residual on the Busemann log-densities / naive: plain logits
+time_conversion_mode: exp  # exp | trunc_exp (exp truncated to [0, time_range_upper_bound]) | unif (uniform on [0, time_range_upper_bound])
+time_exp_rate: 3.0
+time_range_upper_bound: 1.0
+forward_type: naive      # horosphere: the backbone's logits are a residual on the Busemann log-densities / naive: plain logits
+horosphere_forward_chunked: True  # chunk the horosphere readout to reduce memory; only needed for large batch sizes / long sequences
 # Precision of the (B, L, V) horosphere readout / loss (the bridge state stays
 # float64). float64 is the numerics.md default; float32 is adequate -- and ~50x
 # faster on 1/64-rate-fp64 GPUs -- only while the states stay below u ~ 8, e.g.
 # many-factor manifolds whose summed evidence resolves the word at u < 1.
-readout_precision: float64
+readout_precision: float32

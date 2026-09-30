@@ -1,6 +1,8 @@
 #!/bin/bash
-# HBFM — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL (sample_eval).
-# MODEL / SEQ_LEN / EMBED_DIM / FACTOR_DIM / GAUSS_CURV / rate / NOISE MUST match training.
+# HBFM + adaptive noise — eval ONE TinyStories checkpoint: valid PPL (ppl_eval) + GenPPL
+# (sample_eval). MODEL / SEQ_LEN / EMBED_DIM / FACTOR_DIM / GAUSS_CURV / rate / ALPHA_MAX MUST
+# match training (scripts/train/tinystories/hbfm_adaptive.sh); noise=log-linear-adaptive with the
+# same knobs so the learned schedule is reconstructed from the checkpoint's alpha_vals buffer.
 # The sampler horizon is given in UNIT time (UNIT_T_MAX = |K| t_max), like the
 # training proposal (see scripts/train/tinystories/hbfm.sh).
 set -euo pipefail
@@ -25,14 +27,12 @@ FACTOR_DIM="${FACTOR_DIM:-3}"
 GAUSS_CURV="${GAUSS_CURV:--1.0}"
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-5}"
 READOUT_PRECISION="${READOUT_PRECISION:-float64}"
-FORWARD_TYPE="${FORWARD_TYPE:-naive}"     # must match training
-TIME_CONVERSION_MODE="${TIME_CONVERSION_MODE:-exp}"        # must match training
-TIME_RANGE_UPPER_BOUND="${TIME_RANGE_UPPER_BOUND:-1.0}"    # must match training; unif / trunc_exp require T_MAX <= this
+ALPHA_MAX="${ALPHA_MAX:-null}"            # must match training
 GLOBAL_BATCH="${GLOBAL_BATCH:-512}"       # training global batch: the adaptive buffer size (50 * batch) must match the checkpoint
 UNIT_T_MAX="${UNIT_T_MAX:-2}"    # (H^3)^32 resolves tokens at u < 1; 180 steps -> dtau 0.011 over the decision phase
 LIMIT_VAL_BATCHES="${LIMIT_VAL_BATCHES:-1.0}"   # <1.0 only for smoke tests
-PROPOSAL_RATE="${PROPOSAL_RATE:-$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")}"  # physical algo.time_exp_rate
-T_MAX="${T_MAX:-$(python -c "print(${UNIT_T_MAX} / abs(${GAUSS_CURV}))")}"   # physical sampler horizon
+PROPOSAL_RATE=$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")
+T_MAX=$(python -c "print(${UNIT_T_MAX} / abs(${GAUSS_CURV}))")
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -46,11 +46,13 @@ MARGS=(
     algo.prod_factor_dim=${FACTOR_DIM}
     algo.prod_factor_gaussian_curvature=${GAUSS_CURV}
     algo.time_exp_rate=${PROPOSAL_RATE}
-    algo.time_conversion_mode=${TIME_CONVERSION_MODE}
-    algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND}
-    algo.forward_type=${FORWARD_TYPE}
     algo.readout_precision=${READOUT_PRECISION}
-    noise=log-linear
+    noise=log-linear-adaptive
+    noise.alpha_max=${ALPHA_MAX}
+    noise.adaptive_refit_every=50
+    noise.adaptive_buffer_size=25600
+    noise.adaptive_ema=0.9
+    noise.adaptive_uniform_mix=1e-3
     loader.global_batch_size=${GLOBAL_BATCH}
     sampler=hbfm
     sampler.velocity=${VELOCITY}

@@ -94,7 +94,8 @@ def _alpha_at_heat_time(model, B, heat_time):
 # ---------------------------------------------------------------------------
 
 def test_repo_imports():
-  import loss  # noqa: F401  used to fail: `from model import ...`
+  import numeric.loss  # noqa: F401  used to fail: `from model import ...`
+  import numeric.horosphere  # noqa: F401
   import algo  # noqa: F401
   import main  # noqa: F401
 
@@ -197,12 +198,75 @@ def test_time_conversion_on_refit_adaptive_schedule():
   assert not torch.allclose(s, s_base)  # the refit actually moved the proposal
 
 
+def test_time_conversion_unif_is_the_unif_proposal():
+  """mode='unif': heat time uniform on [0, range_upper_bound] under the
+  log-linear schedule, decreasing in the noise fraction like the exp map
+  (u = 1 is the origin), weighted by the interval (loss.Proposal's unif
+  proposal's 1 / q(t)); float64 tensors of alpha_t's shape."""
+  from algo import HyperbolicBoundaryFM as H
+  from noise_schedules import LogLinear
+  eps, ub = 1e-3, 2.5
+  t = torch.linspace(1e-3, 1.0, 200001, dtype=torch.float64)
+  _, alpha = LogLinear(eps)(t)
+  s, w = H.time_conversion(alpha.float(), False, mode='unif', range_upper_bound=ub)
+  assert s.dtype == torch.float64 and w.dtype == torch.float64
+  assert s.shape == alpha.shape and w.shape == alpha.shape
+  assert torch.allclose(s, alpha * ub, atol=1e-6)
+  assert (s >= 0).all() and (s <= ub).all()
+  assert (s[1:] < s[:-1]).all()          # noisier t -> smaller heat time
+  assert torch.equal(w, torch.full_like(s, ub))
+  # E_t[w f(s(t))] == int f(s) ds / (1 - eps): the exp map's quadrature identity.
+  s, w = H.time_conversion(alpha, False, mode='unif', range_upper_bound=ub)
+  lhs = torch.trapezoid(w * torch.exp(-s), t)
+  rhs = (torch.exp(-s[-1]) - torch.exp(-s[0])) / (1 - eps)
+  assert abs(lhs - rhs) < 1e-4 * rhs, (lhs, rhs)
+  # SFM convention: u = alpha_t.
+  s2, _ = H.time_conversion(alpha, True, mode='unif', range_upper_bound=ub)
+  assert torch.allclose(s2, (1.0 - alpha) * ub)
+  with pytest.raises(ValueError):
+    H.time_conversion(alpha, False, mode='bogus')
+
+
+def test_time_conversion_trunc_exp_is_the_truncated_exp_proposal():
+  """mode='trunc_exp': loss.Proposal's truncated_exp proposal on
+  [0, range_upper_bound] with uniform draw 1 - u and its 1 / q(t) weight,
+  the exp map's quadrature identity, and the exp map itself as
+  range_upper_bound -> inf."""
+  from algo import HyperbolicBoundaryFM as H
+  from noise_schedules import LogLinear
+  eps, rate, ub = 1e-3, 3.0, 1.5
+  t = torch.linspace(1e-3, 1.0, 200001, dtype=torch.float64)
+  _, alpha = LogLinear(eps)(t)
+  s, w = H.time_conversion(alpha, False, rate, mode='trunc_exp', range_upper_bound=ub)
+  normalizer = 1.0 - math.exp(-rate * ub)
+  s_ref = -torch.log1p(-alpha * normalizer) / rate      # the uniform draw is alpha_t
+  w_ref = normalizer / (rate * torch.exp(-rate * s_ref))
+  assert s.dtype == torch.float64 and w.dtype == torch.float64
+  assert torch.allclose(s, s_ref) and torch.allclose(w, w_ref)
+  assert (s >= 0).all() and (s <= ub).all()
+  assert (s[1:] < s[:-1]).all()          # noisier t -> smaller heat time
+  lhs = torch.trapezoid(w * torch.exp(-s), t)
+  rhs = (torch.exp(-s[-1]) - torch.exp(-s[0])) / (1 - eps)
+  assert abs(lhs - rhs) < 1e-4 * rhs, (lhs, rhs)
+  # SFM convention: u = alpha_t.
+  s2, _ = H.time_conversion(alpha, True, rate, mode='trunc_exp', range_upper_bound=ub)
+  assert torch.allclose(s2, -torch.log1p(-(1.0 - alpha) * normalizer) / rate)
+  # alpha_t == 1 exactly (u = 0) lands at the truncation point, finite weight.
+  s1, w1 = H.time_conversion(torch.tensor([1.0]), False, rate, mode='trunc_exp',
+                             range_upper_bound=ub)
+  assert s1.item() == pytest.approx(ub, rel=1e-6) and torch.isfinite(w1).all()
+  # range_upper_bound -> inf is the exp map.
+  s_exp, w_exp = H.time_conversion(alpha, False, rate)
+  s_inf, w_inf = H.time_conversion(alpha, False, rate, mode='trunc_exp', range_upper_bound=1e3)
+  assert torch.allclose(s_inf, s_exp) and torch.allclose(w_inf, w_exp)
+
+
 # ---------------------------------------------------------------------------
 # q_xt: polar bridge state on the product manifold
 # ---------------------------------------------------------------------------
 
 def test_q_xt_cartesian_state_contract(monkeypatch):
-  from geo_bridge import GeoUtils
+  from numeric.geo_bridge import GeoUtils
   model, cfg = _build_model(monkeypatch)
   assert model.prod_factor_dim == [3, 3, 3, 3]
   B, L = 2, 8
@@ -237,7 +301,7 @@ def test_q_xt_cartesian_state_contract(monkeypatch):
 
 
 def test_poincare_cartesian_to_hyperbolic_polar_prod_inverts_the_bridge_coordinates(monkeypatch):
-  from geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
+  from numeric.geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
   model, _ = _build_model(monkeypatch, [
     'algo.prod_factor_dim=[3,3,3,3]',
     'algo.prod_factor_gaussian_curvature=[-1.0,-4.0,-0.25,-2.0]'])
@@ -266,7 +330,7 @@ def test_q_xt_clamps_the_heat_time_at_the_radial_ceiling(monkeypatch):
   """alpha_t = 1 (u floored at 1e-12) is heat time -log(1e-12) / rate = 276
   at rate 0.1, past max_heat_time (~97 for H^3): clamped there, so the radial
   sampler never sees the overflow regime and the state stays finite."""
-  from geo_bridge import GeoUtils
+  from numeric.geo_bridge import GeoUtils
   model, _ = _build_model(monkeypatch, ['algo.time_exp_rate=0.1'])
   assert model.max_heat_time < 276
   x = _tokens(model)
@@ -307,7 +371,7 @@ def test_horosphere_readout_is_bayes_posterior(monkeypatch, precision, atol):
     'algo.prod_factor_gaussian_curvature=[-1.0,-4.0,-0.25,-2.0]',
     f'algo.readout_precision={precision}'])
   assert model.prod_factor_gaussian_curvature == [-1.0, -4.0, -0.25, -2.0]
-  from geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
+  from numeric.geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
   B, L, V = 2, 8, model.vocab_size
   x = _tokens(model, B, L)
   ts = torch.full((B,), 0.5, dtype=torch.float64, device=model.device)
@@ -332,10 +396,51 @@ def test_horosphere_readout_is_bayes_posterior(monkeypatch, precision, atol):
     log_p_T = model._process_model_output(
       torch.zeros(B, L, V, device=model.device), xt, None,
       samplers.SFMContext(temperature=2.0, z_sc=None))
-  horo = model.horosphere_geometry(theta=thetas, radius=rhos,
-                                   prod_factor_dim=model.prod_factor_dim,
-                                   prod_factor_gaussian_curvature=model.prod_factor_gaussian_curvature)
-  assert torch.allclose(log_p_T.double(), (horo / 2).log_softmax(-1), atol=atol)
+  from numeric.horosphere import HorosphereGeometry
+  horo = HorosphereGeometry.compute_horosphere(
+    theta=thetas, radius=rhos, word_embedding=model.word_embedding,
+    prod_factor_dim=model.prod_factor_dim,
+    prod_factor_gaussian_curvature=model.prod_factor_gaussian_curvature,
+    readout_dtype=model.readout_dtype)
+  assert horo.dtype == getattr(torch, precision)
+  assert torch.allclose(log_p_T.double(), (horo.double() / 2).log_softmax(-1), atol=atol)
+
+
+@pytest.mark.parametrize('precision,atol', [('float64', 1e-10), ('float32', 1e-4)])
+def test_chunked_horosphere_readout_matches_tensor_form(monkeypatch, precision, atol):
+  """HorosphereGeometry.horosphere_geometry_chunk (vocabulary in blocks through
+  _HorosphereChunk: exact forward, inner-product-form backward, in readout_dtype)
+  equals the (B, L, V, m, d) broadcast horosphere_geometry_tensor in value and
+  in the boundary-table gradient."""
+  from numeric.horosphere import HorosphereGeometry
+  model, _ = _build_model(monkeypatch, [
+    'algo.prod_factor_dim=[3,3,3,3]',
+    'algo.prod_factor_gaussian_curvature=[-1.0,-4.0,-0.25,-2.0]',
+    f'algo.readout_precision={precision}'])
+  monkeypatch.setattr(HorosphereGeometry, 'READOUT_CHUNK', 5)   # V = 12 -> chunks of 5, 5, 2
+  B, L = 2, 8
+  theta = torch.randn(B, L, 4, 3, dtype=torch.float64, device=model.device)
+  theta = (theta / theta.norm(dim=-1, keepdim=True)).flatten(-2)
+  radius = torch.rand(B, L, 4, dtype=torch.float64, device=model.device) * 3
+  kw = dict(theta=theta, radius=radius, word_embedding=model.word_embedding,
+            prod_factor_dim=model.prod_factor_dim,
+            prod_factor_gaussian_curvature=model.prod_factor_gaussian_curvature)
+  out = HorosphereGeometry.horosphere_geometry_chunk(**kw, readout_dtype=model.readout_dtype)
+  ref = HorosphereGeometry.horosphere_geometry_tensor(**kw, readout_dtype=torch.float64)
+  assert out.dtype == model.readout_dtype and ref.dtype == torch.float64
+  assert out.shape == (B, L, model.vocab_size)
+  assert torch.allclose(out.double(), ref, atol=atol)
+  g_out = torch.autograd.grad(out.sum(), model.word_embedding)[0]
+  g_ref = torch.autograd.grad(ref.sum(), model.word_embedding)[0]
+  assert torch.allclose(g_out.double(), g_ref.double(), atol=atol, rtol=1e-4)
+  # no_grad path (sampling)
+  with torch.no_grad():
+    assert torch.allclose(
+      HorosphereGeometry.horosphere_geometry_chunk(**kw, readout_dtype=model.readout_dtype).double(), ref, atol=atol)
+  # the model's forward_type=horosphere path goes through compute_horosphere with the config's chunk flag
+  assert torch.allclose(HorosphereGeometry.compute_horosphere(
+    **kw, readout_dtype=model.readout_dtype,
+    forward_chunked=model.config.algo.horosphere_forward_chunked).double(), ref, atol=atol)
 
 
 def test_naive_readout_is_plain_log_softmax(monkeypatch):
@@ -370,6 +475,28 @@ def test_nll_end_to_end_is_finite_and_differentiable(monkeypatch):
   assert emb_grad.abs().sum() > 0
   blk = next(model.backbone.blocks[0].parameters())
   assert blk.grad is not None and torch.isfinite(blk.grad).all()
+
+
+@needs_gpu
+@pytest.mark.parametrize('mode', ['unif', 'trunc_exp'])
+def test_nll_end_to_end_bounded_time_conversion(monkeypatch, mode):
+  model, _ = _build_model(monkeypatch, [
+    f'algo.time_conversion_mode={mode}', 'algo.time_range_upper_bound=3.0'])
+  B, L = 2, 8
+  x = _tokens(model, B, L)
+  alpha = torch.tensor([[0.2], [0.9]], dtype=torch.float64, device=model.device)
+  xt, weight = model.q_xt(x, alpha, use_pure_noise=False)
+  assert xt.dtype == torch.float64 and weight.shape == (B, 1)
+  assert (weight > 0).all()
+  if mode == 'unif':
+    assert torch.allclose(weight, torch.full_like(weight, 3.0))
+  # alpha_t = 1 is clean: the higher alpha_t lands further out on the bridge.
+  ball = xt.unflatten(-1, (4, 3)).norm(dim=-1)
+  assert ball[1].mean() > ball[0].mean()
+  loss, t = model.nll(x, None, None)
+  assert loss.shape == (B, L) and torch.isfinite(loss).all()
+  loss.sum().backward()
+  assert torch.isfinite(model.backbone.sphere_embed.weight.grad).all()
 
 
 @needs_gpu
@@ -419,7 +546,7 @@ def test_bayes_limits_at_init(monkeypatch):
 # hyper_model.HyperbolicModelBase: the two readout fixes
 # ---------------------------------------------------------------------------
 
-class _TinyHyperModel(__import__('hyper_model').HyperbolicModelBase):
+class _TinyHyperModel(__import__('numeric.hyper_model', fromlist=['HyperbolicModelBase']).HyperbolicModelBase):
   """Identity trunk over the boundary channels + a fixed linear head."""
 
   def __init__(self, V, dims, curvs):
@@ -442,7 +569,7 @@ class _TinyHyperModel(__import__('hyper_model').HyperbolicModelBase):
 
 
 def test_forward_horosphere_accepts_cartesian_trunk_state_and_own_factors():
-  import hyper_model
+  import numeric.hyper_model as hyper_model
   dims, curvs = [3, 3], [-1.0, -4.0]
   m = _TinyHyperModel(V=7, dims=dims, curvs=curvs)
   B, L = 2, 5
@@ -453,17 +580,18 @@ def test_forward_horosphere_accepts_cartesian_trunk_state_and_own_factors():
     radius, dims, curvs).repeat_interleave(3, dim=-1)
   # Cartesian trunk state + polar readout (used to raise "not both").
   out = m.forward_horosphere(z=z, theta=theta, radius=radius)
-  ref = m.forward_naive(z=z, theta=None, radius=None) + m.horosphere_geometry(
-    theta=theta, radius=radius, prod_factor_dim=dims,
+  from numeric.horosphere import HorosphereGeometry
+  ref = m.forward_naive(z=z, theta=None, radius=None) + HorosphereGeometry.compute_horosphere(
+    theta=theta, radius=radius, word_embedding=m.word_embedding, prod_factor_dim=dims,
     prod_factor_gaussian_curvature=curvs)
   assert torch.allclose(out, ref)
   # Both factor lists None fall back to the model's OWN factors (two H^3_K
   # factors, not one H^6), for the polar trunk path too.
   out_polar = m.forward_horosphere(z=None, theta=theta, radius=radius)
   ref_polar = m.forward_naive(z=None, theta=theta, radius=radius) + (
-    m.horosphere_geometry(theta=theta, radius=radius,
-                          prod_factor_dim=dims,
-                          prod_factor_gaussian_curvature=curvs))
+    HorosphereGeometry.compute_horosphere(theta=theta, radius=radius, word_embedding=m.word_embedding,
+                                          prod_factor_dim=dims,
+                                          prod_factor_gaussian_curvature=curvs))
   assert torch.allclose(out_polar, ref_polar)
   assert out.shape == (B, L, 7)
 
@@ -490,6 +618,10 @@ def test_adaptive_schedule_composes(monkeypatch):
 @pytest.mark.parametrize('overrides', [
   ['noise=log-linear-adaptive', 'algo.invert_time_convention=true'],
   ['algo.prod_factor_dim=5'],
+  ['algo.time_conversion_mode=unif', 'algo.time_range_upper_bound=0'],
+  ['algo.time_conversion_mode=unif', 'sampler.t_max=2.0'],  # > time_range_upper_bound=1.0
+  ['algo.time_conversion_mode=trunc_exp', 'sampler.t_max=2.0'],
+  ['algo.time_exp_rate=0'],
 ])
 def test_validate_configuration_rejects(monkeypatch, overrides):
   with pytest.raises(ValueError):

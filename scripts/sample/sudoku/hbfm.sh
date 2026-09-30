@@ -21,6 +21,8 @@ UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-20}"
 READOUT_PRECISION="${READOUT_PRECISION:-float32}"
 NOISE="${NOISE:-log-linear}"
 FORWARD_TYPE="${FORWARD_TYPE:-horosphere}"  # horosphere: logits are a residual on the Busemann log-densities / naive: plain logits
+TIME_CONVERSION_MODE="${TIME_CONVERSION_MODE:-exp}"        # must match training
+TIME_RANGE_UPPER_BOUND="${TIME_RANGE_UPPER_BOUND:-1.0}"    # must match training; trunc_exp / unif require T_MAX <= this
 ADA_REFIT_EVERY="${ADA_REFIT_EVERY:-500}"  # AdaptiveSchedule knobs, defaults = configs/noise/log-linear-adaptive.yaml; only passed when NOISE is adaptive. The repo's 50 / 0.9 recipe (hflm_truncated_adaptive.sh) was A/B-tested for HBFM at rate 0.01 and did not help (experiments/claude_test_hbfm_sudoku/RESULTS.md).
 ADA_EMA="${ADA_EMA:-0.0}"
 GLOBAL_BATCH="${GLOBAL_BATCH:-256}"         # training global batch: the adaptive schedule's buffer size (gbs * refit_every // 10) must match the checkpoint
@@ -31,8 +33,8 @@ NOISE_REMOVAL="${NOISE_REMOVAL:-greedy}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/sudoku/hbfm_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
-PROPOSAL_RATE=$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")
-T_MAX=$(python -c "print(${UNIT_T_MAX} / abs(${GAUSS_CURV}))")
+PROPOSAL_RATE="${PROPOSAL_RATE:-$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")}"  # physical algo.time_exp_rate
+T_MAX="${T_MAX:-$(python -c "print(${UNIT_T_MAX} / abs(${GAUSS_CURV}))")}"   # physical sampler horizon
 
 cd "${REPO_ROOT}"
 ADA_ARGS=""
@@ -53,6 +55,8 @@ python -u -m main \
     algo.prod_factor_dim="${PROD_FACTOR_DIM}" \
     algo.prod_factor_gaussian_curvature="${PROD_FACTOR_CURV}" \
     algo.time_exp_rate=${PROPOSAL_RATE} \
+    algo.time_conversion_mode=${TIME_CONVERSION_MODE} \
+    algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND} \
     algo.readout_precision=${READOUT_PRECISION} \
     algo.forward_type=${FORWARD_TYPE} \
     noise=${NOISE} ${ADA_ARGS} \

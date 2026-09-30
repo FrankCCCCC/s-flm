@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from dataclass_patch import dataclass
 import candi_utils
 import utils
-from geo_bridge import (
+from numeric.geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, Coordinate, Geometry)
 from noise_schedules import GT_Method, get_gscheduler
 
@@ -887,7 +887,15 @@ class HBFMSampler(Sampler):
     # The schedule's alpha_t at this heat time (time_conversion inverted), for
     # a time-conditioned backbone; zeroed by _process_sigma otherwise.
     t = state.t_schedule[state.step_idx]
-    u = torch.exp(-model.config.algo.time_exp_rate * t)
+    mode = model.config.algo.time_conversion_mode
+    rate = model.config.algo.time_exp_rate
+    if mode == 'unif':
+      u = 1.0 - t / model.config.algo.time_range_upper_bound
+    elif mode == 'trunc_exp':
+      u = 1.0 - torch.expm1(-rate * t) / torch.expm1(
+        t.new_tensor(-rate * model.config.algo.time_range_upper_bound))
+    else:
+      u = torch.exp(-rate * t)
     alpha_t = u if model.invert_time_convention else 1.0 - u
     sigma_t = model._sigma_from_alphat(alpha_t.clamp_min(1e-12)).expand(B, 1)
 

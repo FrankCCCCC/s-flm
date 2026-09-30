@@ -10,11 +10,12 @@ import utils
 import flm_utils
 import candi_utils
 import models.flm_dit
-from hyper_model import HyperbolicModelBase
-from geo_bridge import (
+from numeric.hyper_model import HyperbolicModelBase
+from numeric.geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, BinaryHyperbolicHeatKernel,
   Coordinate, Geometry)
-from loss import HyperBridge
+from numeric.horosphere import HorosphereGeometry
+from numeric.loss import HyperBridge
 
 
 class AR(trainer_base.TrainerBase):
@@ -879,7 +880,7 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     An int splits embed_dim into equal factors and a float shares the
     curvature; lists spell the factors out; null means one factor of the full
     embed_dim at curvature -1. Plain python lists, not ListConfig:
-    `HyperbolicModelBase.prod_factors` dispatches on `isinstance(x, list)`.
+    `GeoUtils.validate_prod_factors` dispatches on `isinstance(x, list)`.
     """
     dims = algo_config.prod_factor_dim
     curvatures = algo_config.prod_factor_gaussian_curvature
@@ -898,7 +899,7 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       curvatures = [float(curvatures)] * len(dims)
     else:
       curvatures = [float(k) for k in curvatures]
-    return HyperbolicModelBase.prod_factors(
+    return GeoUtils.validate_prod_factors(
       prod_factor_dim=dims, prod_factor_gaussian_curvature=curvatures,
       embedding_size=embed_dim)
 
@@ -911,6 +912,20 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     if self.config.model.type == 'hyperbolic-arch':
       raise ValueError('hyperbolic-arch justnorms the radial away; '
                        'use hyperbolic-dit.')
+    if self.config.algo.time_exp_rate <= 0:
+      raise ValueError('time_exp_rate must be > 0, got '
+                       f'{self.config.algo.time_exp_rate}.')
+    mode = self.config.algo.time_conversion_mode
+    if mode in ('unif', 'trunc_exp'):
+      upper = self.config.algo.time_range_upper_bound
+      if upper <= 0:
+        raise ValueError(f'time_conversion_mode={mode} requires '
+                         f'time_range_upper_bound > 0, got {upper}.')
+      t_max = self.config.sampler.get('t_max')
+      if t_max is not None and t_max > upper:
+        raise ValueError(f'time_conversion_mode={mode} trains heat times up to '
+                         f'time_range_upper_bound={upper}; sampler.t_max={t_max} '
+                         'would walk the SDE past it.')
 
   @property
   def word_embedding(self):
@@ -928,11 +943,14 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     elif self.config.algo.forward_type == "horosphere":
       rhos, thetas = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
         xt, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
-      horo = self.horosphere_geometry(
+      horo = HorosphereGeometry.compute_horosphere(
         theta=thetas,
         radius=rhos,
+        word_embedding=self.word_embedding,
         prod_factor_dim=self.prod_factor_dim,
         prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
+        readout_dtype=self.readout_dtype,
+        forward_chunked=self.config.algo.horosphere_forward_chunked
       )
       # `forward` has already divided the residual by the temperature; scale
       # the geometry too, so it tempers the whole log-posterior.
@@ -947,29 +965,45 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
   def time_conversion(
     alpha_t,
     invert_time_convention: bool,
-    exp_rate: float = 1.0
+    exp_rate: float = 1.0,
+    mode: str = 'exp',
+    range_upper_bound: float = 1.0,
+    dtype: torch.dtype = torch.float64,
   ):
-    """alpha_t in [0, 1] -> bridge heat time in [0, inf) and importance weight.
-
-    With u the noise fraction (alpha_t under invert_time_convention,
-    1 - alpha_t otherwise; u = 1 is the origin, u -> 0 the boundary),
-    t = -log(u) / exp_rate and weight = 1 / (exp_rate * u): for uniform u
-    (the log-linear schedule) exactly loss.Proposal's exp proposal and its
-    1 / q(t). `nll` multiplies the weight by |alpha'_t|, so under the
-    AdaptiveSchedule's remaps or the TruncatedScheduleWrapper's range
-    [-log(1 - alpha_min), -log(1 - alpha_max)] / exp_rate the loss stays the
-    same heat-time integral. Both float64, alpha_t's shape.
+    """
+    alpha_t in [0, 1] -> bridge heat time in [0, inf) and importance weight.
+    u = 1 - alpha_t (alpha_t under invert_time_convention) is the noise
+    fraction, u = 1 the origin: mode='exp' is t = -log(u) / exp_rate with
+    weight 1 / (exp_rate * u); mode='trunc_exp' is the same proposal truncated
+    to [0, range_upper_bound], exp(-exp_rate * t) = 1 - (1 - u) * normalizer
+    with normalizer = 1 - exp(-exp_rate * range_upper_bound) and weight
+    normalizer / (exp_rate * exp(-exp_rate * t)); mode='unif' is
+    t = (1 - u) * range_upper_bound with weight range_upper_bound
+    (loss.Proposal's exp / truncated_exp / unif proposals and their 1 / q(t),
+    whose uniform draw is 1 - u).
     """
     if invert_time_convention:
       u = alpha_t
     else:
       u = 1.0 - alpha_t
-    # An AdaptiveSchedule refit can return alpha_t == 1 exactly (u = 0) on a
-    # band of small t; floor u like loss.Proposal's exp proposal floors its
-    # uniform draw, so the weight stays finite instead of 0 * inf = NaN.
-    u = u.to(torch.float64).clamp_min(1e-12)
-    samples = - torch.log(u) / exp_rate
-    weights = 1.0 / (exp_rate * u)
+    u = u.to(dtype)
+    if mode == 'exp':
+      # An AdaptiveSchedule refit can return alpha_t == 1 exactly (u = 0) on a
+      # band of small t; floor u at 1e-12 to avoid -log(u) = NaN
+      u = u.clamp_min(1e-12)
+      samples = - torch.log(u) / exp_rate
+      weights = 1.0 / (exp_rate * u)
+    elif mode == 'trunc_exp':
+      u = u.clamp_min(1e-12)  # the exp branch's floor
+      normalizer = -torch.expm1(u.new_tensor(-exp_rate * range_upper_bound))
+      draw = (1.0 - u) * normalizer
+      samples = - torch.log1p(-draw) / exp_rate
+      weights = normalizer / (exp_rate * (1.0 - draw))
+    elif mode == 'unif':
+      samples = (1.0 - u) * range_upper_bound
+      weights = torch.full_like(u, range_upper_bound)
+    else:
+      raise ValueError(f"Unknown time_conversion_mode: {mode}")
     return samples, weights
 
   def _clean_state(self, x):
@@ -995,7 +1029,12 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     if use_pure_noise:
       raise NotImplementedError('HyperbolicBoundaryFM does not support pure-noise training.')
     infinite_timestep, weight = HyperbolicBoundaryFM.time_conversion(
-      alpha_t, self.invert_time_convention, self.config.algo.time_exp_rate)
+      alpha_t=alpha_t,
+      mode=self.config.algo.time_conversion_mode,
+      invert_time_convention=self.invert_time_convention,
+      exp_rate=self.config.algo.time_exp_rate,
+      range_upper_bound=self.config.algo.time_range_upper_bound
+    )
     xt = HyperbolicHeatKernel.poincare_bridge_prod(
       ts=infinite_timestep.reshape(-1).clamp_max(self.max_heat_time),
       targets=x,

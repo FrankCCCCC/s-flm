@@ -20,9 +20,10 @@ import pytest
 import torch
 from scipy import stats
 
-import hyper_model
+import numeric.hyper_model as hyper_model
+from numeric.horosphere import HorosphereGeometry
 import samplers
-from geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
+from numeric.geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
 from conftest import REPO_ROOT  # noqa: F401
 
 torch.manual_seed(0)
@@ -104,7 +105,9 @@ class _OracleModel:
     self.word_embedding = torch.randn(V, sum(dims), dtype=torch.float64)
     self.backbone = type('B', (), {'embed_dim': sum(dims)})()
     self.config = type('C', (), {'sampler': type('S', (), {'steps': steps})(),
-                                 'algo': type('A', (), {'time_exp_rate': 1.0})()})()
+                                 'algo': type('A', (), {
+                                   'time_exp_rate': 1.0, 'time_conversion_mode': 'exp',
+                                   'time_range_upper_bound': 1.0})()})()
     self.invert_time_convention = False
     self.log_prior = log_prior
     self._readout = self._Readout(self.word_embedding, dims, curvs)
@@ -120,8 +123,9 @@ class _OracleModel:
   def forward(self, *, xt, sigma, context):
     rhos, thetas = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
       xt, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
-    horo = self._readout.horosphere_geometry(
-      theta=thetas, radius=rhos, prod_factor_dim=self.prod_factor_dim,
+    horo = HorosphereGeometry.compute_horosphere(
+      theta=thetas, radius=rhos, word_embedding=self._readout.word_embedding,
+      prod_factor_dim=self.prod_factor_dim,
       prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature)
     self.last_log_p = (horo + self.log_prior).log_softmax(-1)
     return self.last_log_p
@@ -203,6 +207,8 @@ def _build_model(monkeypatch, overrides=()):
   ['sampler.velocity=sample'],
   ['sampler.top_k_velocity=2'],
   ['sampler.noise_removal=ancestral', 'sampler.temperature=0.5'],
+  ['algo.time_conversion_mode=unif'],   # sampler.t_max=1.0 == time_range_upper_bound
+  ['algo.time_conversion_mode=trunc_exp'],
 ])
 def test_real_model_sampler_contract(monkeypatch, overrides):
   model = _build_model(monkeypatch, overrides)

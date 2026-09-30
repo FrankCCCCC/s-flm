@@ -14,7 +14,7 @@ import math
 import pytest
 import torch
 
-from geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
+from numeric.geo_bridge import Coordinate, GeoUtils, HyperbolicHeatKernel
 from conftest import REPO_ROOT  # noqa: F401
 
 torch.manual_seed(0)
