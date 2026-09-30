@@ -641,6 +641,8 @@ def main(config):
     diffusion_model = algo.LangFlow
   elif config.algo.name == 'hflm':
     diffusion_model = algo.HFLM
+  elif config.algo.name == 'hbfm':
+    diffusion_model = algo.HyperbolicBoundaryFM
   elif config.algo.name == 'flm':
     diffusion_model = algo.FLM
   elif config.algo.name == 'candi':
