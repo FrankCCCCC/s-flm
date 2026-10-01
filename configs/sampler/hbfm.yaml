@@ -1,0 +1,13 @@
+predictor: hbfm
+steps: 200
+noise_removal: greedy  # 'ancestral' (sample) or 'greedy' (argmax) from the posterior at the final step
+use_float64: true  # label for the samples filename; the horosphere readout is float64 regardless
+velocity: exact  # exact: posterior-mean bridge drift / sample: drift toward one word sampled from the posterior
+p_nucleus: 1.0
+top_k: -1
+top_k_velocity: -1  # -1 = posterior-mean velocity over the whole vocabulary
+temperature: 1.0
+t_max: 2.0  # heat-time horizon of the generative SDE (physical time). Set it from the manifold: the factors' evidence adds, e.g. (H^3)^32 resolves tokens by unit time |K| t ~ 0.5 (scripts/sample/tinystories/hbfm.sh uses 2/|K|, sudoku 0.5/|K|), (H^3)^3 by ~3/|K|, a single H^d needs ~20/|K|.
+# t_max and steps are COUPLED: the Euler-Maruyama step dt = t_max / steps must stay <~ 0.01/|K| on (H^3)^32 (<~ 0.05/|K| on a single H^d) or the decoded law is biased toward the early leader and states freeze at the float64 ball cap (measured: t_max 30 / 200 steps gives chi2 p = 0 vs the prior on the Bayes oracle; the scripts' dt <= 0.017 is fine). Raise steps with t_max.
+num_sample_batches: 2
+num_sample_log: 2

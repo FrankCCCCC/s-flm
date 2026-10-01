@@ -26,8 +26,8 @@ import math
 import pytest
 import torch
 
-import geo_bridge
-from geo_bridge import GeoUtils, HyperbolicHeatKernel, Coordinate, Geometry
+import numeric.geo_bridge as geo_bridge
+from numeric.geo_bridge import GeoUtils, HyperbolicHeatKernel, Coordinate, Geometry
 from conftest import REPO_ROOT  # noqa: F401  (ensures repo root on sys.path)
 
 torch.manual_seed(0)

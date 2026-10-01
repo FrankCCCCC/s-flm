@@ -188,4 +188,5 @@ multirun/
 .nfs*
 *.err
 *.out
-*.npzexperiments/*/logs/
+*.npz
+experiments/*/logs/

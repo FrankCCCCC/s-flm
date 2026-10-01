@@ -2,6 +2,7 @@ name: tiny
 type: hyperbolic-dit
 hidden_size: 512
 cond_dim: 128
+embed_dim: null   # manifold dim fed to the DiT; null = hidden_size (state consumed as-is), else lifted by a linear in_proj
 length: 180
 n_blocks: 8
 n_heads: 8
