@@ -378,6 +378,7 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     self.rho_min = config.algo.rho_min
     self.rho_max = config.algo.rho_max
     self.snr_weighted_ce = config.algo.snr_weighted_ce
+    self.noise_sched_cov_weight = config.algo.noise_sched_cov_weight
     self._init_self_cond(config)
     self._validate_configuration()
 
@@ -386,6 +387,10 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       raise ValueError('Adaptive noise schedule requires '
                        'invert_time_convention=false '
                        '(MDLM-like convention).')
+    if self.snr_weighted_ce and self.noise_sched_cov_weight:
+      raise ValueError('algo.snr_weighted_ce and '
+                       'algo.noise_sched_cov_weight both weight the CE '
+                       'by |dalpha_t|; enable at most one.')
     if self.rho_min is not None and self.rho_min < 0.0:
       raise ValueError(f'EFLM requires algo.rho_min >= 0, got '
                        f'{self.rho_min}.')
@@ -443,6 +448,11 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       # Eq. 16, weighted by -SNR'(t)/2 (t ~ U(0, 1) is the MC estimator).
       ce_loss = snr_weight(alpha_t, dalpha_t, self.invert_time_convention,
                            self.eps) * ce_loss
+    if self.noise_sched_cov_weight:
+      # Change of variables: t ~ U(0, 1) estimates int L dt, so |alpha_t'|
+      # reweights it onto int L d alpha, the uniform-alpha measure (a no-op
+      # on log-linear, where alpha is already affine in t).
+      ce_loss = dalpha_t.abs() * ce_loss
 
     return ce_loss
 
