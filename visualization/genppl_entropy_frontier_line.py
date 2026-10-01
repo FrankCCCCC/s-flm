@@ -43,7 +43,7 @@ EFLM_SDE_RE = re.compile(
 STYLE = {'mdlm': ('MDLM', '#1f77b4'), 'duo': ('DUO', '#ff7f0e'),
          'flm': ('FLM', '#2ca02c'), 'ar': ('AR', '#d62728'),
          'sfmta': ('S-FLM (trunc+ada)', '#9467bd'),
-         'eflm': ('EFLM (exact vel.)', '#9467bd'),
+         'eflm': ('EFLM (exact vel.)', '#17becf'),
          'eflm-k1': ('EFLM (k=1 vel.)', '#8c564b'),
          'eflm-sde': ('EFLM (SDE eta*, exact vel.)', '#e377c2')}
 MARKERS = ['eflm-k1']   # temperature-inert: one point per NFE, not a curve
