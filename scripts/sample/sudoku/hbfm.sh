@@ -16,6 +16,9 @@ FACTOR_DIM="${FACTOR_DIM:-3}"
 PROD_FACTOR_DIM="${PROD_FACTOR_DIM:-${FACTOR_DIM}}"   # hydra value of algo.prod_factor_dim: an int (equal split) or a list like [3,3,3]
 PROD_FACTOR_CURV="${PROD_FACTOR_CURV:-${GAUSS_CURV}}" # hydra value of algo.prod_factor_gaussian_curvature: a float or a list; GAUSS_CURV stays the scalar |K| used for the unit-time conversions
 INIT="${INIT:-ngpt}"
+HYLA_DIM="${HYLA_DIM:-null}"           # HyLa feature dim; must match training (null = off)
+HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # must match training
+HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # must match training
 SEED="${SEED:-1}"
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-20}"
 READOUT_PRECISION="${READOUT_PRECISION:-float32}"
@@ -50,6 +53,9 @@ python -u -m main \
     model=tiny-hyperbolic-dit \
     model.embed_dim=${EMBED_DIM} \
     model.init="${INIT}" \
+    model.hyla_dim=${HYLA_DIM} \
+    model.hyla_radius_cap=${HYLA_RADIUS_CAP} \
+    model.hyla_concat_state=${HYLA_CONCAT_STATE} \
     seed="${SEED}" \
     algo=hbfm \
     algo.prod_factor_dim="${PROD_FACTOR_DIM}" \
