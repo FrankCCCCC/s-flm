@@ -390,10 +390,11 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       raise ValueError('Adaptive noise schedule requires '
                        'invert_time_convention=false '
                        '(MDLM-like convention).')
-    if self.snr_weighted_ce and self.noise_sched_cov_weight:
-      raise ValueError('algo.snr_weighted_ce and '
-                       'algo.noise_sched_cov_weight both weight the CE '
-                       'by |dalpha_t|; enable at most one.')
+    if sum([self.snr_weighted_ce, self.noise_sched_cov_weight,
+            self.config.noise.adaptive]) > 1:
+      raise ValueError('algo.snr_weighted_ce, algo.noise_sched_cov_weight '
+                       'and noise.adaptive are mutually exclusive; enable '
+                       'at most one.')
     if self.rho_min is not None and self.rho_min < 0.0:
       raise ValueError(f'EFLM requires algo.rho_min >= 0, got '
                        f'{self.rho_min}.')
@@ -411,7 +412,28 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
 
   def _process_model_output(self, model_output, xt, sigma,
                             context=None):
-    return model_output.float().log_softmax(-1)
+    del sigma
+    if self.config.algo.forward_type == "naive":
+      output = model_output.float()
+    elif self.config.algo.forward_type == "gaussian":
+      # Bayes readout: the logits are a residual on log q(xt | x = v) =
+      # log N(xt; a_t e_v, b_t^2 I), dropping the v-independent
+      # -||xt||^2 / (2 b_t^2). Same (a_t, b_t) split as q_xt / _lerp.
+      b_t = (context.alpha_t if self.invert_time_convention
+             else 1 - context.alpha_t)
+      b_t = b_t.float().clamp(min=self.eps).unsqueeze(-1)  # [B, 1, 1]
+      a_t = 1.0 - b_t
+      E = self._sc_embed_table().float()  # [V, d] radius-rescaled, as q_xt
+      gauss = ((a_t / b_t ** 2) * (xt.float() @ E.T)
+               - (a_t ** 2 / (2.0 * b_t ** 2)) * (E ** 2).sum(-1))
+      # `forward` has already divided the residual by the temperature; scale
+      # the geometry too, so it tempers the whole log-posterior.
+      if context is not None and 'temperature' in context:
+        gauss = gauss / context.temperature
+      output = (model_output + gauss).float()
+    else:
+      raise ValueError(f"Unknown forward_type: {self.config.algo.forward_type}")
+    return output.log_softmax(-1)
 
   def _sample_prior(self, e_clean):
     e_noisy = torch.randn_like(e_clean)
@@ -490,6 +512,7 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     dalpha_t, alpha_t = self.noise(t)
     alpha_t = alpha_t.unsqueeze(-1)
     dalpha_t = dalpha_t.unsqueeze(-1)
+    context.alpha_t = alpha_t  # the Gaussian readout's a_t / b_t
 
     xt = self.q_xt(
       x0, alpha_t, use_pure_noise=use_pure_noise,

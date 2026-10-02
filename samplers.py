@@ -958,6 +958,7 @@ class EFLMState(BaseState):
 class EFLMContext:
   temperature: float = 0.0
   z_sc: torch.Tensor | None = None
+  alpha_t: torch.Tensor | None = None
 
 @torch.compile
 def elfm_compute_velocity(x, E, log_p, mode, eps):
@@ -1180,7 +1181,8 @@ class EFLMSampler(Sampler):
     _, alpha_t = model.noise(state.t_schedule[state.step_idx])
     sigma_t = model._sigma_from_alphat(alpha_t).reshape(-1, 1)
 
-    context = EFLMContext(temperature=self.temperature, z_sc=state.z_sc)
+    context = EFLMContext(temperature=self.temperature, z_sc=state.z_sc,
+                          alpha_t=alpha_t.reshape(1, 1))
     log_p = model.forward(xt=state.xt, sigma=sigma_t,
                           context=context)
     if self.use_float64:

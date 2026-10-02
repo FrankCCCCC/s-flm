@@ -28,6 +28,7 @@ class Loss:
 class TrainingContext:
   kv_cache: bool = False
   z_sc: torch.Tensor | None = None  # [B, L, d] self-cond embeds, None -> zeros
+  alpha_t: torch.Tensor | None = None  # [B, 1] signal level of the noised batch
 
 
 @dataclass
