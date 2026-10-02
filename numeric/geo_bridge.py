@@ -550,6 +550,44 @@ class GeoUtils:
         return dims, curvatures
 
     @staticmethod
+    def resolve_prod_factors(
+        prod_factor_dim: Optional[Union[int, List[int]]],
+        prod_factor_gaussian_curvature: Optional[Union[float, List[float]]],
+        embedding_size: int,
+    ):
+        """`prod_factor_dim` / `prod_factor_gaussian_curvature` as plain lists.
+
+        An int splits `embedding_size` into equal factors and a float shares
+        the curvature; lists spell the factors out; None means one factor of
+        the full `embedding_size` at curvature -1. Plain python lists, not
+        ListConfig: [`validate_prod_factors`] dispatches on
+        `isinstance(x, list)`.
+        """
+        dims = prod_factor_dim
+        curvatures = prod_factor_gaussian_curvature
+        if dims is None:
+            dims = [embedding_size]
+        elif isinstance(dims, int):
+            if embedding_size % dims != 0:
+                raise ValueError(
+                    f"prod_factor_dim={dims} must divide the embedding size {embedding_size}."
+                )
+            dims = [dims] * (embedding_size // dims)
+        else:
+            dims = [int(d) for d in dims]
+        if curvatures is None:
+            curvatures = [-1.0] * len(dims)
+        elif isinstance(curvatures, (int, float)):
+            curvatures = [float(curvatures)] * len(dims)
+        else:
+            curvatures = [float(k) for k in curvatures]
+        return GeoUtils.validate_prod_factors(
+            prod_factor_dim=dims,
+            prod_factor_gaussian_curvature=curvatures,
+            embedding_size=embedding_size,
+        )
+
+    @staticmethod
     def hyperbolic_polar_to_poincare_cartesian_prod(
         rhos: torch.Tensor,
         thetas: torch.Tensor,

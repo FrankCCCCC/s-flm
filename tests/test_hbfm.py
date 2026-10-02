@@ -622,7 +622,117 @@ def test_adaptive_schedule_composes(monkeypatch):
   ['algo.time_conversion_mode=unif', 'sampler.t_max=2.0'],  # > time_range_upper_bound=1.0
   ['algo.time_conversion_mode=trunc_exp', 'sampler.t_max=2.0'],
   ['algo.time_exp_rate=0'],
+  ['model.hyla_dim=30'],      # not a multiple of the 4 factors
 ])
 def test_validate_configuration_rejects(monkeypatch, overrides):
   with pytest.raises(ValueError):
     _build_model(monkeypatch, overrides)
+
+
+# ---------------------------------------------------------------------------
+# HyLa: random Laplacian features of the state (models.hyperbolic_dit)
+# ---------------------------------------------------------------------------
+
+def _hyla(dims, curvs, num_features, scale=1.0, seed=0, radius_cap=None):
+  from models.hyperbolic_dit import HyLaFeatures
+  return HyLaFeatures(dims, curvs, num_features, scale, seed, radius_cap)
+
+
+def test_hyla_features_match_the_poincare_formula():
+  """Per factor the feature is exp((d-1)/2 P) cos(lambda P + b) / sqrt(D) with
+  P = log((1 - |w|^2) / |w - omega|^2) on the unit-ball image w = z / R of the
+  factor's state (paper eq. 1); the origin has P = 0, i.e. cos(b) / sqrt(D)."""
+  dims, curvs = [3, 3, 3], [-1.0, -0.5, -2.0]
+  hyla = _hyla(dims, curvs, 24)
+  assert hyla.omegas.shape == (3, 8, 3)
+  assert torch.allclose(hyla.omegas.norm(dim=-1), torch.ones(3, 8, dtype=torch.float64))
+  torch.manual_seed(1)
+  R = torch.tensor([1.0, 2.0 ** 0.5, 0.5 ** 0.5], dtype=torch.float64)
+  w = torch.randn(4, 5, 3, 3, dtype=torch.float64)
+  w = w / w.norm(dim=-1, keepdim=True) * 0.95 * torch.rand(4, 5, 3, 1, dtype=torch.float64)
+  w[0, 0] = 0.0                                          # the origin
+  feats = hyla((w * R[:, None]).flatten(-2))             # (4, 5, 9) Cartesian state
+  assert feats.shape == (4, 5, 24) and feats.dtype == torch.float64
+  P = torch.log((1 - w.square().sum(-1, keepdim=True))
+                / (w.unsqueeze(-2) - hyla.omegas).square().sum(-1))   # (4, 5, 3, 8)
+  ref = torch.exp(P) * torch.cos(hyla.lambdas * P + hyla.biases) / math.sqrt(24)
+  assert torch.allclose(feats, ref.flatten(-2), atol=1e-12)
+  assert torch.allclose(feats[0, 0], hyla.biases.cos().flatten() / math.sqrt(24))
+
+
+def test_hyla_features_estimate_the_isometry_invariant_kernel():
+  """E[<phi(x), phi(y)>] = k_lambda(d_H(x, y)) (paper Thm 4.1); on H^3 the
+  spherical function is elementary, k_lambda(d) = sin(lambda d) / (2 lambda sinh d)."""
+  D, lam = 400_000, 0.8
+  hyla = _hyla([3], [-1.0], D, seed=3)
+  hyla.lambdas.fill_(lam)                                # one eigenvalue, no lambda mixture
+  pts = torch.tensor([[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [0.3, -0.2, 0.4],
+                      [-0.6, 0.1, 0.2]], dtype=torch.float64)
+  feats = hyla(pts[None])[0]                             # (4, D)
+  gram = feats @ feats.T
+  sq = pts.square().sum(-1)
+  dist = torch.acosh(1 + 2 * (pts[:, None] - pts[None]).square().sum(-1)
+                     / ((1 - sq[:, None]) * (1 - sq[None]))).clamp_min(1e-12)
+  kernel = torch.sin(lam * dist) / (2 * lam * torch.sinh(dist))
+  assert torch.allclose(gram.diagonal(), torch.full((4,), 0.5, dtype=torch.float64), atol=0.02)
+  assert torch.allclose(gram, kernel, atol=0.02)
+
+
+@needs_gpu
+def test_hyla_backbone_end_to_end(monkeypatch):
+  model, _ = _build_model(monkeypatch, ['model.hyla_dim=32', 'model.hyla_scale=0.5'])
+  hyla = model.backbone.hyla
+  assert hyla is not None and hyla.omegas.shape == (4, 8, 3)
+  assert model.backbone.in_proj.in_features == 32
+  keys = set(model.state_dict())                          # checkpointed draws
+  assert {'backbone.hyla.omegas', 'backbone.hyla.lambdas', 'backbone.hyla.biases'} <= keys
+  assert 'backbone.hyla.kappas' not in keys               # derived from the config
+  B, L = 2, 8
+  x = _tokens(model, B, L)
+  # The feature map is differentiable in the state, so the embedding keeps
+  # its gradient path through the bridge once the zero-init readout moves.
+  xt, _ = model.q_xt(x, _alpha_at_heat_time(model, B, 0.3), use_pure_noise=False)
+  xt = xt.detach().requires_grad_(True)
+  hyla(xt).square().sum().backward()
+  assert torch.isfinite(xt.grad).all() and xt.grad.abs().sum() > 0
+  loss, t = model.nll(x, None, None)
+  assert loss.shape == (B, L) and torch.isfinite(loss).all()
+  loss.sum().backward()
+  for p in (model.backbone.sphere_embed.weight, model.backbone.in_proj.weight):
+    assert p.grad is not None and torch.isfinite(p.grad).all()
+  # The sampler starts at the origin, whose features are cos(b) / sqrt(D).
+  origin = torch.zeros(B, L, 12, dtype=torch.float64, device=model.device)
+  assert torch.allclose(hyla(origin)[0, 0], hyla.biases.cos().flatten() / math.sqrt(32))
+  sigma = model._sigma_from_alphat(_alpha_at_heat_time(model, B, 0.3))
+  assert torch.isfinite(model.forward(xt=origin, sigma=sigma)).all()
+
+
+def test_hyla_radius_cap_is_a_finite_pin_radius():
+  """With `radius_cap` the map is evaluated at min(s, cap): a boundary-pinned state
+  (s ~ 35, `_clean_state`), whose features are all ~0 without the cap, gets the
+  features of the same direction at s = cap; states inside the cap are untouched."""
+  dims, curvs = [3, 3], [-1.0, -0.5]
+  torch.manual_seed(2)
+  u = torch.randn(2, 3, 2, 3, dtype=torch.float64)
+  u = u / u.norm(dim=-1, keepdim=True)
+  R = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+
+  def state(s):
+    return (R[:, None] * math.tanh(s / 2) * u).flatten(-2)
+
+  capped, plain = _hyla(dims, curvs, 16, radius_cap=5.0), _hyla(dims, curvs, 16)
+  assert torch.allclose(capped(state(35.0)), capped(state(5.0)))
+  assert torch.allclose(capped(state(5.0)), plain(state(5.0)))
+  assert torch.allclose(capped(state(1.0)), plain(state(1.0)))
+  assert plain(state(35.0)).abs().max() < 1e-10
+  assert capped(state(35.0)).norm(dim=-1).min() > 1e-2
+
+
+@needs_gpu
+def test_hyla_concat_state_backbone(monkeypatch):
+  model, _ = _build_model(monkeypatch, [
+    'model.hyla_dim=32', 'model.hyla_concat_state=true', 'model.hyla_radius_cap=5.0'])
+  assert model.backbone.in_proj.in_features == 12 + 32
+  assert model.backbone.hyla.radius_cap == 5.0
+  loss, _ = model.nll(_tokens(model, 2, 8), None, None)
+  assert torch.isfinite(loss).all()

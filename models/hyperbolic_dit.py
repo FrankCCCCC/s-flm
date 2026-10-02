@@ -7,12 +7,94 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import utils
+from numeric.geo_bridge import GeoUtils
 from .dit import (
   DDiTBlock,
   DDiTFinalLayer,
   TimestepEmbedder,
   Rotary,
 )
+
+
+class HyLaFeatures(nn.Module):
+  """Random Laplacian features (HyLa, Yu & De Sa, ICLR 2023) of the HBFM state.
+
+  Maps the Cartesian bridge state ([B, L, sum(d_i)], one Poincaré-ball point
+  per product factor) once into `num_features` Euclidean features whose inner
+  products estimate an isometry-invariant kernel, so the Euclidean DiT after
+  it sees the geometry through the kernel instead of the raw ball
+  coordinates. Per factor, `num_features / num_factors` boundary points
+  omega ~ Unif(S^{d-1}), eigenvalue parameters lambda ~ N(0, scale^2) and
+  phases b ~ Unif[0, 2 pi) are drawn once from `seed` (buffers, so a
+  checkpoint restores them and every DDP rank holds the same draw). The
+  feature of the factor's dimensionless polar state (s = rho / R, u) is
+
+      HyLa(z) = exp((d - 1) / 2 <omega, z>_H) cos(lambda <omega, z>_H + b)
+
+  divided by sqrt(num_features), with `<omega, z>_H = -log(cosh s - sinh s
+  <u, omega>)` the signed hyperbolic distance from the origin to the
+  horocycle through z at omega: the paper's log((1 - |w|^2) / |w - omega|^2)
+  for the unit-ball image w = z / R, i.e. minus the Busemann term of
+  `numeric.horosphere`. Each feature is an eigenfunction of its factor's
+  Laplace-Beltrami operator (eigenvalue -(lambda^2 + (d-1)^2/4) |K|), and the
+  paper's kernel identity holds per factor, so the concatenation's inner
+  product estimates the mean of the factors' isometry-invariant kernels.
+  Curvature enters only through s, as in the horosphere readout.
+
+  `radius_cap` evaluates the map at min(s, radius_cap): with a finite number
+  of features the eigenfunctions are all ~0 past s ~ 6 (their e^{(d-1)P/2}
+  envelope is a Poisson kernel, sparse near the boundary), so a state pinned
+  at the boundary (`HyperbolicBoundaryFM._clean_state`, s ~ 35) or a bridge
+  state far out at sampling time would be invisible to the trunk; the cap is
+  a finite pin radius, at which the direction still identifies the word.
+  """
+
+  def __init__(self, prod_factor_dim, prod_factor_gaussian_curvature,
+               num_features, scale, seed, radius_cap=None):
+    super().__init__()
+    if len(set(prod_factor_dim)) != 1:
+      raise ValueError(
+        f'HyLa needs one shared factor dimension; got {prod_factor_dim}.')
+    num_factors, factor_dim = len(prod_factor_dim), prod_factor_dim[0]
+    if num_features % num_factors != 0:
+      raise ValueError(f'model.hyla_dim={num_features} must be a multiple of '
+                       f'the number of product factors ({num_factors}).')
+    self.prod_factor_dim = prod_factor_dim
+    self.prod_factor_gaussian_curvature = prod_factor_gaussian_curvature
+    self.num_features = num_features
+    self.radius_cap = radius_cap
+    per_factor = num_features // num_factors
+    gen = torch.Generator().manual_seed(seed)
+    omegas = torch.randn(num_factors, per_factor, factor_dim,
+                         generator=gen, dtype=torch.float64)
+    self.register_buffer(
+      'omegas', omegas / omegas.norm(dim=-1, keepdim=True))
+    self.register_buffer('lambdas', scale * torch.randn(
+      num_factors, per_factor, generator=gen, dtype=torch.float64))
+    self.register_buffer('biases', 2 * math.pi * torch.rand(
+      num_factors, per_factor, generator=gen, dtype=torch.float64))
+    self.register_buffer('kappas', torch.tensor(
+      [1.0 / GeoUtils._curvature_scale(k)
+       for k in prod_factor_gaussian_curvature], dtype=torch.float64),
+      persistent=False)                                   # derived from the config
+
+  def forward(self, z: torch.Tensor) -> torch.Tensor:
+    """[B, L, sum(d_i)] Cartesian state -> [B, L, num_features], float64."""
+    rhos, us = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
+      z.to(torch.float64), self.prod_factor_dim,
+      self.prod_factor_gaussian_curvature)
+    us = us.unflatten(-1, self.omegas.shape[:1] + self.omegas.shape[-1:])
+    ss = (rhos * self.kappas).unsqueeze(-1)                     # (B, L, m, 1)
+    if self.radius_cap is not None:
+      ss = ss.clamp_max(self.radius_cap)
+    dot = torch.einsum('blmd,mkd->blmk', us, self.omegas)       # (B, L, m, k)
+    # <omega, z>_H = -log(cosh s - sinh s <u, omega>), e^{s} pulled out of the
+    # log so it never overflows; <u, omega> = 0 at the origin gives 0.
+    horo = -(ss + ((1 - dot) / 2 + (1 + dot) / 2 * (-2 * ss).exp())
+             .clamp_min(torch.finfo(torch.float64).tiny).log())
+    feats = ((self.omegas.shape[-1] - 1) / 2 * horo).exp() * torch.cos(
+      self.lambdas * horo + self.biases) / math.sqrt(self.num_features)
+    return feats.flatten(-2)
 
 
 class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
@@ -57,7 +139,23 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     else:
       raise ValueError(self.init_mode)
 
-    self.in_proj = nn.Linear(embed_dim, dim) if embed_dim != dim else None
+    # Random Laplacian features of the state (`HyLaFeatures`): the trunk then
+    # consumes `hyla_dim` Euclidean features instead of the Poincaré
+    # coordinates (or, with `hyla_concat_state`, next to them); null keeps the
+    # coordinates.
+    hyla_dim = config.model.get('hyla_dim', None)
+    self.hyla = None
+    self.hyla_concat_state = bool(config.model.get('hyla_concat_state', False))
+    if hyla_dim is not None:
+      self.hyla = HyLaFeatures(
+        *GeoUtils.resolve_prod_factors(
+          config.algo.prod_factor_dim,
+          config.algo.prod_factor_gaussian_curvature, embed_dim),
+        num_features=hyla_dim, scale=config.model.hyla_scale,
+        seed=config.seed, radius_cap=config.model.get('hyla_radius_cap', None))
+    in_dim = embed_dim if self.hyla is None else (
+      hyla_dim + (embed_dim if self.hyla_concat_state else 0))
+    self.in_proj = nn.Linear(in_dim, dim) if in_dim != dim else None
 
     self.self_conditioning = getattr(
       config.algo, 'self_conditioning', False)
@@ -215,9 +313,16 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
               context=None) -> torch.Tensor:
     del x0
 
-    # [B, L, embed_dim], a Poincaré-ball point consumed as-is; the HBFM bridge
-    # state arrives in float64, the trunk runs at the parameters' precision.
-    x = xt.to(self.sphere_embed.weight.dtype)
+    # [B, L, embed_dim], a Poincaré-ball point consumed as-is (or through its
+    # HyLa features); the HBFM bridge state arrives in float64, the trunk runs
+    # at the parameters' precision.
+    if self.hyla is None:
+      x = xt
+    else:
+      x = self.hyla(xt)
+      if self.hyla_concat_state:
+        x = torch.cat([xt.to(x.dtype), x], dim=-1)
+    x = x.to(self.sphere_embed.weight.dtype)
     if self.in_proj is not None:
       x = self.in_proj(x)
     lf = context if hasattr(context, 'z_sc') else None
