@@ -190,3 +190,4 @@ multirun/
 *.out
 *.npz
 experiments/*/logs/
+outputs_old/
