@@ -34,6 +34,7 @@ HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # true: coordinates + HyLa fea
 EMBED_DIM="${EMBED_DIM:-96}"              # manifold dim; null = DiT hidden size
 FACTOR_DIM="${FACTOR_DIM:-3}"             # H^FACTOR_DIM factors, EMBED_DIM/FACTOR_DIM of them
 GAUSS_CURV="${GAUSS_CURV:--1.0}"          # Gaussian curvature K < 0 of every factor
+CURV_BOUND="${CURV_BOUND:-1.0}"           # adaptive curvature: position i runs at lambda_i * K, lambda_i in [1 / CURV_BOUND, CURV_BOUND] predicted by the DiT (algo.curvature_bound); 1.0 = off
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-5}"     # exp rate in unit-model time (see below)
 READOUT_PRECISION="${READOUT_PRECISION:-float64}"  # float64 / float32 (see configs/algo/hbfm.yaml)
 FORWARD_TYPE="${FORWARD_TYPE:-naive}"     # naive: plain logits / horosphere: residual on the Busemann log-densities
@@ -43,6 +44,19 @@ KEEP_EVERY="${KEEP_EVERY:-5000}"          # persistent keep-{step}.ckpt every N 
 UNIT_T_MAX="${UNIT_T_MAX:-2}"             # sampler horizon in unit time (as scripts/sample/tinystories/hbfm.sh)
 PROPOSAL_RATE="${PROPOSAL_RATE:-$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")}"  # physical algo.time_exp_rate
 T_MAX="${T_MAX:-$(python -c "print(${UNIT_T_MAX} / abs(${GAUSS_CURV}))")}"   # physical sampler.t_max; trunc_exp / unif require T_MAX <= TIME_RANGE_UPPER_BOUND (validated at init)
+
+# keep-{step}.ckpt every KEEP_EVERY steps, never deleted: a second ModelCheckpoint next to the rolling one.
+KEEP_ARGS=()
+if [ "${KEEP_EVERY}" -gt 0 ]; then
+  KEEP_ARGS=(
+    +callbacks.keep_every_n_steps._target_=lightning.pytorch.callbacks.ModelCheckpoint
+    +callbacks.keep_every_n_steps.dirpath="${OUTPUT_DIR}/checkpoints"
+    "+callbacks.keep_every_n_steps.filename='keep-{step}'"
+    +callbacks.keep_every_n_steps.every_n_train_steps=${KEEP_EVERY}
+    +callbacks.keep_every_n_steps.save_top_k=-1
+    +callbacks.keep_every_n_steps.auto_insert_metric_name=False
+  )
+fi
 
 cd "${REPO_ROOT}"
 python -u -m main \
@@ -60,6 +74,7 @@ python -u -m main \
     algo=hbfm \
     algo.prod_factor_dim=${FACTOR_DIM} \
     algo.prod_factor_gaussian_curvature=${GAUSS_CURV} \
+    algo.curvature_bound=${CURV_BOUND} \
     algo.time_exp_rate=${PROPOSAL_RATE} \
     algo.time_conversion_mode=${TIME_CONVERSION_MODE} \
     algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND} \
@@ -72,7 +87,7 @@ python -u -m main \
     loader.global_batch_size=${GLOBAL_BATCH} \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \
-    loader.num_workers=8 \
+    loader.num_workers=${NUM_WORKERS:-8} \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \
@@ -82,6 +97,7 @@ python -u -m main \
     trainer.num_sanity_val_steps=0 \
     callbacks.checkpoint_every_n_steps.every_n_train_steps=${CKPT_EVERY} \
     callbacks.checkpoint_every_n_steps.save_top_k=${SAVE_TOPK:-1} \
+    "${KEEP_ARGS[@]}" \
     wandb.project=tinystories-flm \
     wandb.group="${WANDB_GROUP}" \
     +wandb.name="${RUN_NAME}" \

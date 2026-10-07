@@ -16,6 +16,7 @@ EMBED_DIM="${EMBED_DIM:-96}"            # manifold dim; null = DiT hidden size
 FACTOR_DIM="${FACTOR_DIM:-3}"           # H^FACTOR_DIM factors, EMBED_DIM/FACTOR_DIM of them
 PROD_FACTOR_DIM="${PROD_FACTOR_DIM:-${FACTOR_DIM}}"   # hydra value of algo.prod_factor_dim: an int (equal split) or a list like [3,3,3]
 PROD_FACTOR_CURV="${PROD_FACTOR_CURV:-${GAUSS_CURV}}" # hydra value of algo.prod_factor_gaussian_curvature: a float or a list; GAUSS_CURV stays the scalar |K| used for the unit-time conversions
+CURV_BOUND="${CURV_BOUND:-1.0}"         # adaptive curvature: position i runs at lambda_i * K, lambda_i in [1 / CURV_BOUND, CURV_BOUND] predicted by the DiT (algo.curvature_bound); 1.0 = off
 INIT="${INIT:-ngpt}"
 HYLA_DIM="${HYLA_DIM:-null}"           # random Laplacian features (HyLa) of the state fed to the DiT: total feature dim, a multiple of the factor count; null = feed the Poincaré coordinates
 HYLA_SCALE="${HYLA_SCALE:-1.0}"        # std of the HyLa eigenvalue draw (the paper's s); unused when HYLA_DIM=null
@@ -57,6 +58,7 @@ python -u -m main \
     algo=hbfm \
     algo.prod_factor_dim="${PROD_FACTOR_DIM}" \
     algo.prod_factor_gaussian_curvature="${PROD_FACTOR_CURV}" \
+    algo.curvature_bound=${CURV_BOUND} \
     algo.time_exp_rate=${PROPOSAL_RATE} \
     algo.time_conversion_mode=${TIME_CONVERSION_MODE} \
     algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND} \

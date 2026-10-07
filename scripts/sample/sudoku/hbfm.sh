@@ -15,6 +15,7 @@ EMBED_DIM="${EMBED_DIM:-96}"
 FACTOR_DIM="${FACTOR_DIM:-3}"
 PROD_FACTOR_DIM="${PROD_FACTOR_DIM:-${FACTOR_DIM}}"   # hydra value of algo.prod_factor_dim: an int (equal split) or a list like [3,3,3]
 PROD_FACTOR_CURV="${PROD_FACTOR_CURV:-${GAUSS_CURV}}" # hydra value of algo.prod_factor_gaussian_curvature: a float or a list; GAUSS_CURV stays the scalar |K| used for the unit-time conversions
+CURV_BOUND="${CURV_BOUND:-1.0}"         # adaptive curvature bound (algo.curvature_bound); must match training, it adds an output channel
 INIT="${INIT:-ngpt}"
 HYLA_DIM="${HYLA_DIM:-null}"           # HyLa feature dim; must match training (null = off)
 HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # must match training
@@ -60,6 +61,7 @@ python -u -m main \
     algo=hbfm \
     algo.prod_factor_dim="${PROD_FACTOR_DIM}" \
     algo.prod_factor_gaussian_curvature="${PROD_FACTOR_CURV}" \
+    algo.curvature_bound=${CURV_BOUND} \
     algo.time_exp_rate=${PROPOSAL_RATE} \
     algo.time_conversion_mode=${TIME_CONVERSION_MODE} \
     algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND} \
