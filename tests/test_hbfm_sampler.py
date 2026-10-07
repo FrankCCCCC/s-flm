@@ -109,6 +109,7 @@ class _OracleModel:
                                    'time_exp_rate': 1.0, 'time_conversion_mode': 'exp',
                                    'time_range_upper_bound': 1.0})()})()
     self.invert_time_convention = False
+    self.curvature_bound = 1.0
     self.log_prior = log_prior
     self._readout = self._Readout(self.word_embedding, dims, curvs)
 

@@ -1229,8 +1229,9 @@ class HyperbolicHeatKernel(GeoUtils):
             d (`int`): hyperbolic dimension `>= 2`.
             seq_len (`int`): samples per heat time.
             exact_d3 (`bool`, *optional*, defaults to `False`): for `d == 3` only,
-                invert the closed-form CDF instead of the quadrature grid. Exact
-                and free of the `_radial_t_max` ceiling.
+                draw from the closed form (`_sample_radial_exact_d3`) instead of
+                the quadrature grid. Exact, free of the `_radial_t_max` ceiling,
+                and differentiable in `ts`.
             gaussian_curvature (`float`, *optional*, defaults to `-1.0`):
                 Gaussian (sectional) curvature `K < 0`, setting the model radius
                 `R = 1/sqrt(|K|)`. `rho` is intrinsic (a geodesic distance), so it
@@ -1296,17 +1297,17 @@ class HyperbolicHeatKernel(GeoUtils):
             torch.special.ndtr(a) - torch.special.ndtr(-b) + (pdf_b - pdf_a) / st
         ).clamp(0.0, 1.0)
 
-    _EXACT_D3_BISECT: int = 48
-
     @staticmethod
     def _sample_radial_exact_d3(ts: torch.FloatTensor, seq_len: int) -> torch.FloatTensor:
-        """Exact `H^3` radial sampler: inverse of `_radial_cdf_exact_d3` by bisection.
+        """Exact, reparameterized `H^3` radial sampler: `rho = ||sqrt(t) g + t e_1||`,
+        `g ~ N(0, I_3)`.
 
-        No quadrature and no grid, so unlike `radial_cdf` it has no
-        `_radial_t_max` ceiling -- the marginal is never formed in linear space.
-        The bracket `[0, t + 14 sqrt(t)]` holds both regimes (`rho ~ sqrt(t)
-        chi_3` as `t -> 0`, `rho ~ N(t, t)` as `t -> inf`), and 48 halvings take
-        it to ~1e-14 of it, below float64's reach on `rho`.
+        The norm of a 3-dim Brownian motion with unit drift has density
+        `rho [phi_+(rho) - phi_-(rho)] / t`, the marginal of
+        `_radial_cdf_exact_d3`. No quadrature and no grid, so unlike `radial_cdf`
+        it has no `_radial_t_max` ceiling, and `rho` is a deterministic function
+        of `(t, g)`: gradients flow to `ts` (the adaptive-curvature clock of
+        `algo.HyperbolicBoundaryFM.q_xt`).
 
         Args:
             ts (`torch.FloatTensor` of shape `(batch_size,)`): heat times `> 0`.
@@ -1316,15 +1317,10 @@ class HyperbolicHeatKernel(GeoUtils):
             `torch.FloatTensor` of shape `(batch_size, seq_len)`: radial samples `>= 0`.
         """
         tcol = ts.unsqueeze(-1)
-        u = torch.rand(ts.shape[0], seq_len, dtype=ts.dtype, device=ts.device)
-        lo = torch.zeros_like(u)
-        hi = (tcol + 14.0 * tcol.sqrt()).expand_as(u).contiguous()
-        for _ in range(HyperbolicHeatKernel._EXACT_D3_BISECT):
-            mid = 0.5 * (lo + hi)
-            below = HyperbolicHeatKernel._radial_cdf_exact_d3(mid, tcol) < u
-            lo = torch.where(below, mid, lo)
-            hi = torch.where(below, hi, mid)
-        return 0.5 * (lo + hi)
+        g = torch.randn(ts.shape[0], seq_len, 3, dtype=ts.dtype, device=ts.device)
+        return torch.sqrt(
+            (tcol.sqrt() * g[..., 0] + tcol).square()
+            + tcol * (g[..., 1].square() + g[..., 2].square()))
 
     @staticmethod
     def radial_cdf(ts: torch.FloatTensor, d: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1632,6 +1628,7 @@ class HyperbolicHeatKernel(GeoUtils):
         output_coord: Optional[str] = None,
         prod_factor_dim: Optional[List[int]] = None,
         prod_factor_gaussian_curvature: Optional[List[float]] = None,
+        exact_d3: bool = False,
     ):
         """Sample the product-manifold bridge endpoint conditioned on a target embedding.
 
@@ -1659,6 +1656,9 @@ class HyperbolicHeatKernel(GeoUtils):
                 Curvature `K_i < 0` of each factor; same length as `prod_factor_dim`.
                 Both lists default together to the single factor `[embedding_size]` at
                 `[-1.0]`, which reproduces [`poincare_bridge`]; passing only one raises.
+            exact_d3 (`bool`, *optional*, defaults to `False`):
+                Closed-form radial sampler for the `d_i == 3` factors
+                ([`sample_radial`]): differentiable in `ts`.
 
         Returns:
             HYPERBOLIC_POLAR: tuple `(rhos, u)` of shapes
@@ -1697,7 +1697,7 @@ class HyperbolicHeatKernel(GeoUtils):
             x_i = x[..., offset:offset + factor_dim]
             offset += factor_dim
             x_i = x_i / x_i.norm(dim=-1, keepdim=True).clamp_min(tiny)
-            rho_i = HyperbolicHeatKernel.sample_radial(ts, factor_dim, seq_len, factor_curv)
+            rho_i = HyperbolicHeatKernel.sample_radial(ts, factor_dim, seq_len, factor_curv, exact_d3)
             u_i = HyperbolicHeatKernel._angular_boost(rho_i, factor_dim, factor_curv)
             rhos.append(rho_i)
             us.append(HyperbolicHeatKernel._reflect_to_target(u_i, x_i))

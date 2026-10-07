@@ -850,12 +850,20 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
   integral of the denoising CE. `self.noise` supplies alpha_t only, and
   since the posterior does not depend on t the backbone is not
   time-conditioned by default (`algo.time_conditioning`).
+
+  Adaptive curvature (`algo.curvature_bound` > 1,
+  experiments/hbfm_rlf_ada_curv/math.md): position i runs at curvature
+  lambda_i * K, i.e. the same bridge on its own clock lambda_i * t, with
+  lambda_i read off the backbone's curvature readout (`curvature_scale`). Its
+  CE is weighted by lambda_i, which leaves the mean of the loss unchanged, and
+  lambda is trained to minimize the variance of the loss.
   """
 
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
     self.renormalize_weights = config.algo.renormalize_weights
     self.invert_time_convention = config.algo.invert_time_convention
+    self.curvature_bound = config.algo.curvature_bound
     self.prod_factor_dim, self.prod_factor_gaussian_curvature = (
       self._resolve_prod_factors(config.algo, self.backbone.embed_dim))
     # sample_radial forms the heat-kernel marginal in linear float64, which
@@ -893,6 +901,9 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     if self.config.algo.time_exp_rate <= 0:
       raise ValueError('time_exp_rate must be > 0, got '
                        f'{self.config.algo.time_exp_rate}.')
+    if self.curvature_bound < 1:
+      raise ValueError('curvature_bound must be >= 1 (1 = fixed curvature), '
+                       f'got {self.curvature_bound}.')
     mode = self.config.algo.time_conversion_mode
     if mode in ('unif', 'trunc_exp'):
       upper = self.config.algo.time_range_upper_bound
@@ -912,6 +923,21 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
   def model_forward(self, z, t):
     # HyperbolicModelBase's trunk hook.
     return self.backbone(None, z, t, None)
+
+  def curvature_scale(self, xt):
+    """Adaptive curvature K_i = lambda_i * K of every position: lambda
+    ([B, L], in [1 / curvature_bound, curvature_bound]) from the backbone's
+    curvature readout at the t = 0 state `xt` (every bridge at the origin, the
+    prompt pinned at the clean end) -- what the forward bridge and the sampler
+    both know along the whole path."""
+    sigma = torch.zeros(xt.shape[0], device=xt.device)
+    with torch.amp.autocast('cuda', dtype=torch.float32):
+      raw = self.backbone.curvature(xt, sigma)
+    # Read on the scale of one hidden unit (the sum over the D units over
+    # sqrt(D)): a plain sum would move log lambda by O(lr * D) per optimizer
+    # step and chase the sign of every batch's noisy gradient.
+    raw = raw.to(torch.float64) / self.config.model.hidden_size ** 0.5
+    return self.curvature_bound ** torch.tanh(raw)
 
   def _process_model_output(self, model_output, xt, sigma,
                             context=None):
@@ -996,13 +1022,17 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     return GeoUtils.hyperbolic_polar_to_poincare_cartesian_prod(
       rhos, thetas, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
 
-  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
+  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None,
+           curvature=None):
     """Bridge state at the heat time of `alpha_t` ([B, 1], one per sequence)
     and its importance weight: `(xt, weight)` with `xt` the per-factor
     Poincaré-ball points concatenated, [B, L, sum(d_m)] float64 (the
     `Coordinate.CARTESIAN` output of `poincare_bridge_prod`), and the weight
     [B, 1]. Positions with `valid_tokens == 0` (the sudoku prompt) are pinned
-    at the clean end of the bridge.
+    at the clean end of the bridge. With `curvature` ([B, L],
+    `curvature_scale`) position i is drawn at its own heat time
+    curvature_i * t and the weight is [B, L], weight * curvature_i: the
+    importance weight of that clock.
     """
     if use_pure_noise:
       raise NotImplementedError('HyperbolicBoundaryFM does not support pure-noise training.')
@@ -1013,14 +1043,21 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       exp_rate=self.config.algo.time_exp_rate,
       range_upper_bound=self.config.algo.time_range_upper_bound
     )
+    targets = x
+    if curvature is not None:
+      # One heat time per position: [B * L] times of one-token sequences.
+      infinite_timestep = infinite_timestep * curvature
+      weight = weight * curvature
+      targets = x.reshape(-1, 1)
     xt = HyperbolicHeatKernel.poincare_bridge_prod(
       ts=infinite_timestep.reshape(-1).clamp_max(self.max_heat_time),
-      targets=x,
+      targets=targets,
       word_embedding=self.word_embedding,
       output_coord=Coordinate.CARTESIAN,
       prod_factor_dim=self.prod_factor_dim,
       prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
-    )
+      exact_d3=curvature is not None,
+    ).reshape(*x.shape, -1)
 
     if valid_tokens is not None:
       xt = torch.where(valid_tokens.bool().unsqueeze(-1),
@@ -1060,9 +1097,16 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     alpha_t = alpha_t.unsqueeze(-1)
     dalpha_t = dalpha_t.unsqueeze(-1)
 
+    curvature = None
+    if self.curvature_bound > 1:
+      # The t = 0 state: every bridge at the origin, the prompt pinned clean.
+      prompt = (torch.zeros_like(x0) if valid_tokens is None
+                else valid_tokens == 0)
+      curvature = self.curvature_scale(
+        self._clean_state(x0) * prompt.unsqueeze(-1))
     xt, weight = self.q_xt(
       x0, alpha_t, use_pure_noise=use_pure_noise,
-      valid_tokens=valid_tokens)
+      valid_tokens=valid_tokens, curvature=curvature)
     # Consider t \sim U([0, 1]), p(t) = U([0, 1]), with parametrized time u = - \log t / exp_rate
     # according to change of variable, p(u) = p(t) * |dt/du| = 1 * exp_rate * exp(-exp_rate * u) = exp_rate * t.
     # Furthermore, consider p(t) is not uniform, then, p(u) = p(t) * |dt/du| = p(t) * exp_rate * exp(-exp_rate * u) = p(t) * exp_rate * t.
@@ -1080,6 +1124,19 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       alpha_t=alpha_t, dalpha_t=dalpha_t,
       low_var=train_mode and self.loss_type == 'low_var',
       context=context, train_mode=train_mode, weight=weight)
+    if curvature is not None and curvature.requires_grad:
+      # The curvature leaves the mean of the loss unchanged, so it is trained
+      # on the variance (VDM App. I.2): d E[loss_b^2] = E[2 loss_b d loss_b],
+      # loss_b the sequence's own token-mean loss. Everything else still
+      # receives d loss. The 1 / sqrt(D) keeps this heavy-tailed gradient
+      # below the gradient-clip threshold of the rest of the model; the
+      # optimizer (Adam) is invariant to its scale.
+      valid = (torch.ones_like(loss) if valid_tokens is None
+               else valid_tokens)
+      seq_loss = ((loss * valid).sum(-1, keepdim=True)
+                  / valid.sum(-1, keepdim=True).clamp(min=1)).detach()
+      scale = 2 / self.config.model.hidden_size ** 0.5
+      curvature.register_hook(lambda grad: scale * seq_loss * grad)
     return loss, t
 
 

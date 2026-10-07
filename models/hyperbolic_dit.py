@@ -191,6 +191,12 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       out_channels=out_channels,
       cond_dim=cond_dim,
       adaLN=self.adaLN)
+    # HBFM adaptive curvature: a second readout of the trunk, one curvature
+    # per position (`curvature`). Zero-init like the logits, so training
+    # starts at the base curvature; read at t = 0 only, so not conditioned.
+    if config.algo.get('curvature_bound', 1.0) > 1:
+      self.curvature_layer = DDiTFinalLayer(
+        hidden_size=dim, out_channels=1, cond_dim=cond_dim, adaLN=False)
 
     # Required by TrainerBase.ctx_cached_len property.
     self.ctx_cached_len = 0
@@ -309,10 +315,9 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
   def reset_kv_cache(self):
     self.ctx_cached_len = 0
 
-  def forward(self, x0, xt: torch.Tensor, sigma: torch.Tensor,
-              context=None) -> torch.Tensor:
-    del x0
-
+  def hidden(self, xt: torch.Tensor, sigma: torch.Tensor, context=None):
+    """The trunk: state -> ([B, L, hidden] features, conditioning) of the
+    output layers."""
     # [B, L, embed_dim], a Poincaré-ball point consumed as-is (or through its
     # HyLa features); the HBFM bridge state arrives in float64, the trunk runs
     # at the parameters' precision.
@@ -341,6 +346,13 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     with torch.amp.autocast('cuda', dtype=torch.bfloat16):
       for block in self.blocks:
         x = block(x, rotary_cos_sin, c=t_cond)
+    return x, t_cond
+
+  def forward(self, x0, xt: torch.Tensor, sigma: torch.Tensor,
+              context=None) -> torch.Tensor:
+    del x0
+    x, t_cond = self.hidden(xt, sigma, context)
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
       x = self.output_layer(x, c=t_cond)
       if self.out_temperature_scaling:
         pre_temperature = x[:, :, [-1]]
@@ -348,3 +360,20 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
         t = 1 + self.eps + torch.tanh(pre_temperature) * (1 - self.eps) 
         x = x / t
     return x
+
+  def curvature(self, xt: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+    """HBFM adaptive curvature: one raw curvature per position, [B, L]. The
+    trunk is not trained through it: the curvature's gradient is the variance
+    of the loss, not the loss (`algo.HyperbolicBoundaryFM.nll`). The trunk is
+    read without dropout, so training runs the clock the sampler reads."""
+    training = self.training
+    self.eval()
+    with torch.no_grad():
+      x, _ = self.hidden(xt, sigma)
+    self.train(training)
+    # The no-grad pass cached detached autocast copies of the trunk's weights;
+    # drop them, or the loss forward that follows would reuse them and train
+    # nothing.
+    torch.clear_autocast_cache()
+    with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+      return self.curvature_layer(x, c=None)[..., 0]

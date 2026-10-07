@@ -758,6 +758,7 @@ class HBFMState(BaseState):
   prefix_lengths: torch.Tensor = None  # [B]
   prefix_tokens: torch.Tensor = None   # [B, P]
   prefix_embeds: torch.Tensor = None   # [B, P, E] clean (boundary) states of the prefix
+  curvature: torch.Tensor = None       # [B, L] adaptive curvature scale of every position; None = the base curvature
 
 
 class HBFMSampler(Sampler):
@@ -778,7 +779,11 @@ class HBFMSampler(Sampler):
   are followed by an Euler-Maruyama update and the last decodes the posterior
   at t_max - dt (argmax / a sample). dt sets the discretization bias of the
   decoded law, so t_max and steps are coupled (see configs/sampler/hbfm.yaml).
-  Prompt positions are pinned at the clean boundary state throughout.
+  Prompt positions are pinned at the clean boundary state throughout. With
+  adaptive curvature (`algo.curvature_bound` > 1) position i runs at curvature
+  lambda_i * K, which is the same SDE on its own clock: its step is
+  lambda_i * dt, lambda read once at the initial state
+  (`model.curvature_scale`, experiments/hbfm_rlf_ada_curv/math.md).
   """
   def __init__(self, noise_removal, velocity, use_float64, temperature,
                p_nucleus, top_k, top_k_velocity, t_max):
@@ -810,6 +815,9 @@ class HBFMSampler(Sampler):
       start_idx = int(prefix_lengths.min())
     else:
       start_idx = 0
+    curvature = None
+    if model.curvature_bound > 1:
+      curvature = model.curvature_scale(xt)
 
     if num_steps is None:
       num_steps = model.config.sampler.steps
@@ -818,7 +826,7 @@ class HBFMSampler(Sampler):
     return HBFMState(xt=xt, t_schedule=t_schedule, boundary=boundary,
       start_idx=start_idx, step_idx=0, nfe=0, done=False,
       prefix_lengths=prefix_lengths, prefix_tokens=prefix_tokens,
-      prefix_embeds=prefix_embeds)
+      prefix_embeds=prefix_embeds, curvature=curvature)
 
   def _last_step_decode(self, state, log_p):
     if self.noise_removal == 'greedy':
@@ -847,7 +855,7 @@ class HBFMSampler(Sampler):
         (a per-position candidate set) or [..., E] (one endpoint per position).
       probs: posterior weights matching `endpoints`, [..., V] or [..., k], or
         None for one endpoint per position.
-      dt: scalar heat-time step.
+      dt: heat-time step, a scalar or [..., 1] (one clock per position).
     """
     tiny = torch.finfo(z.dtype).tiny
     one_minus_eps = 1.0 - torch.finfo(z.dtype).eps
@@ -925,6 +933,8 @@ class HBFMSampler(Sampler):
       raise ValueError(self.velocity)
 
     dt = state.t_schedule[state.step_idx + 1] - state.t_schedule[state.step_idx]
+    if state.curvature is not None:
+      dt = dt * state.curvature[:, state.start_idx:, None]
     state.xt[:, state.start_idx:] = self.euler_maruyama_step(
       state.xt[:, state.start_idx:], endpoints, probs, dt,
       model.prod_factor_dim, model.prod_factor_gaussian_curvature)
