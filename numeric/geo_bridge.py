@@ -1315,6 +1315,8 @@ class HyperbolicHeatKernel(GeoUtils):
 
         Returns:
             `torch.FloatTensor` of shape `(batch_size, seq_len)`: radial samples `>= 0`.
+
+        NOTE: Compare with exact D3 at other branches, I remember the implementation should be different
         """
         tcol = ts.unsqueeze(-1)
         g = torch.randn(ts.shape[0], seq_len, 3, dtype=ts.dtype, device=ts.device)

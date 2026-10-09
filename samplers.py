@@ -786,7 +786,7 @@ class HBFMSampler(Sampler):
   (`model.curvature_scale`, experiments/hbfm_rlf_ada_curv/math.md).
   """
   def __init__(self, noise_removal, velocity, use_float64, temperature,
-               p_nucleus, top_k, top_k_velocity, t_max):
+               p_nucleus, top_k, top_k_velocity, t_max, step_type):
     self.noise_removal = noise_removal
     self.velocity = velocity
     self.use_float64 = use_float64
@@ -795,6 +795,7 @@ class HBFMSampler(Sampler):
     self.top_k = top_k
     self.top_k_velocity = top_k_velocity
     self.t_max = t_max
+    self.step_type = step_type
 
   def init_state(self, model, num_samples, *,
                  num_steps=None, eps=1e-5, prefix_tokens=None,
@@ -844,6 +845,25 @@ class HBFMSampler(Sampler):
     return state
 
   @staticmethod
+  def get_alpha_t_sigma_t(model, state):
+    # The schedule's alpha_t at this heat time (time_conversion inverted), for
+    # a time-conditioned backbone; zeroed by _process_sigma otherwise.
+    B = state.xt.shape[0]
+    t = state.t_schedule[state.step_idx]
+    mode = model.config.algo.time_conversion_mode
+    rate = model.config.algo.time_exp_rate
+    if mode == 'unif':
+      u = 1.0 - t / model.config.algo.time_range_upper_bound
+    elif mode == 'trunc_exp':
+      u = 1.0 - torch.expm1(-rate * t) / torch.expm1(
+        t.new_tensor(-rate * model.config.algo.time_range_upper_bound))
+    else:
+      u = torch.exp(-rate * t)
+    alpha_t = u if model.invert_time_convention else 1.0 - u
+    sigma_t = model._sigma_from_alphat(alpha_t.clamp_min(1e-12)).expand(B, 1)
+    return alpha_t, sigma_t
+
+  @staticmethod
   def euler_maruyama_step(z, endpoints, probs, dt, prod_factor_dim,
                           prod_factor_gaussian_curvature):
     """One Euler-Maruyama step of the bridge SDE on every factor.
@@ -887,25 +907,44 @@ class HBFMSampler(Sampler):
       out.append(R * w)
     return torch.cat(out, dim=-1)
 
+  @staticmethod
+  def sde_step(z, endpoints, probs, dt, prod_factor_dim,
+               prod_factor_gaussian_curvature, gt_method):
+    """One Euler-Maruyama step of the bridge SDE on every factor with customized noise gt_method.
+
+    Args:
+      z: [..., E] Poincaré-Cartesian state (float64).
+      endpoints: unit boundary directions of the candidate words, per factor
+        concatenated: [V, E] (posterior over the whole vocabulary), [..., k, E]
+        (a per-position candidate set) or [..., E] (one endpoint per position).
+      probs: posterior weights matching `endpoints`, [..., V] or [..., k], or
+        None for one endpoint per position.
+      dt: heat-time step, a scalar or [..., 1] (one clock per position).
+    """
+    #TODO: Implement the SDE step of the bridge SDE on every factor with customized noise gt_method.
+
+  @staticmethod
+  def ode_step(z, endpoints, probs, dt, prod_factor_dim,
+               prod_factor_gaussian_curvature):
+    """One deterministic step of the bridge SDE on every factor.
+
+    Args:
+      z: [..., E] Poincaré-Cartesian state (float64).
+      endpoints: unit boundary directions of the candidate words, per factor
+        concatenated: [V, E] (posterior over the whole vocabulary), [..., k, E]
+        (a per-position candidate set) or [..., E] (one endpoint per position).
+      probs: posterior weights matching `endpoints`, [..., V] or [..., k], or
+        None for one endpoint per position.
+      dt: heat-time step, a scalar or [..., 1] (one clock per position).
+    """
+    #TODO: Implement the deterministic step of the bridge SDE on every factor.
+
   def step(self, model, state):
     num_steps = len(state.t_schedule) - 1
     is_last_step = (state.step_idx == num_steps - 1)
     B = state.xt.shape[0]
 
-    # The schedule's alpha_t at this heat time (time_conversion inverted), for
-    # a time-conditioned backbone; zeroed by _process_sigma otherwise.
-    t = state.t_schedule[state.step_idx]
-    mode = model.config.algo.time_conversion_mode
-    rate = model.config.algo.time_exp_rate
-    if mode == 'unif':
-      u = 1.0 - t / model.config.algo.time_range_upper_bound
-    elif mode == 'trunc_exp':
-      u = 1.0 - torch.expm1(-rate * t) / torch.expm1(
-        t.new_tensor(-rate * model.config.algo.time_range_upper_bound))
-    else:
-      u = torch.exp(-rate * t)
-    alpha_t = u if model.invert_time_convention else 1.0 - u
-    sigma_t = model._sigma_from_alphat(alpha_t.clamp_min(1e-12)).expand(B, 1)
+    alpha_t, sigma_t = self.get_alpha_t_sigma_t(model, state)
 
     context = SFMContext(temperature=self.temperature, z_sc=None)
     log_p = model.forward(xt=state.xt, sigma=sigma_t, context=context)
@@ -935,9 +974,19 @@ class HBFMSampler(Sampler):
     dt = state.t_schedule[state.step_idx + 1] - state.t_schedule[state.step_idx]
     if state.curvature is not None:
       dt = dt * state.curvature[:, state.start_idx:, None]
+    # TODO: Implement 3 types of step types: 'em', 'sde', 'ode'
+    if self.step_type == 'em':
     state.xt[:, state.start_idx:] = self.euler_maruyama_step(
       state.xt[:, state.start_idx:], endpoints, probs, dt,
       model.prod_factor_dim, model.prod_factor_gaussian_curvature)
+    elif self.step_type == 'sde':
+      state.xt[:, state.start_idx:] = self.sde_step(
+        state.xt[:, state.start_idx:], endpoints, probs, dt,
+        model.prod_factor_dim, model.prod_factor_gaussian_curvature)
+    elif self.step_type == 'ode':
+      state.xt[:, state.start_idx:] = self.ode_step(
+        state.xt[:, state.start_idx:], endpoints, probs, dt,
+        model.prod_factor_dim, model.prod_factor_gaussian_curvature)
     self._project_prefix(
       state.xt, state.prefix_embeds, state.prefix_lengths)
     state.step_idx += 1
