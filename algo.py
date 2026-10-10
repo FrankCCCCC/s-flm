@@ -434,20 +434,49 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       self.backbone.renormalize_weights()
     return out
 
-  def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
-                    low_var=False, context=None, train_mode=False):
-    del xt, low_var, context
-
+  @staticmethod
+  def ce_loss(log_x_theta, x0):
     ce_loss = -log_x_theta.gather(
       -1, x0.unsqueeze(-1)).squeeze(-1)
-
-    if self.snr_weighted_ce:
-      # Variational bound: the CE stands in for the ||x - x_hat||^2 of VDM
-      # Eq. 16, weighted by -SNR'(t)/2 (t ~ U(0, 1) is the MC estimator).
-      ce_loss = snr_weight(alpha_t, dalpha_t, self.invert_time_convention,
-                           self.eps) * ce_loss
-
     return ce_loss
+  
+  @staticmethod
+  def diffusion_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
+                            weight, low_var=False, context=None, train_mode=False):
+    #TODO: Implement the diffusion loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
+    # refer to slides/oct07_2026/slides.md, Plaid (papers/Likelihood-Based Diffusion Language Models.pdf), and RePlaid (papers/LangFlow Continuous Diffusion Rivals Discrete in Language Modeling.pdf)
+    pass
+
+  @staticmethod
+  def prior_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
+                            weight, low_var=False, context=None, train_mode=False):
+    #TODO: Implement the prior loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
+    # refer to slides/oct07_2026/slides.md, Plaid (papers/Likelihood-Based Diffusion Language Models.pdf), and RePlaid (papers/LangFlow Continuous Diffusion Rivals Discrete in Language Modeling.pdf)
+    pass
+
+  @staticmethod
+  def elbo_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
+                weight, low_var=False, context=None, train_mode=False):
+    #TODO: Implement the ELBO loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
+    return self.ce_loss(log_x_theta, x0) + 
+
+  def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
+                    weight, low_var=False, context=None, train_mode=False, loss_type="elbo"):
+    del xt, alpha_t, dalpha_t, low_var, context
+    # TODO: Check if the implementation is correct, remember to provide an option algo.loss_type for user to choose the loss type
+    if loss_type == "elbo":
+      return self.elbo_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
+                            weight, low_var=low_var, context=context, train_mode=train_mode)
+    elif loss_type == "ce":
+      ce_loss = self.ce_loss(log_x_theta, x0)
+      if self.snr_weighted_ce:
+        # Variational bound: the CE stands in for the ||x - x_hat||^2 of VDM
+        # Eq. 16, weighted by -SNR'(t)/2 (t ~ U(0, 1) is the MC estimator).
+        ce_loss = snr_weight(alpha_t, dalpha_t, self.invert_time_convention,
+                            self.eps) * ce_loss
+      return ce_loss
+    else:
+      raise ValueError(f"Unsupported loss_type: {loss_type}")
 
   def _lerp(self, clean, noisy, alpha_t):
     # alpha_t = 0 -> clean, alpha_t = 1 -> noisy
@@ -1070,17 +1099,46 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       self.backbone.renormalize_weights()
     return out
 
-  def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
-                    weight, low_var=False, context=None, train_mode=False):
-    del xt, alpha_t, dalpha_t, low_var, context
-
+  @staticmethod
+  def ce_loss(log_x_theta, x0):
     ce_loss = -log_x_theta.gather(
       -1, x0.unsqueeze(-1)).squeeze(-1)
+    return ce_loss
 
-    if weight is not None:
-      return ce_loss * weight
+  @staticmethod
+  def angular_diffusion_loss(log_x_theta, x0):
+    #TODO: Implement the angular path KL loss, consider the bayes optimal, 
+    # refer to slides/oct07_2026/slides.md, Plaid (papers/Likelihood-Based Diffusion Language Models.pdf), and RePlaid (papers/LangFlow Continuous Diffusion Rivals Discrete in Language Modeling.pdf)
+    pass
+  
+  @staticmethod
+  def radial_diffusion_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
+                            weight, low_var=False, context=None, train_mode=False):
+    #TODO: Implement the radial path KL loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
+    # refer to slides/oct07_2026/slides.md, Plaid (papers/Likelihood-Based Diffusion Language Models.pdf), and RePlaid (papers/LangFlow Continuous Diffusion Rivals Discrete in Language Modeling.pdf)
+    pass
+
+  @staticmethod
+  def elbo_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
+                weight, low_var=False, context=None, train_mode=False):
+    #TODO: Implement the ELBO loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
+    return self.ce_loss(log_x_theta, x0) + 
+
+  def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
+                    weight, low_var=False, context=None, train_mode=False, loss_type="elbo"):
+    del xt, alpha_t, dalpha_t, low_var, context
+    # TODO: Check if the implementation is correct, remember to provide an option algo.loss_type for user to choose the loss type
+    if loss_type == "elbo":
+      return self.elbo_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
+                            weight, low_var=low_var, context=context, train_mode=train_mode)
+    elif loss_type == "ce":
+      ce_loss = self.ce_loss(log_x_theta, x0)
+      if weight is not None:
+        return ce_loss * weight
+      else:
+        return ce_loss
     else:
-      return ce_loss
+      raise ValueError(f"Unsupported loss_type: {loss_type}")
 
   def nll(self, x0, output_tokens, context,
           current_accumulation_step=None, train_mode=False,
