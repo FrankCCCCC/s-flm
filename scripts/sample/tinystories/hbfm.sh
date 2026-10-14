@@ -17,6 +17,8 @@ STEPS="${STEPS:-180}"
 VELOCITY="${VELOCITY:-exact}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"       # -1 = posterior-mean drift over the whole vocabulary
 NOISE_REMOVAL="${NOISE_REMOVAL:-greedy}"
+STEP_TYPE="${STEP_TYPE:-em}"             # em: Euler-Maruyama / ode: probability-flow ODE / sde: diffusion scaled by g(t / t_max) (GT_METHOD)
+GT_METHOD="${GT_METHOD:-linear}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}"   # false: GenPPL pass only
 MODEL="${MODEL:-small-hyperbolic-dit}"
@@ -68,6 +70,8 @@ MARGS=(
     sampler.steps=${STEPS}
     sampler.t_max=${T_MAX}
     sampler.noise_removal=${NOISE_REMOVAL}
+    sampler.step_type=${STEP_TYPE}
+    sampler.gt_method=${GT_METHOD}
 )
 
 # (1) validation perplexity (the importance-weighted denoising bound)

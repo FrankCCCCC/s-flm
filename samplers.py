@@ -786,7 +786,8 @@ class HBFMSampler(Sampler):
   (`model.curvature_scale`, experiments/hbfm_rlf_ada_curv/math.md).
   """
   def __init__(self, noise_removal, velocity, use_float64, temperature,
-               p_nucleus, top_k, top_k_velocity, t_max, step_type):
+               p_nucleus, top_k, top_k_velocity, t_max, step_type='em',
+               gt_method=GT_Method.LINEAR):
     self.noise_removal = noise_removal
     self.velocity = velocity
     self.use_float64 = use_float64
@@ -796,6 +797,7 @@ class HBFMSampler(Sampler):
     self.top_k_velocity = top_k_velocity
     self.t_max = t_max
     self.step_type = step_type
+    self.gt_method = gt_method
 
   def init_state(self, model, num_samples, *,
                  num_steps=None, eps=1e-5, prefix_tokens=None,
@@ -908,36 +910,83 @@ class HBFMSampler(Sampler):
     return torch.cat(out, dim=-1)
 
   @staticmethod
-  def sde_step(z, endpoints, probs, dt, prod_factor_dim,
-               prod_factor_gaussian_curvature, gt_method):
-    """One Euler-Maruyama step of the bridge SDE on every factor with customized noise gt_method.
+  def sde_step(z, endpoints, probs, t, dt, gamma, prod_factor_dim,
+               prod_factor_gaussian_curvature):
+    """One step of the marginal-preserving family of the bridge SDE on every
+    factor, its diffusion scaled by gamma.
+
+    With b the bridge drift, D = (kappa g2 / 2)^2 I its diffusion matrix
+    (g2 = 1 - |w|^2) and p_t the marginal of the learned bridge, every SDE
+
+        dw = [b - (1 - gamma^2) / 2 (div D + D grad log p_t)] dt + gamma sqrt(D) dW
+
+    has the marginals p_t (the Fokker-Planck argument of
+    experiments/eflm_sde/derivation.md sec. 6): gamma = 1 is
+    `euler_maruyama_step`, gamma = 0 the probability-flow ODE. The score is
+    the posterior pull the drift already carries plus the free heat kernel's,
+    grad log p_t = sum_v p(v | z_t) grad log P(., e_v) + grad log p_t^free; on
+    H^3 the latter is radial, d/drho log p^free = 1/rho - coth rho - rho/tau
+    (tau = kappa^2 t), and singular at the origin, so its -rho/tau piece is
+    integrated exactly (rho -> rho (1 + dt/t)^{(1 - gamma^2) / 2}, the sqrt(t)
+    expansion of the free kernel) and the rest by Euler.
 
     Args:
-      z: [..., E] Poincaré-Cartesian state (float64).
-      endpoints: unit boundary directions of the candidate words, per factor
-        concatenated: [V, E] (posterior over the whole vocabulary), [..., k, E]
-        (a per-position candidate set) or [..., E] (one endpoint per position).
-      probs: posterior weights matching `endpoints`, [..., V] or [..., k], or
-        None for one endpoint per position.
-      dt: heat-time step, a scalar or [..., 1] (one clock per position).
+      z, endpoints, probs: as in `euler_maruyama_step`.
+      t: heat time of the state, a scalar or [..., 1] (one clock per position).
+      dt: heat-time step, the shape of `t`.
+      gamma: diffusion scale in [0, 1] (float).
     """
-    #TODO: Implement the SDE step of the bridge SDE on every factor with customized noise gt_method.
+    tiny = torch.finfo(z.dtype).tiny
+    one_minus_eps = 1.0 - torch.finfo(z.dtype).eps
+    ode_weight = 1.0 - gamma ** 2
+    out = []
+    for z_m, e_m, K in zip(z.split(prod_factor_dim, dim=-1),
+                           endpoints.split(prod_factor_dim, dim=-1),
+                           prod_factor_gaussian_curvature):
+      d = z_m.shape[-1]
+      R = GeoUtils._curvature_scale(K)
+      kappa = 1.0 / R
+      w = z_m / R  # unit ball
+      if ode_weight > 0.0:
+        if d != 3:
+          raise NotImplementedError(
+            f'the free heat-kernel score is closed-form on H^3 only; got H^{d}')
+        norm = w.norm(dim=-1, keepdim=True)
+        direction = w / norm.clamp_min(tiny)
+        rho = 2.0 * torch.atanh(norm) * (1.0 + dt / t.clamp_min(tiny)) ** (ode_weight / 2)
+        w = torch.tanh(rho / 2) * direction
+      if probs is None:
+        diff = e_m - w
+        expectation = diff / diff.square().sum(-1, keepdim=True).clamp_min(tiny)
+      else:
+        diff = e_m - w.unsqueeze(-2)                       # [..., V|k, d]
+        sq = diff.square().sum(-1, keepdim=True).clamp_min(tiny)
+        expectation = (probs.unsqueeze(-1) * diff / sq).sum(-2)
+      g2 = 1.0 - w.square().sum(-1, keepdim=True)
+      drift = kappa ** 2 * (
+        (d - 1) * (1.0 + gamma ** 2) / 4 * g2.square() * expectation
+        - (d - 1 + gamma ** 2) / 4 * g2 * w)
+      if ode_weight > 0.0:
+        # The regular part of the free score, 1/rho - coth rho = -rho/3 + O(rho^3).
+        regular = torch.where(rho < 1e-3, -rho / 3,
+                              1.0 / rho.clamp_min(tiny) - 1.0 / torch.tanh(rho))
+        drift = drift - kappa ** 2 * ode_weight * g2 / 4 * regular * direction
+      w = w + drift * dt
+      if gamma > 0.0:
+        w = w + gamma * kappa * g2 / 2 * torch.randn_like(w) * dt.sqrt()
+      # Stay strictly inside the ball, at the forward map's own cap.
+      norm = w.norm(dim=-1, keepdim=True)
+      w = w * (one_minus_eps / norm).clamp(max=1.0)
+      out.append(R * w)
+    return torch.cat(out, dim=-1)
 
   @staticmethod
-  def ode_step(z, endpoints, probs, dt, prod_factor_dim,
+  def ode_step(z, endpoints, probs, t, dt, prod_factor_dim,
                prod_factor_gaussian_curvature):
-    """One deterministic step of the bridge SDE on every factor.
-
-    Args:
-      z: [..., E] Poincaré-Cartesian state (float64).
-      endpoints: unit boundary directions of the candidate words, per factor
-        concatenated: [V, E] (posterior over the whole vocabulary), [..., k, E]
-        (a per-position candidate set) or [..., E] (one endpoint per position).
-      probs: posterior weights matching `endpoints`, [..., V] or [..., k], or
-        None for one endpoint per position.
-      dt: heat-time step, a scalar or [..., 1] (one clock per position).
-    """
-    #TODO: Implement the deterministic step of the bridge SDE on every factor.
+    """One step of the probability-flow ODE of the bridge SDE on every factor:
+    `sde_step` at gamma = 0, deterministic with the SDE's marginals."""
+    return HBFMSampler.sde_step(z, endpoints, probs, t, dt, 0.0,
+                                prod_factor_dim, prod_factor_gaussian_curvature)
 
   def step(self, model, state):
     num_steps = len(state.t_schedule) - 1
@@ -971,22 +1020,26 @@ class HBFMSampler(Sampler):
     else:
       raise ValueError(self.velocity)
 
-    dt = state.t_schedule[state.step_idx + 1] - state.t_schedule[state.step_idx]
+    t = state.t_schedule[state.step_idx]
+    dt = state.t_schedule[state.step_idx + 1] - t
     if state.curvature is not None:
+      t = t * state.curvature[:, state.start_idx:, None]
       dt = dt * state.curvature[:, state.start_idx:, None]
-    # TODO: Implement 3 types of step types: 'em', 'sde', 'ode'
-    if self.step_type == 'em':
-    state.xt[:, state.start_idx:] = self.euler_maruyama_step(
-      state.xt[:, state.start_idx:], endpoints, probs, dt,
-      model.prod_factor_dim, model.prod_factor_gaussian_curvature)
-    elif self.step_type == 'sde':
-      state.xt[:, state.start_idx:] = self.sde_step(
-        state.xt[:, state.start_idx:], endpoints, probs, dt,
-        model.prod_factor_dim, model.prod_factor_gaussian_curvature)
+    args = (state.xt[:, state.start_idx:], endpoints, probs)
+    factors = (model.prod_factor_dim, model.prod_factor_gaussian_curvature)
+    if self.step_type == 'em' or state.step_idx == 0:
+      # The origin is a point mass that only the noise spreads: every step
+      # type starts with an Euler-Maruyama step (g(0) = 1 for the sde family).
+      z = self.euler_maruyama_step(*args, dt, *factors)
     elif self.step_type == 'ode':
-      state.xt[:, state.start_idx:] = self.ode_step(
-        state.xt[:, state.start_idx:], endpoints, probs, dt,
-        model.prod_factor_dim, model.prod_factor_gaussian_curvature)
+      z = self.ode_step(*args, t, dt, *factors)
+    elif self.step_type == 'sde':
+      gamma = float(get_gscheduler(self.gt_method).g_t(
+        state.t_schedule[state.step_idx] / self.t_max))
+      z = self.sde_step(*args, t, dt, gamma, *factors)
+    else:
+      raise ValueError(self.step_type)
+    state.xt[:, state.start_idx:] = z
     self._project_prefix(
       state.xt, state.prefix_embeds, state.prefix_lengths)
     state.step_idx += 1
@@ -1990,7 +2043,8 @@ def get_sampler(config):
     return HBFMSampler(noise_removal=s.noise_removal,
       velocity=s.velocity, use_float64=s.use_float64,
       temperature=s.temperature, p_nucleus=s.p_nucleus, top_k=s.top_k,
-      top_k_velocity=s.top_k_velocity, t_max=s.t_max)
+      top_k_velocity=s.top_k_velocity, t_max=s.t_max,
+      step_type=s.step_type, gt_method=s.gt_method)
 
   if s.predictor == 'flm_euler':
     return FLMEulerSampler(
