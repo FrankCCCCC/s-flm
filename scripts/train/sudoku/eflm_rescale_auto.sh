@@ -23,8 +23,11 @@ if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=t
 RHO="${RHO:-1.0}"                    # fixed embedding norm R (rho_min = rho_max = RHO)
 TAU_MAX="${TAU_MAX:-3.0}"            # autonomous-clock horizon (noise floor exp(-TAU_MAX))
 SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM variational bound)
+LOSS_TYPE="${LOSS_TYPE:-ce}"         # ce: denoising CE / elbo: the VDM NELBO (-SNR'(t)/2 ||e - E_p[e]||^2 + reconstruction CE + prior KL; algo.loss_type)
 MAX_STEPS="${MAX_STEPS:-20000}"
 CKPT_EVERY="${CKPT_EVERY:-5000}"
+PER_GPU_BS="${PER_GPU_BS:-256}"
+GLOBAL_BATCH="${GLOBAL_BATCH:-256}"
 
 cd "${REPO_ROOT}"
 
@@ -41,12 +44,13 @@ python -u -m main \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
     algo.snr_weighted_ce="${SNR_CE}" \
+    algo.loss_type="${LOSS_TYPE}" \
     noise=autonomous \
     noise.tau_max="${TAU_MAX}" \
-    loader.global_batch_size=256 \
-    loader.batch_size=256 \
-    loader.eval_batch_size=256 \
-    loader.num_workers=8 \
+    loader.global_batch_size=${GLOBAL_BATCH} \
+    loader.batch_size=${PER_GPU_BS} \
+    loader.eval_batch_size=${PER_GPU_BS} \
+    loader.num_workers=${NUM_WORKERS:-8} \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \

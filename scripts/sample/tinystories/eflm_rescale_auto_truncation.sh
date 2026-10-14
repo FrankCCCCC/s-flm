@@ -20,12 +20,17 @@ RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match traini
 ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257, embed_norm=RHO); null = no truncation
 SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM Eq. 16)
 TAU_MAX="${TAU_MAX:-1.834}"          # autonomous horizon; must match training
+NOISE="${NOISE:-autonomous}"         # noise config: autonomous | autonomous-adaptive | log-linear | log-linear-adaptive; must match training
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 ETA="${ETA:-0.0}"                    # SDE noise scale; 0 = deterministic ODE
 GT_METHOD="${GT_METHOD:-linear}"     # SDE g(t): const / sqrt / linear / quad
 TEMPERATURE="${TEMPERATURE:-1.0}"
 NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
 RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}" # false: GenPPL pass only
+LOSS_TYPE="${LOSS_TYPE:-ce}"           # objective of the ppl_eval pass (algo.loss_type): elbo = the NELBO, ce = the denoising CE bound it trained on
+PPL_JSON="${PPL_JSON:-${OUTPUT_DIR}/ppl.json}"   # where the ppl_eval metrics go
+SEED="${SEED:-1}"                      # seed of the ppl_eval pass (the (t, noise) draws)
+RUN_SAMPLE_EVAL="${RUN_SAMPLE_EVAL:-true}"   # false: ppl_eval pass only
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -41,8 +46,8 @@ MARGS=(
     algo.rho_max=${RHO}
     noise.alpha_max=${ALPHA_MAX}
     algo.snr_weighted_ce=${SNR_CE}
-    noise=autonomous
-    noise.tau_max=${TAU_MAX}
+    algo.loss_type=${LOSS_TYPE}
+    noise=${NOISE}
     sampler=eflm
     sampler.velocity=${VELOCITY}
     sampler.top_k_velocity=${TOPK_VELOCITY}
@@ -51,6 +56,7 @@ MARGS=(
     sampler.gt_method=${GT_METHOD}
     sampler.noise_removal=greedy
 )
+case "${NOISE}" in autonomous*) MARGS+=(noise.tau_max=${TAU_MAX});; esac   # the horizon exists on the autonomous clocks only
 
 # (1) validation perplexity
 if [ "${RUN_PPL_EVAL}" = "true" ]; then
@@ -63,7 +69,9 @@ python -u -m main \
     "${MARGS[@]}" \
     eval.checkpoint_path="${CKPT_PATH}" \
     eval.strict_loading=false \
-    eval.results_json_path="${OUTPUT_DIR}/ppl.json" \
+    eval.results_json_path="${PPL_JSON}" \
+    seed=${SEED} \
+    eval.generate_samples=False \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
     trainer.num_nodes=1 \
@@ -73,6 +81,7 @@ python -u -m main \
 fi
 
 # (2) generative perplexity + samples
+if [ "${RUN_SAMPLE_EVAL}" = "true" ]; then
 python -u -m main \
     mode=sample_eval \
     data=tinystories \
@@ -92,3 +101,4 @@ python -u -m main \
     trainer.devices="${DEVICES}" \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}/sample"
+fi

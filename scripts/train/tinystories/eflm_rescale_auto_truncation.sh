@@ -25,11 +25,14 @@ ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257, embed_norm=RHO
 SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM Eq. 16)
 TAU_MAX="${TAU_MAX:-1.834}"         # autonomous horizon; tau*(R)=-log(1-alpha*(R)) truncates at the decode point
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
+LOSS_TYPE="${LOSS_TYPE:-ce}"         # ce: denoising CE / elbo: the VDM NELBO (algo.loss_type)
+NOISE="${NOISE:-autonomous}"         # noise config: autonomous | autonomous-adaptive | log-linear | log-linear-adaptive (TAU_MAX applies to the autonomous clocks)
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
 if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
 
 cd "${REPO_ROOT}"
+case "${NOISE}" in autonomous*) TAU_ARGS=(noise.tau_max=${TAU_MAX});; *) TAU_ARGS=();; esac   # the horizon exists on the autonomous clocks only
 python -u -m main \
     seed=${SEED:-1} \
     data=tinystories \
@@ -44,14 +47,15 @@ python -u -m main \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
     algo.snr_weighted_ce="${SNR_CE}" \
-    noise=autonomous \
-    noise.tau_max=${TAU_MAX} \
+    algo.loss_type="${LOSS_TYPE}" \
+    noise=${NOISE} \
+    "${TAU_ARGS[@]}" \
     noise.alpha_max=${ALPHA_MAX} \
     optim.lr=${LR} \
     loader.global_batch_size=512 \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \
-    loader.num_workers=8 \
+    loader.num_workers=${NUM_WORKERS:-8} \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \
