@@ -786,7 +786,7 @@ class HBFMSampler(Sampler):
   (`model.curvature_scale`, experiments/hbfm_rlf_ada_curv/math.md).
   """
   def __init__(self, noise_removal, velocity, use_float64, temperature,
-               p_nucleus, top_k, top_k_velocity, t_max, step_type):
+               p_nucleus, top_k, top_k_velocity, t_max, step_type='em'):
     self.noise_removal = noise_removal
     self.velocity = velocity
     self.use_float64 = use_float64
@@ -976,9 +976,9 @@ class HBFMSampler(Sampler):
       dt = dt * state.curvature[:, state.start_idx:, None]
     # TODO: Implement 3 types of step types: 'em', 'sde', 'ode'
     if self.step_type == 'em':
-    state.xt[:, state.start_idx:] = self.euler_maruyama_step(
-      state.xt[:, state.start_idx:], endpoints, probs, dt,
-      model.prod_factor_dim, model.prod_factor_gaussian_curvature)
+      state.xt[:, state.start_idx:] = self.euler_maruyama_step(
+        state.xt[:, state.start_idx:], endpoints, probs, dt,
+        model.prod_factor_dim, model.prod_factor_gaussian_curvature)
     elif self.step_type == 'sde':
       state.xt[:, state.start_idx:] = self.sde_step(
         state.xt[:, state.start_idx:], endpoints, probs, dt,
@@ -1990,7 +1990,8 @@ def get_sampler(config):
     return HBFMSampler(noise_removal=s.noise_removal,
       velocity=s.velocity, use_float64=s.use_float64,
       temperature=s.temperature, p_nucleus=s.p_nucleus, top_k=s.top_k,
-      top_k_velocity=s.top_k_velocity, t_max=s.t_max)
+      top_k_velocity=s.top_k_velocity, t_max=s.t_max,
+      step_type=s.get('step_type', 'em'))
 
   if s.predictor == 'flm_euler':
     return FLMEulerSampler(

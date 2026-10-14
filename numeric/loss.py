@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Union
 
 import torch
+import torch.utils.checkpoint
 
 from numeric.geo_bridge import GeoUtils, HyperbolicHeatKernel
 
@@ -795,34 +796,54 @@ class Loss:
         mu = probs - torch.nn.functional.one_hot(targets,V).to(torch.float64)
         tiny = torch.finfo(torch.float64).tiny
 
-        loss, offset = 0.0, 0
-        for i, (factor_dim, factor_curvature) in enumerate(zip(dims, curvatures)):
-            theta_m = thetas[:, :, offset:offset + factor_dim]
-            phis_m = phis[:, offset:offset + factor_dim]
-            offset += factor_dim
-            kappa = 1.0 / GeoUtils._curvature_scale(factor_curvature)
-            # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps:
-            # exp_pos below overflows past u ~ 710 (Invariant 4).
-            us = (kappa * rhos[:, :, i]).clamp_max(HyperBridge.RHO_MAX)
-            # Per-factor sphere S^{d_m-1}: horosphere_geometry re-normalizes the
-            # block, and its `rhos` argument is exactly this dimensionless u.
-            phis_m, sin_half_sq, cos_half_sq, _ = HyperBridge.horosphere_geometry(
-                rhos=us, thetas=theta_m, vocab_size=V, word_embedding=phis_m,
-            )
-            # Transport each word's boundary direction into the frame at z, as in
-            # bridge_loss_poincare_disk_polar. The e^{+-u} split is what keeps it
-            # cancellation-free (Invariant 5); the result is a unit vector.
+        # Transport each word's boundary direction into the frame at z, as in
+        # bridge_loss_poincare_disk_polar. The e^{+-u} split is what keeps it
+        # cancellation-free (Invariant 5); w_v is a unit vector:
+        #     w_v = (radial_v theta + phi_v - <theta, phi_v> theta) / D_v,
+        # with the unit phi_v (`_vocab_angles` normalizes the block) and unit
+        # theta_m, sin^2(angle/2) = (1 - <theta, phi_v>) / 2 and
+        # cos^2 = (1 + <theta, phi_v>) / 2 (horosphere_geometry's identities). So
+        #     sum_v mu_v w_v = theta * sum_v mu_v (radial_v - <theta, phi_v>) / D_v
+        #                      + (mu / D) @ phi,
+        # which takes (B, L, V) tensors and one matmul; the explicit per-word
+        # vectors w_v are (B, L, V, d_m), 1.2 GB per factor at V = 50k words,
+        # 4 x 256 tokens. The factors are recomputed in the backward pass
+        # (activation checkpointing), so the peak is one factor's tensors.
+        def factor_sq_error(theta_m, us, mu, phis_m):
+            inners = theta_m @ phis_m.T                                 # (B, L, V) <theta_m, phi_v>
+            sin_half_sq = (1.0 - inners) / 2
+            cos_half_sq = (1.0 + inners) / 2
             exp_pos = us[..., None].exp()
             exp_neg = (-us[..., None]).exp()
             radial_parts = cos_half_sq * exp_neg - sin_half_sq * exp_pos
             denoms = (sin_half_sq * exp_pos + cos_half_sq * exp_neg).clamp_min(tiny)
-            inners = cos_half_sq - sin_half_sq  # <theta_m, phi_v>
-            perps = phis_m[None, :, :] - inners[..., None] * theta_m[..., None, :]
-            ws = (radial_parts[..., None] * theta_m[..., None, :] + perps) / denoms[..., None]
+            coefs = mu / denoms
+            along_theta = (coefs * (radial_parts - inners)).sum(-1)      # (B, L)
+            errors = along_theta[..., None] * theta_m + coefs @ phis_m   # (B, L, d_m) = sum_v mu_v w_v
+            return errors.square().sum(-1)
+
+        loss, offset = 0.0, 0
+        for i, (factor_dim, factor_curvature) in enumerate(zip(dims, curvatures)):
+            theta_m = thetas[:, :, offset:offset + factor_dim]
+            # Per-factor sphere S^{d_m-1}: the block of the boundary table is
+            # re-normalized (a slice of a unit row is not unit).
+            phis_m = HyperBridge._vocab_angles(
+                vocab_size=V, emb_dim=factor_dim, device=thetas.device, dtype=torch.float64,
+                word_embedding=phis[:, offset:offset + factor_dim],
+            )
+            offset += factor_dim
+            kappa = 1.0 / GeoUtils._curvature_scale(factor_curvature)
+            # u = kappa*rho is the dimensionless radius, and what RHO_MAX caps:
+            # exp_pos overflows past u ~ 710 (Invariant 4).
+            us = (kappa * rhos[:, :, i]).clamp_max(HyperBridge.RHO_MAX)
+            if torch.is_grad_enabled():
+                sq_err = torch.utils.checkpoint.checkpoint(
+                    factor_sq_error, theta_m, us, mu, phis_m, use_reentrant=False)
+            else:
+                sq_err = factor_sq_error(theta_m, us, mu, phis_m)
             # Bridge drift toward word v is (d_m-1) kappa_m w_v, so the Girsanov
             # integrand is (d_m-1)^2 kappa_m^2 / 2 ||sum_v mu_v w_v||^2.
-            errors = (mu[..., None] * ws).sum(-2)
-            loss = loss + (factor_dim - 1) ** 2 * kappa ** 2 * errors.square().sum(-1) / 2
+            loss = loss + (factor_dim - 1) ** 2 * kappa ** 2 * sq_err / 2
         return loss
 
     """

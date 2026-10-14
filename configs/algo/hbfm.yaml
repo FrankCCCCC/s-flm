@@ -3,7 +3,7 @@ diffusion_type: hyperbolic    # label only; reuses the trainer_base.Diffusion pa
 backbone: hyperbolic-dit
 parameterization: mean
 time_conditioning: False      # the bridge posterior q(y | z_s) does not depend on the heat time
-loss_type: ce
+loss_type: ce  # ce: importance-weighted denoising CE / elbo: the NELBO -- importance-weighted path-KL rate (radial + angular) + reconstruction CE at the horizon (experiments/elfm_hbfm_ada_curv_elbo_sudoku/math.md)
 T: 0
 causal_attention: False
 adaLN: True

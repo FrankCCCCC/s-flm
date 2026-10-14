@@ -15,7 +15,7 @@ from numeric.geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, BinaryHyperbolicHeatKernel,
   Coordinate, Geometry)
 from numeric.horosphere import HorosphereGeometry
-from numeric.loss import HyperBridge
+from numeric.loss import HyperBridge, Loss
 
 
 class AR(trainer_base.TrainerBase):
@@ -403,6 +403,9 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     if backbone_type == 'sphere-arch' and not self.renormalize_weights:
       raise ValueError('Backbone sphere-arch requires '
                        'algo.renormalize_weights=True.')
+    if self.loss_type not in ('ce', 'elbo'):
+      raise ValueError(f'EFLM requires algo.loss_type in (ce, elbo), got '
+                       f'{self.loss_type}.')
 
   def _process_model_output(self, model_output, xt, sigma,
                             context=None):
@@ -434,40 +437,13 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       self.backbone.renormalize_weights()
     return out
 
-  @staticmethod
-  def ce_loss(log_x_theta, x0):
-    ce_loss = -log_x_theta.gather(
-      -1, x0.unsqueeze(-1)).squeeze(-1)
-    return ce_loss
-  
-  @staticmethod
-  def diffusion_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
-                            weight, low_var=False, context=None, train_mode=False):
-    #TODO: Implement the diffusion loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
-    # refer to slides/oct07_2026/slides.md, Plaid (papers/Likelihood-Based Diffusion Language Models.pdf), and RePlaid (papers/LangFlow Continuous Diffusion Rivals Discrete in Language Modeling.pdf)
-    pass
-
-  @staticmethod
-  def prior_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
-                            weight, low_var=False, context=None, train_mode=False):
-    #TODO: Implement the prior loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
-    # refer to slides/oct07_2026/slides.md, Plaid (papers/Likelihood-Based Diffusion Language Models.pdf), and RePlaid (papers/LangFlow Continuous Diffusion Rivals Discrete in Language Modeling.pdf)
-    pass
-
-  @staticmethod
-  def elbo_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
-                weight, low_var=False, context=None, train_mode=False):
-    #TODO: Implement the ELBO loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
-    return self.ce_loss(log_x_theta, x0) + 
-
   def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
-                    weight, low_var=False, context=None, train_mode=False, loss_type="elbo"):
-    del xt, alpha_t, dalpha_t, low_var, context
-    # TODO: Check if the implementation is correct, remember to provide an option algo.loss_type for user to choose the loss type
-    if loss_type == "elbo":
-      return self.elbo_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
-                            weight, low_var=low_var, context=context, train_mode=train_mode)
-    elif loss_type == "ce":
+                    low_var=False, context=None, train_mode=False,
+                    valid_tokens=None):
+    del xt, low_var, context, train_mode
+    if self.loss_type == 'elbo':
+      return self.elbo_loss(log_x_theta, x0, alpha_t, dalpha_t, valid_tokens)
+    elif self.loss_type == 'ce':
       ce_loss = self.ce_loss(log_x_theta, x0)
       if self.snr_weighted_ce:
         # Variational bound: the CE stands in for the ||x - x_hat||^2 of VDM
@@ -476,7 +452,60 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
                             self.eps) * ce_loss
       return ce_loss
     else:
-      raise ValueError(f"Unsupported loss_type: {loss_type}")
+      raise ValueError(f"Unsupported loss type: {self.loss_type}")
+
+  def diffusion_loss(self, log_x_theta, x0, alpha_t, dalpha_t):
+    """Diffusion term of the NELBO per token (VDM Eq. 17, Plaid Eq. 5):
+    -SNR'(t)/2 ||e_x0 - x_hat||^2 with Plaid's categorical reparameterization
+    x_hat = sum_v p_theta(v | x_t) e_v (Sec. 3.2). The posterior mean is the
+    Bayes-optimal denoiser, so p_theta = q(v | x_t) minimizes it and makes the
+    bound tight (experiments/elfm_hbfm_ada_curv_elbo_sudoku/math.md)."""
+    with torch.autocast('cuda', enabled=False):  # bf16 would swamp the error
+      table = self._sc_embed_table().float()
+      x_hat = log_x_theta.float().exp() @ table
+      sq_err = (table[x0] - x_hat).square().sum(-1)
+    return snr_weight(alpha_t, dalpha_t, self.invert_time_convention,
+                      self.eps) * sq_err
+
+  def prior_loss(self, x0, alpha_t):
+    b = (alpha_t if self.invert_time_convention else 1.0 - alpha_t).unsqueeze(-1)
+    e = self.backbone.get_rescaled_embeddings(x0, self.rho_min, self.rho_max)
+    ratio = b.square() / self.config.algo.prior_cov
+    prior = 0.5 * (e.shape[-1] * (ratio - 1.0 - ratio.log())
+                   + (1.0 - b).square() * e.square().sum(-1)
+                   / self.config.algo.prior_cov)
+    return prior
+
+  @staticmethod
+  def ce_loss(log_p, x0):
+    return -log_p.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
+
+  def reconstruction_loss(self, x0, alpha_t, valid_tokens):
+    xt = self.q_xt(x0, alpha_t, use_pure_noise=False, valid_tokens=valid_tokens)
+    log_p = self.forward(x0=x0, xt=xt, sigma=self._sigma_from_alphat(alpha_t),
+                         context=None)
+    return self.ce_loss(log_p, x0)
+
+  def endpoint_losses(self, x0, valid_tokens):
+    """The two endpoint terms of the NELBO (VDM Eq. 3, Plaid Eq. 3), [B, L]:
+    the reconstruction CE -log p_theta(x0 | x_t) at the clean end of the
+    trained time range, read from the same categorical readout (Plaid's
+    learned conditional likelihood, Sec. 3.4), and the closed-form prior KL
+    of the noisy end, KL(N((1 - b) e_x0, b^2 I) || N(0, prior_cov I))."""
+    t_clean, t_noisy = ((1.0, self.sampling_eps) if self.invert_time_convention
+                        else (self.sampling_eps, 1.0))
+    t = torch.full((x0.shape[0],), t_clean, device=x0.device)
+    _, alpha_t = self.noise(t)
+    alpha_t = alpha_t.unsqueeze(-1)
+    reconstruction = self.reconstruction_loss(x0, alpha_t, valid_tokens)
+
+    _, alpha_t = self.noise(torch.full_like(t, t_noisy))
+    prior = self.prior_loss(x0, alpha_t)
+    return reconstruction + prior
+
+  def elbo_loss(self, log_x_theta, x0, alpha_t, dalpha_t, valid_tokens):
+    return (self.diffusion_loss(log_x_theta, x0, alpha_t, dalpha_t)
+            + self.endpoint_losses(x0, valid_tokens))
 
   def _lerp(self, clean, noisy, alpha_t):
     # alpha_t = 0 -> clean, alpha_t = 1 -> noisy
@@ -524,7 +553,7 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       log_x_theta=log_x_theta, xt=xt, x0=x0,
       alpha_t=alpha_t, dalpha_t=dalpha_t,
       low_var=train_mode and self.loss_type == 'low_var',
-      context=context, train_mode=train_mode)
+      context=context, train_mode=train_mode, valid_tokens=valid_tokens)
 
     return loss, t
 
@@ -876,7 +905,9 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
   `_process_model_output` adds to the horosphere (Busemann) log-densities of
   z_t's polar coordinates, so `forward` returns the full log-posterior
   (Invariant 1). The loss is the importance-weighted heat-time
-  integral of the denoising CE. `self.noise` supplies alpha_t only, and
+  integral of the denoising CE (`algo.loss_type=ce`) or of the bridge's
+  path-KL rate plus the reconstruction CE at the horizon, the NELBO
+  (`algo.loss_type=elbo`, slides/oct07_2026). `self.noise` supplies alpha_t only, and
   since the posterior does not depend on t the backbone is not
   time-conditioned by default (`algo.time_conditioning`).
 
@@ -933,6 +964,9 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     if self.curvature_bound < 1:
       raise ValueError('curvature_bound must be >= 1 (1 = fixed curvature), '
                        f'got {self.curvature_bound}.')
+    if self.loss_type not in ('ce', 'elbo'):
+      raise ValueError(f'HBFM requires algo.loss_type in (ce, elbo), got '
+                       f'{self.loss_type}.')
     mode = self.config.algo.time_conversion_mode
     if mode in ('unif', 'trunc_exp'):
       upper = self.config.algo.time_range_upper_bound
@@ -1099,46 +1133,68 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       self.backbone.renormalize_weights()
     return out
 
+  def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
+                    weight, low_var=False, context=None, train_mode=False,
+                    valid_tokens=None, curvature=None):
+    del alpha_t, dalpha_t, low_var, train_mode
+    if self.loss_type == 'elbo':
+      return self.elbo_loss(log_x_theta=log_x_theta, xt=xt, x0=x0,
+                            weight=weight, context=context,
+                            valid_tokens=valid_tokens, curvature=curvature)
+    elif self.loss_type == 'ce':
+      loss = self.ce_loss(log_x_theta=log_x_theta, x0=x0)
+      if weight is not None:
+        return loss * weight
+      return loss
+    else:
+      raise ValueError(f"Unsupported loss type: {self.loss_type}")
+
+  def diffusion_loss(self, log_x_theta, xt, x0):
+    """Path-KL rate of the bridge at the state `xt`, the diffusion term of the
+    NELBO once weighted by 1 / q(t) (slides/oct07_2026): per factor,
+    (d - 1)^2 kappa^2 / 2 ||sum_v (p_theta(v) - 1[v = x0]) w_v||^2 with w_v
+    the unit vector toward word v's boundary point seen from xt -- its radial
+    and angular components are the slides' l_rad and l_ang
+    (`Loss.bridge_loss_elbo_refactor`, cancellation-free float64). The Bayes
+    posterior minimizes it and makes the bound tight. `log_x_theta` is the
+    full log-posterior, so no horosphere term is added here (Invariant 1)."""
+    rhos, thetas = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
+      xt, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
+    return Loss.bridge_loss_elbo_refactor(
+      logits=log_x_theta, targets=x0, rhos=rhos, thetas=thetas,
+      word_embedding=self.word_embedding,
+      prod_factor_dim=self.prod_factor_dim,
+      prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature)
+
   @staticmethod
   def ce_loss(log_x_theta, x0):
-    ce_loss = -log_x_theta.gather(
-      -1, x0.unsqueeze(-1)).squeeze(-1)
+    ce_loss = -log_x_theta.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
     return ce_loss
 
-  @staticmethod
-  def angular_diffusion_loss(log_x_theta, x0):
-    #TODO: Implement the angular path KL loss, consider the bayes optimal, 
-    # refer to slides/oct07_2026/slides.md, Plaid (papers/Likelihood-Based Diffusion Language Models.pdf), and RePlaid (papers/LangFlow Continuous Diffusion Rivals Discrete in Language Modeling.pdf)
-    pass
-  
-  @staticmethod
-  def radial_diffusion_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
-                            weight, low_var=False, context=None, train_mode=False):
-    #TODO: Implement the radial path KL loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
-    # refer to slides/oct07_2026/slides.md, Plaid (papers/Likelihood-Based Diffusion Language Models.pdf), and RePlaid (papers/LangFlow Continuous Diffusion Rivals Discrete in Language Modeling.pdf)
-    pass
+  def reconstruction_loss(self, x0, context, valid_tokens, curvature):
+    """-log p_theta(x0 | z_T) at the horizon T of the trained heat-time range
+    (the state at the clean end t of `_sample_t`; under the adaptive
+    curvature position i sits at lambda_i T), the last term of the NELBO. Its
+    prior term is zero: the bridge and the generative SDE both start at the
+    origin."""
+    t_clean = 1.0 if self.invert_time_convention else self.sampling_eps
+    t = torch.full((x0.shape[0],), t_clean, device=x0.device)
+    _, alpha_t = self.noise(t)
+    alpha_t = alpha_t.unsqueeze(-1)
+    xt, _ = self.q_xt(x0, alpha_t, use_pure_noise=False,
+                      valid_tokens=valid_tokens, curvature=curvature)
+    log_p = self.forward(x0=x0, xt=xt, sigma=self._sigma_from_alphat(alpha_t),
+                         context=context)
+    return self.ce_loss(log_p, x0)
 
-  @staticmethod
-  def elbo_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
-                weight, low_var=False, context=None, train_mode=False):
-    #TODO: Implement the ELBO loss, consider the bayes optimal, refer to slides/oct07_2026/slides.md
-    return self.ce_loss(log_x_theta, x0) + 
-
-  def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
-                    weight, low_var=False, context=None, train_mode=False, loss_type="elbo"):
-    del xt, alpha_t, dalpha_t, low_var, context
-    # TODO: Check if the implementation is correct, remember to provide an option algo.loss_type for user to choose the loss type
-    if loss_type == "elbo":
-      return self.elbo_loss(log_x_theta, xt, x0, alpha_t, dalpha_t,
-                            weight, low_var=low_var, context=context, train_mode=train_mode)
-    elif loss_type == "ce":
-      ce_loss = self.ce_loss(log_x_theta, x0)
-      if weight is not None:
-        return ce_loss * weight
-      else:
-        return ce_loss
-    else:
-      raise ValueError(f"Unsupported loss_type: {loss_type}")
+  def elbo_loss(self, log_x_theta, xt, x0, weight, context, valid_tokens,
+                curvature):
+    """NELBO per token: the importance-weighted path-KL rate at the sampled
+    heat time plus the reconstruction CE at the horizon."""
+    return (weight * self.diffusion_loss(log_x_theta=log_x_theta, xt=xt, x0=x0)
+            + self.reconstruction_loss(x0=x0, context=context,
+                                       valid_tokens=valid_tokens,
+                                       curvature=curvature))
 
   def nll(self, x0, output_tokens, context,
           current_accumulation_step=None, train_mode=False,
@@ -1181,7 +1237,8 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       log_x_theta=log_x_theta, xt=xt, x0=x0,
       alpha_t=alpha_t, dalpha_t=dalpha_t,
       low_var=train_mode and self.loss_type == 'low_var',
-      context=context, train_mode=train_mode, weight=weight)
+      context=context, train_mode=train_mode, weight=weight,
+      valid_tokens=valid_tokens, curvature=curvature)
     if curvature is not None and curvature.requires_grad:
       # The curvature leaves the mean of the loss unchanged, so it is trained
       # on the variance (VDM App. I.2): d E[loss_b^2] = E[2 loss_b d loss_b],
