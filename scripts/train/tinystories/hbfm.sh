@@ -38,6 +38,7 @@ CURV_BOUND="${CURV_BOUND:-1.0}"           # adaptive curvature: position i runs 
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-5}"     # exp rate in unit-model time (see below)
 READOUT_PRECISION="${READOUT_PRECISION:-float64}"  # float64 / float32 (see configs/algo/hbfm.yaml)
 FORWARD_TYPE="${FORWARD_TYPE:-naive}"     # naive: plain logits / horosphere: residual on the Busemann log-densities
+LOSS_TYPE="${LOSS_TYPE:-ce}"              # ce: importance-weighted denoising CE / elbo: the NELBO (path-KL rate + reconstruction CE at the horizon)
 TIME_CONVERSION_MODE="${TIME_CONVERSION_MODE:-exp}"        # exp | trunc_exp | unif (algo.time_conversion_mode)
 TIME_RANGE_UPPER_BOUND="${TIME_RANGE_UPPER_BOUND:-1.0}"    # physical heat-time range of trunc_exp / unif (unused by exp)
 KEEP_EVERY="${KEEP_EVERY:-5000}"          # persistent keep-{step}.ckpt every N steps (0 = off); must differ from CKPT_EVERY
@@ -80,6 +81,7 @@ python -u -m main \
     algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND} \
     algo.forward_type=${FORWARD_TYPE} \
     algo.readout_precision=${READOUT_PRECISION} \
+    algo.loss_type=${LOSS_TYPE} \
     sampler=hbfm \
     sampler.t_max=${T_MAX} \
     noise=log-linear \

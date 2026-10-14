@@ -20,11 +20,12 @@ INIT="${INIT:-ngpt}"
 HYLA_DIM="${HYLA_DIM:-null}"           # HyLa feature dim; must match training (null = off)
 HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # must match training
 HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # must match training
-SEED="${SEED:-1}"
+SEED="${SEED:-1}"                      # seed of the ppl_eval pass (the (t, noise) draws) and of the board sampler
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-20}"
 READOUT_PRECISION="${READOUT_PRECISION:-float32}"
 NOISE="${NOISE:-log-linear}"
 FORWARD_TYPE="${FORWARD_TYPE:-horosphere}"  # horosphere: logits are a residual on the Busemann log-densities / naive: plain logits
+LOSS_TYPE="${LOSS_TYPE:-ce}"            # objective of the ppl_eval pass (algo.loss_type): elbo = the NELBO, ce = the importance-weighted denoising CE (not a bound)
 TIME_CONVERSION_MODE="${TIME_CONVERSION_MODE:-exp}"        # must match training
 TIME_RANGE_UPPER_BOUND="${TIME_RANGE_UPPER_BOUND:-1.0}"    # must match training; trunc_exp / unif require T_MAX <= this
 ADA_REFIT_EVERY="${ADA_REFIT_EVERY:-500}"  # AdaptiveSchedule knobs, defaults = configs/noise/log-linear-adaptive.yaml; only passed when NOISE is adaptive. The repo's 50 / 0.9 recipe (hflm_truncated_adaptive.sh) was A/B-tested for HBFM at rate 0.01 and did not help (experiments/claude_test_hbfm_sudoku/RESULTS.md).
@@ -33,8 +34,13 @@ GLOBAL_BATCH="${GLOBAL_BATCH:-256}"         # training global batch: the adaptiv
 UNIT_T_MAX="${UNIT_T_MAX:-0.5}"
 STEPS="${STEPS:-180}"
 VELOCITY="${VELOCITY:-exact}"          # exact (posterior-mean drift = top_k_v -1) / sample
+TOPK_VELOCITY="${TOPK_VELOCITY:--1}"   # exact velocity over the top-k words only (1 = commit to the argmax); -1 = full vocab
+TEMPERATURE="${TEMPERATURE:-1.0}"      # divides the whole log-posterior (residual + horosphere term) at sampling
 NOISE_REMOVAL="${NOISE_REMOVAL:-greedy}"
+RUN_PPL_EVAL="${RUN_PPL_EVAL:-false}"   # true: also one mode=ppl_eval pass (val/nll of LOSS_TYPE in nats per solution token, 2000 boards) -> PPL_JSON
+RUN_SAMPLE_EVAL="${RUN_SAMPLE_EVAL:-true}"   # board accuracy (mode=sudoku_eval); false: ppl_eval pass only
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/eval_runs/sudoku/hbfm_${DIFFICULTY}}"
+PPL_JSON="${PPL_JSON:-${OUTPUT_DIR}/ppl.json}"   # where the ppl_eval metrics go
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
 PROPOSAL_RATE="${PROPOSAL_RATE:-$(python -c "print(${UNIT_PROPOSAL_RATE} * abs(${GAUSS_CURV}))")}"  # physical algo.time_exp_rate
@@ -44,8 +50,8 @@ cd "${REPO_ROOT}"
 ADA_ARGS=""
 case "${NOISE}" in *adaptive*) ADA_ARGS="noise.adaptive_refit_every=${ADA_REFIT_EVERY} noise.adaptive_ema=${ADA_EMA} noise.adaptive_buffer_size=$((50 * GLOBAL_BATCH))";; esac
 
+run_main() {  # $@: the pass-specific overrides (mode, seed, output paths)
 python -u -m main \
-    mode=sudoku_eval \
     eval.checkpoint_path="${CKPT_PATH}" \
     eval.strict_loading=false \
     data=sudoku \
@@ -57,7 +63,6 @@ python -u -m main \
     model.hyla_dim=${HYLA_DIM} \
     model.hyla_radius_cap=${HYLA_RADIUS_CAP} \
     model.hyla_concat_state=${HYLA_CONCAT_STATE} \
-    seed="${SEED}" \
     algo=hbfm \
     algo.prod_factor_dim="${PROD_FACTOR_DIM}" \
     algo.prod_factor_gaussian_curvature="${PROD_FACTOR_CURV}" \
@@ -67,18 +72,34 @@ python -u -m main \
     algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND} \
     algo.readout_precision=${READOUT_PRECISION} \
     algo.forward_type=${FORWARD_TYPE} \
+    algo.loss_type=${LOSS_TYPE} \
     noise=${NOISE} ${ADA_ARGS} \
     sampler=hbfm \
     sampler.noise_removal=${NOISE_REMOVAL} \
     sampler.velocity="${VELOCITY}" \
+    sampler.top_k_velocity="${TOPK_VELOCITY}" \
+    sampler.temperature="${TEMPERATURE}" \
     sampler.steps="${STEPS}" \
     sampler.t_max=${T_MAX} \
     loader.global_batch_size=${GLOBAL_BATCH} \
-    sudoku.batch_size=64 \
     loader.eval_batch_size=64 \
     loader.num_workers=4 \
     trainer.num_nodes="${NUM_NODES}" \
     trainer.devices="${DEVICES}" \
-    sudoku.output_dir="${OUTPUT_DIR}" \
     +wandb.offline=True \
-    hydra.run.dir="${OUTPUT_DIR}"
+    "$@"
+}
+
+# (1) likelihood bound (RUN_PPL_EVAL=true): one ppl_eval pass on the 2000
+# validation boards, one (t, noise) draw per board. To average several passes,
+# call the script once per SEED with its own PPL_JSON (the sweep does).
+if [ "${RUN_PPL_EVAL}" = "true" ]; then
+run_main mode=ppl_eval seed="${SEED}" eval.generate_samples=False \
+    eval.results_json_path="${PPL_JSON}" hydra.run.dir="${OUTPUT_DIR}/ppl"
+fi
+
+# (2) board accuracy
+if [ "${RUN_SAMPLE_EVAL}" = "true" ]; then
+run_main mode=sudoku_eval seed="${SEED}" sudoku.batch_size=64 \
+    sudoku.output_dir="${OUTPUT_DIR}" hydra.run.dir="${OUTPUT_DIR}"
+fi
