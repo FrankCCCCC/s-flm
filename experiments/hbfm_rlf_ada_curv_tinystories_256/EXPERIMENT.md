@@ -127,3 +127,49 @@ Driver: `frontier_sweep.py`; figure: `visualization/genppl_entropy_frontier_line
 - **Picked (2026-10-06, seed 1 k1 ladder, 512 samples):** ada **t_max = 1** (Σ log PPL over NFE
   8–256 = 15.819 vs 15.829 at 0.75 — a tie; mean entropy 3.923 vs 3.922), fix **t_max = 0.25**
   (16.321 vs 16.487 at 0.35 and 17.063 at 0.5; entropy 3.913, not lower). Both decode at clock 0.25.
+
+## Frontier: the ODE and SDE step types of the adaptive model (requested 2026-10-09)
+
+`samplers.HBFMSampler` gained the marginal-preserving family of the bridge SDE (`sampler.step_type`):
+`em` (γ = 1, the Euler–Maruyama step used so far), `ode` (γ = 0, the probability-flow ODE) and
+`sde` (γ = g(t / t_max), `sampler.gt_method` ∈ {sqrt, linear, quad} = (1 − s)^{0.5, 1, 2};
+`const` is `em`). Every step type takes one Euler–Maruyama step from the origin (a point mass).
+Task: put the `ada` model's ODE and best-g(t) SDE on the frontier figure next to its `em` arm.
+
+**Fair comparison — the same selection protocol as the `em` arm, per sampler.**
+1. Seed-1 k1 ladder (512 samples, NFE 1–256) over t_max ∈ {0.25, 0.5, 0.75, 1} for `ode` and for
+   each `sde` g(t); pick per sampler by the rule above (lowest Σ log Gen. PPL over NFE 8–256,
+   unless its entropy is lower than another candidate's by more than ~0.03 — then the frontier
+   decides); for `sde` the pick spans (g, t_max) jointly, and only the best g is presented.
+2. At the pick: k1 seeds 2–3, then the exact-velocity curve (T 0.50–1.20, seeds 1–3).
+3. Same checkpoints (EMA), 512 samples per cell, greedy last step, gpt2-large Gen. PPL; the sample
+   batch is 16 (8 on the 24 GB A5000s — the batch only changes the random stream).
+Nothing else differs between the three step types: they share the marginals in the continuum,
+so a gap is a discretization / noise effect at that NFE.
+
+**Compute (ASAP, both accounts).** `frontier_sweep.py --site a6000` runs on sc3379's desa /
+thickstun GPUs (the ada checkpoints were exported from ch2263's /scratch to
+`outputs/<NAME>/<cell>/checkpoints/last.ckpt`); `--site a100` on ch2263's
+`nlplarge-claire-highpri,nlplarge`. Jobs are split per NFE (`--split nfe`, NFE ≤ 32) or per
+(NFE, T) cell (`--split cell`, NFE ≥ 64) so any freed GPU takes one. Submitted 2026-10-09 ~14:00:
+the four seed-1 ladders (16 k1 jobs) on sc3379. Next check-in: pull, pick (t_max, g), submit
+step 2 (k1 seeds 2–3; exact arm per cell on both sites), then draw with
+`visualization/genppl_entropy_frontier_line.py --hbfm-tmax ada:1 fix:0.25 ada-ode:<t> ada-sde-<g>:<t>`
+and `--methods mdlm,duo,flm,sfmta,eflm,hbfm-ada,hbfm-fix,hbfm-ada-ode,hbfm-ada-sde-<g>`.
+
+**Picked (2026-10-09, seed-1 k1 ladders, `frontier_pick.py`):** ODE **t_max = 0.75** (Σ log PPL
+over NFE 8–256 = 17.125 vs 17.223 at 1, 17.378 at 0.5; mean entropy 3.872 vs 3.865 — better on
+both). t_max 1 is better at NFE ≥ 64 (14.80 vs 15.12 at 256) and 0.75 at NFE ≤ 32 (NFE 8: 24.1
+vs 26.9); the rule sums the log over the ladder. The ODE exact arm first launched at t_max 1 on
+ch2263 (before the ladder finished) is kept at the back of that queue (nice 100000) as an extra
+same-horizon read, not the presented arm. SDE: pick recorded below when its ladder completes.
+The sc3379 exact-arm jobs sample with batch 8 (24–48 GB GPUs), the A100 jobs with 16.
+SDE **g = sqrt ((1 − s)^0.5), t_max = 1** (Σ log PPL 16.015 @ mean H 3.910 — lowest and
+highest of the 12 (g, t_max) cells; sqrt@0.75 16.061 @ 3.909, linear@1 16.187 @ 3.901,
+quad@1 16.448 @ 3.886). Stage 2 submitted 2026-10-09 ~15:00: k1 seeds 2–3 (sc3379) and the
+exact arm — seed 1 on ch2263, seeds 2–3 on sc3379 — for ODE@0.75 and SDE-sqrt@1 (≈ 300 jobs).
+**Complete (2026-10-10 17:00):** 3-seed k = 1 markers and exact-velocity curves at both picks are in
+`RESULTS.md` (last section) and `figures/genppl_entropy_frontier_line.png`; cells in
+`frontier_cells.csv`, all figure tables in `figures/frontier_tables.md`. 46 seed-1 cells were run on
+both sites (the `_x` jobs) when ch2263 fell to 3 GPUs; the 44 ODE@t_max-1 extras are left to drain
+at the back of ch2263's queue and are not presented.

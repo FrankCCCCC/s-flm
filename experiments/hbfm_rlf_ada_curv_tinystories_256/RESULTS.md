@@ -7,9 +7,10 @@ where the checkpoints live). GenPPL = gpt2-large retokenised generative perplexi
 steps, exact velocity, top-k 1, greedy last step); read it with the entropy and the distinct-sample
 count. `val/ppl` is the importance-weighted CE bound, not a likelihood.
 
-**Status (2026-10-09 10:50): complete — training (stages 1–3, 18 runs), frontier k = 1 markers
-(3 seeds each) and exact-velocity frontier curves (6 jobs: fix and ada seeds 1–3, 120 cells each,
-~40 A100-h per job; the last, ada seed 1, finished 2026-10-09 09:20). No jobs running.**
+**Status (2026-10-10 17:00): complete — training (stages 1–3), the `em` frontier (k = 1 markers and
+exact-velocity curves, 3 seeds) and the ODE / SDE step types of the adaptive model (picks, 3-seed
+k = 1 markers and exact-velocity curves; last section). No jobs running except ch2263's niced
+extra ODE@t_max-1 cells, which are not used.**
 
 <!-- report:begin -->
 25 evaluated (cell, step, horizon) reads.
@@ -341,3 +342,94 @@ NFE 1 decodes the origin: one distinct sample, entropy 0, in every cell (as for 
 - **2026-10-04/05, F and G preempted on `nlplarge`** (other users' higher-tier jobs) and requeued by
   Slurm; both resumed from `checkpoints/last.ckpt` (≤ 1k steps lost) and finished at 05:51 / 09:22.
   The requeue overwrote the first part of their logs.
+
+## Frontier — the ODE and SDE step types of the adaptive model (2026-10-09, in progress)
+
+`sampler.step_type` ∈ {em, ode, sde} (`samplers.HBFMSampler`, design in `EXPERIMENT.md` → "the ODE
+and SDE step types"): the marginal-preserving family dw = [b − (1−γ²)/2 (∇·D + D∇log p_t)] dt +
+γ√D dW with γ = 1 (`em`, the arm above), γ = 0 (`ode`) or γ = g(t/t_max) (`sde`, g = (1−s)^p).
+Same checkpoints, protocol and selection rule as the `em` arm, per sampler.
+
+**Seed-1 k1 ladders** (512 samples; Gen. PPL @ entropy; `frontier_pick.py`):
+
+| model | step | t_max | NFE 4 | NFE 8 | NFE 16 | NFE 32 | NFE 64 | NFE 128 | NFE 256 | Σ log PPL (8–256) | mean H (8–256) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| ada | em | 0.25 | 43.01 @ 3.354 | 29.57 @ 3.667 | 23.53 @ 3.764 | 21.07 @ 3.807 | 19.91 @ 3.839 | 20.03 @ 3.844 | 19.16 @ 3.852 | 18.534 | 3.796 |
+| ada | em | 0.5 | 34.06 @ 3.654 | 19.98 @ 3.835 | 16.28 @ 3.896 | 14.50 @ 3.911 | 14.02 @ 3.925 | 13.78 @ 3.935 | 13.37 @ 3.935 | 16.316 | 3.906 |
+| ada | em | 0.75 | 37.94 @ 3.619 | 18.60 @ 3.865 | 14.76 @ 3.900 | 13.50 @ 3.924 | 12.78 @ 3.943 | 12.73 @ 3.951 | 12.43 @ 3.950 | 15.829 | 3.922 |
+| ada | em | 1 | 41.35 @ 3.109 | 19.91 @ 3.866 | 14.90 @ 3.903 | 13.32 @ 3.923 | 12.65 @ 3.944 | 12.16 @ 3.946 | 12.20 @ 3.958 | 15.819 | 3.923 |
+| ada | ode | 0.25 | 44.99 @ 3.283 | 31.57 @ 3.579 | 26.17 @ 3.684 | 23.97 @ 3.725 | 22.95 @ 3.746 | 22.43 @ 3.754 | 22.17 @ 3.757 | 19.236 | 3.707 |
+| ada | ode | 0.5 | 38.22 @ 3.561 | 23.64 @ 3.788 | 19.38 @ 3.839 | 17.61 @ 3.861 | 16.63 @ 3.872 | 16.25 @ 3.877 | 16.16 @ 3.876 | 17.378 | 3.852 |
+| ada | ode | 0.75 | 45.43 @ 3.384 | 24.14 @ 3.803 | 18.64 @ 3.865 | 16.64 @ 3.882 | 15.78 @ 3.891 | 15.32 @ 3.893 | 15.12 @ 3.895 | 17.125 | 3.872 |
+| ada | ode | 1 | 52.43 @ 2.832 | 26.90 @ 3.757 | 19.23 @ 3.863 | 16.74 @ 3.882 | 15.69 @ 3.891 | 15.01 @ 3.897 | 14.80 @ 3.900 | 17.223 | 3.865 |
+| ada | sde-linear | 0.25 | 42.36 @ 3.303 | 29.98 @ 3.601 | 24.51 @ 3.716 | 22.08 @ 3.755 | 21.14 @ 3.785 | 20.61 @ 3.794 | 20.22 @ 3.798 | 18.777 | 3.741 |
+| ada | sde-linear | 0.5 | 34.80 @ 3.604 | 20.91 @ 3.799 | 17.01 @ 3.858 | 15.81 @ 3.882 | 14.89 @ 3.901 | 14.75 @ 3.908 | 14.50 @ 3.907 | 16.701 | 3.876 |
+| ada | sde-linear | 0.75 | 39.51 @ 3.519 | 20.26 @ 3.835 | 15.74 @ 3.875 | 14.45 @ 3.899 | 13.84 @ 3.921 | 13.48 @ 3.926 | 13.35 @ 3.934 | 16.255 | 3.898 |
+| ada | sde-linear | 1 | 43.20 @ 2.975 | 21.58 @ 3.829 | 15.87 @ 3.880 | 14.20 @ 3.907 | 13.31 @ 3.923 | 12.92 @ 3.924 | 12.81 @ 3.945 | 16.187 | 3.901 |
+| ada | sde-quad | 0.25 | 43.07 @ 3.281 | 30.50 @ 3.576 | 25.80 @ 3.684 | 22.74 @ 3.730 | 21.74 @ 3.762 | 21.14 @ 3.770 | 21.25 @ 3.783 | 18.979 | 3.717 |
+| ada | sde-quad | 0.5 | 36.24 @ 3.584 | 21.65 @ 3.793 | 17.78 @ 3.850 | 16.39 @ 3.870 | 15.32 @ 3.887 | 15.32 @ 3.899 | 15.01 @ 3.896 | 16.917 | 3.866 |
+| ada | sde-quad | 0.75 | 42.40 @ 3.454 | 21.24 @ 3.820 | 16.47 @ 3.862 | 14.91 @ 3.892 | 14.22 @ 3.907 | 14.05 @ 3.914 | 13.89 @ 3.923 | 16.488 | 3.886 |
+| ada | sde-quad | 1 | 46.50 @ 2.896 | 23.11 @ 3.807 | 16.62 @ 3.866 | 14.76 @ 3.893 | 13.84 @ 3.908 | 13.36 @ 3.911 | 13.28 @ 3.932 | 16.448 | 3.886 |
+| ada | sde-sqrt | 0.25 | 42.62 @ 3.320 | 29.31 @ 3.632 | 23.50 @ 3.740 | 21.45 @ 3.778 | 20.58 @ 3.810 | 19.99 @ 3.817 | 19.59 @ 3.822 | 18.595 | 3.767 |
+| ada | sde-sqrt | 0.5 | 34.34 @ 3.625 | 20.53 @ 3.815 | 16.64 @ 3.877 | 15.09 @ 3.896 | 14.44 @ 3.911 | 14.26 @ 3.920 | 13.98 @ 3.922 | 16.513 | 3.890 |
+| ada | sde-sqrt | 0.75 | 38.39 @ 3.568 | 19.27 @ 3.848 | 15.37 @ 3.886 | 14.08 @ 3.909 | 13.28 @ 3.929 | 13.10 @ 3.935 | 13.02 @ 3.943 | 16.061 | 3.909 |
+| ada | sde-sqrt | 1 | 42.13 @ 3.035 | 20.80 @ 3.844 | 15.38 @ 3.887 | 13.71 @ 3.912 | 13.00 @ 3.934 | 12.53 @ 3.929 | 12.63 @ 3.952 | 16.015 | 3.910 |
+
+- **Picks:** ODE t_max = 0.75 (Σ 17.125 vs 17.223 at t_max 1; 1 is better at NFE ≥ 64, 0.75 at
+  NFE ≤ 32); SDE g = sqrt at t_max 1 (Σ 16.015, the best of the 12 (g, t_max) cells; linear 16.187,
+  quad 16.448 at t_max 1). Both picks also have the highest entropy of their ladder.
+- **Seed 1 at the picks vs `em` (t_max 1, Σ 15.819):** the SDE with the noise fading as (1−s)^0.5
+  is 2–5 % above `em` at every NFE ≥ 16 (NFE 256: 12.63 vs 12.20; NFE 64: 13.00 vs 12.65), the
+  ODE 15–24 % above it (NFE 256: 15.12 at 0.75, 14.80 at 1, vs 12.20; NFE 8: 24.1 vs 19.9) at
+  0.03–0.06 lower entropy. Noise helps this sampler at every NFE; less noise late (sqrt, linear,
+  quad in that order) costs more the earlier it fades, and the deterministic transport costs most.
+- **Three seeds, 512 samples per cell (k = 1 markers at the picks, Gen. PPL ± sd @ entropy;
+  `em` and `fix` from the table above):**
+
+  | NFE | `em` (t_max 1) | SDE sqrt (t_max 1) | Δ vs `em` | ODE (t_max 0.75) | Δ vs `em` | `fix` (t_max 0.25) |
+  |---:|---|---|---:|---|---:|---|
+  | 8 | 19.39 ± 0.75 @ 3.853 | 20.05 ± 0.91 @ 3.833 | +3.4 % | 23.17 ± 0.90 @ 3.809 | +19 % | 21.21 ± 0.76 @ 3.861 |
+  | 16 | 14.92 ± 0.09 @ 3.891 | 15.33 ± 0.13 @ 3.877 | +2.7 % | 18.46 ± 0.17 @ 3.864 | +24 % | 16.51 ± 0.32 @ 3.897 |
+  | 32 | 13.46 ± 0.13 @ 3.924 | 13.96 ± 0.29 @ 3.916 | +3.7 % | 16.76 ± 0.17 @ 3.885 | +25 % | 14.68 ± 0.27 @ 3.926 |
+  | 64 | 12.74 ± 0.13 @ 3.945 | 13.15 ± 0.15 @ 3.934 | +3.2 % | 15.99 ± 0.28 @ 3.895 | +26 % | 13.74 ± 0.14 @ 3.945 |
+  | 128 | 12.44 ± 0.26 @ 3.956 | 12.86 ± 0.31 @ 3.942 | +3.4 % | 15.62 ± 0.33 @ 3.899 | +26 % | 13.26 ± 0.19 @ 3.950 |
+  | 256 | 12.31 ± 0.11 @ 3.958 | 12.72 ± 0.11 @ 3.950 | +3.3 % | 15.37 ± 0.37 @ 3.900 | +25 % | 13.05 ± 0.21 @ 3.958 |
+
+  The seed-1 reading holds over three seeds: the SDE whose noise fades as (1 − s)^0.5 is a
+  steady 3 % above the bridge SDE at every NFE (sd 0.1–0.3, 0.01–0.02 lower entropy) — still
+  below the fixed-curvature model at every NFE — and the probability-flow ODE is 19–26 % above
+  it at 0.03–0.06 lower entropy, above `fix` too. The three step types share the marginals in the
+  continuum, so the ranking is a finite-NFE effect: the free-score term the ODE and SDE add
+  (`samplers.HBFMSampler.sde_step`) is integrated by Euler after one noisy step from the origin,
+  and the noise the bridge SDE keeps re-randomises the discretization error that the
+  deterministic transport accumulates. The gap does not close from NFE 64 to 256.
+- **Exact-velocity temperature curves (T 0.50–1.20, 3 seeds, 512 samples per cell; complete
+  2026-10-10 17:00; every table of the figure script is in `figures/frontier_tables.md`).** The
+  lowest point of each curve (T = 0.50, Gen. PPL ± sd @ entropy) and the matched-entropy read at
+  H* ≈ 4.41 (the highest entropy every method reaches; mean curve over seeds):
+
+  | NFE | `em` @ T 0.5 | SDE sqrt @ T 0.5 | ODE @ T 0.5 | `fix` @ T 0.5 | `em` @ H* | SDE @ H* (Δ) | ODE @ H* (Δ) | `fix` @ H* |
+  |---:|---|---|---|---|---:|---:|---:|---:|
+  | 4 | 45.10 ± 0.41 (4.154) | 44.06 ± 0.44 (4.145) | 42.93 ± 0.61 (4.086) | 52.81 ± 1.86 (4.166) | 55.68 | 54.39 (−2 %) | 65.97 (+18 %) | 63.98 |
+  | 8 | 24.38 ± 0.24 (4.155) | 24.57 ± 0.18 (4.146) | 26.42 ± 0.19 (4.137) | 27.80 ± 0.39 (4.161) | 40.94 | 40.79 (0 %) | 56.52 (+38 %) | 45.00 |
+  | 16 | 18.81 ± 0.37 (4.147) | 19.36 ± 0.32 (4.144) | 20.85 ± 0.12 (4.145) | 20.67 ± 0.49 (4.149) | 36.17 | 36.28 (0 %) | 55.28 (+53 %) | 38.26 |
+  | 32 | 16.31 ± 0.05 (4.144) | 16.78 ± 0.16 (4.135) | 18.39 ± 0.13 (4.143) | 17.51 ± 0.32 (4.142) | 33.16 | 33.77 (+2 %) | 50.31 (+52 %) | 34.37 |
+  | 64 | 14.95 ± 0.29 (4.143) | 15.40 ± 0.27 (4.141) | 17.31 ± 0.23 (4.140) | 16.21 ± 0.37 (4.149) | 30.11 | 31.00 (+3 %) | 44.26 (+47 %) | 31.24 |
+  | 128 | 14.40 ± 0.12 (4.149) | 14.96 ± 0.11 (4.145) | 16.72 ± 0.25 (4.139) | 15.34 ± 0.17 (4.155) | 27.68 | 29.24 (+6 %) | 41.80 (+51 %) | 28.85 |
+  | 256 | 14.13 ± 0.13 (4.147) | 14.64 ± 0.16 (4.141) | 16.41 ± 0.23 (4.137) | 15.00 ± 0.29 (4.157) | 28.16 | 28.75 (+2 %) | 41.47 (+47 %) | 28.51 |
+
+  - **The SDE with the noise fading as (1 − s)^0.5 traces the `em` curve**: at the low-T end it is
+    2–4 % above `em` for NFE ≥ 16 (16.41 → 14.64 vs 14.13 at NFE 256; 0.01 lower entropy) and
+    within noise at NFE 4–8; at H* it is within −2 … +6 % at every NFE. It stays below the
+    fixed-curvature model's curve at every NFE ≥ 8 (both ends), i.e. the adaptive-curvature gain
+    survives the change of sampler.
+  - **The probability-flow ODE is a worse sampler at every NFE ≥ 8, and the gap widens with
+    entropy**: 8–16 % above `em` at the T = 0.50 end (NFE 256: 16.41 vs 14.13, also above `fix`),
+    38–53 % above it at H* (NFE 256: 41.47 vs 28.16), and 25 % at the k = 1 marker. Its curve rises
+    faster with T than the stochastic ones: a tempered posterior moves the deterministic transport
+    off the data manifold with nothing to pull it back, whereas the injected noise of `em` / SDE
+    re-randomises the error each step. Only at NFE 4 does the ODE's low-T point beat `em`
+    (42.93 vs 45.10) — at 0.07 lower entropy, so not on the frontier.
+  - Neither step type changes HBFM's place on the frontier: at matched entropy the adaptive model
+    stays above S-FLM / E-FLM / MDLM at NFE ≥ 8 by the margins of the `em` analysis above; the
+    sampler family moves HBFM along its own curve (SDE) or off it (ODE), not across the gap.

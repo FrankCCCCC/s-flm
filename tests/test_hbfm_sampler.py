@@ -9,7 +9,10 @@ Two independent statistical checks that need no trained model:
     at curvature K != -1;
   * Bayes oracle: with the exact Poisson-kernel posterior under a fixed prior,
     the decoded endpoint of the learned bridge is distributed as the prior and
-    the posterior is resolved (near one-hot) at the horizon.
+    the posterior is resolved (near one-hot) at the horizon;
+  * the gamma family (`sde_step`): gamma = 1 is the Euler-Maruyama step, and
+    the probability-flow ODE (gamma = 0) and a partially noisy member reproduce
+    the same bridge marginals and decode the same prior.
 Plus the sampler's contract on the real HyperbolicBoundaryFM (GPU): prefix
 tokens pinned, integer output, NFE == steps, all velocity modes run.
 """
@@ -78,6 +81,66 @@ def test_sde_reproduces_the_exact_bridge_marginals(dims, curvs, t_end):
     p_cos = stats.ks_2samp(cos_sde, cos_ex).pvalue
     assert p_rho > 1e-3, (m, p_rho, np.quantile(a, [.1, .5, .9]), np.quantile(b, [.1, .5, .9]))
     assert p_cos > 1e-3, (m, p_cos, np.quantile(cos_sde, [.1, .5, .9]), np.quantile(cos_ex, [.1, .5, .9]))
+
+
+def _family_to_endpoint(endpoint, dims, curvs, t_end, n_steps, n_traj, gamma):
+  """The gamma family toward one boundary point from the origin, the first
+  step Euler-Maruyama (the origin is a point mass); returns z [n_traj, E]."""
+  z = torch.zeros(n_traj, sum(dims), dtype=torch.float64)
+  e = endpoint.expand(n_traj, -1)
+  dt = torch.tensor(t_end / n_steps, dtype=torch.float64)
+  z = samplers.HBFMSampler.euler_maruyama_step(z, e, None, dt, dims, curvs)
+  for k in range(1, n_steps):
+    z = samplers.HBFMSampler.sde_step(z, e, None, k * dt, dt, gamma, dims, curvs)
+  return z
+
+
+@pytest.mark.parametrize('dims,curvs,t_end,gamma', [
+  ([3], [-1.0], 1.0, 0.0),            # the probability-flow ODE
+  ([3, 3], [-1.0, -4.0], 0.5, 0.0),
+  ([3], [-0.5], 1.0, 0.5),            # a partially noisy member
+])
+def test_gamma_family_reproduces_the_exact_bridge_marginals(dims, curvs, t_end, gamma):
+  torch.manual_seed(5)
+  n = 4096
+  endpoint = torch.cat([_unit(d) for d in dims])
+  z = _family_to_endpoint(endpoint, dims, curvs, t_end, n_steps=1500, n_traj=n, gamma=gamma)
+  rho_sde, u_sde = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(z, dims, curvs)
+  ts = torch.full((n,), t_end, dtype=torch.float64)
+  rho_ex, u_ex = HyperbolicHeatKernel.poincare_bridge_prod(
+    ts, torch.zeros(n, 1, dtype=torch.long), endpoint[None],
+    output_coord=Coordinate.HYPERBOLIC_POLAR,
+    prod_factor_dim=dims, prod_factor_gaussian_curvature=curvs)
+  rho_ex, u_ex = rho_ex[:, 0], u_ex[:, 0]
+  off = 0
+  for m, d in enumerate(dims):
+    e_m = endpoint[off:off + d]
+    cos_sde = (u_sde[:, off:off + d] @ e_m).numpy()
+    cos_ex = (u_ex[:, off:off + d] @ e_m).numpy()
+    off += d
+    a, b = rho_sde[:, m].numpy(), rho_ex[:, m].numpy()
+    p_rho = stats.ks_2samp(a, b).pvalue
+    p_cos = stats.ks_2samp(cos_sde, cos_ex).pvalue
+    assert p_rho > 1e-3, (m, p_rho, np.quantile(a, [.1, .5, .9]), np.quantile(b, [.1, .5, .9]))
+    assert p_cos > 1e-3, (m, p_cos, np.quantile(cos_sde, [.1, .5, .9]), np.quantile(cos_ex, [.1, .5, .9]))
+
+
+def test_sde_step_at_gamma_one_is_the_euler_maruyama_step():
+  dims, curvs = [3, 4], [-1.0, -0.25]    # the free score (H^3 only) is not needed at gamma = 1
+  z = 0.5 * torch.rand(64, 2, 1, dtype=torch.float64) * _unit(64, 2, sum(dims))  # inside both balls
+  e = torch.cat([_unit(64, 2, d) for d in dims], dim=-1)
+  t = torch.full((64, 2, 1), 0.2, dtype=torch.float64)
+  dt = torch.full((64, 2, 1), 0.01, dtype=torch.float64)
+  torch.manual_seed(6)
+  z_em = samplers.HBFMSampler.euler_maruyama_step(z, e, None, dt, dims, curvs)
+  torch.manual_seed(6)
+  z_sde = samplers.HBFMSampler.sde_step(z, e, None, t, dt, 1.0, dims, curvs)
+  assert torch.allclose(z_em, z_sde, rtol=1e-12, atol=0)
+  # The ODE is deterministic and moves the state.
+  z_ode = samplers.HBFMSampler.ode_step(z[..., :3], e[..., :3], None, t, dt, [3], [-1.0])
+  assert torch.isfinite(z_ode).all()
+  assert torch.equal(z_ode, samplers.HBFMSampler.ode_step(z[..., :3], e[..., :3], None, t, dt, [3], [-1.0]))
+  assert not torch.equal(z_ode, z[..., :3])
 
 
 class _OracleModel:
@@ -166,6 +229,26 @@ def test_oracle_sample_velocity_also_decodes_the_prior():
   assert stats.chisquare(counts, prior.numpy() * n).pvalue > 1e-3, counts
 
 
+@pytest.mark.parametrize('step_type,gt_method', [('ode', 'linear'), ('sde', 'sqrt')])
+def test_oracle_ode_and_sde_family_decode_the_prior(step_type, gt_method):
+  torch.manual_seed(7)
+  V, dims, curvs = 6, [3, 3], [-1.0, -2.0]
+  prior = torch.tensor([0.30, 0.25, 0.20, 0.15, 0.07, 0.03], dtype=torch.float64)
+  model = _OracleModel(V, dims, curvs, prior.log(), steps=600)
+  sampler = samplers.HBFMSampler(noise_removal='greedy', velocity='exact', use_float64=True,
+                                 temperature=1.0, p_nucleus=1.0, top_k=-1,
+                                 top_k_velocity=-1, t_max=12.0, step_type=step_type,
+                                 gt_method=gt_method)
+  n = 3000
+  tokens, meta = samplers.run_sampler(sampler, model, n, num_steps=600)
+  assert tokens.shape == (n, 1) and meta['nfe'] == 600
+  p_max = model.last_log_p.exp().max(-1).values
+  assert (p_max > 0.99).float().mean() > 0.95
+  counts = torch.bincount(tokens[:, 0], minlength=V).numpy()
+  p = stats.chisquare(counts, prior.numpy() * n).pvalue
+  assert p > 1e-3, (step_type, counts, prior * n, p)
+
+
 # ---------------------------------------------------------------------------
 # Contract on the real model
 # ---------------------------------------------------------------------------
@@ -210,6 +293,8 @@ def _build_model(monkeypatch, overrides=()):
   ['sampler.noise_removal=ancestral', 'sampler.temperature=0.5'],
   ['algo.time_conversion_mode=unif'],   # sampler.t_max=1.0 == time_range_upper_bound
   ['algo.time_conversion_mode=trunc_exp'],
+  ['sampler.step_type=ode'],
+  ['sampler.step_type=sde', 'sampler.gt_method=sqrt'],
 ])
 def test_real_model_sampler_contract(monkeypatch, overrides):
   model = _build_model(monkeypatch, overrides)
