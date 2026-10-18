@@ -26,7 +26,7 @@
     - Weight Decay: 0.0, Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
   - All use cross entropy loss * {w/o SNR}
   - ``noise_sched_cov_weight``: 
-    - for ``autonomous`` noise: {True, False}
+    - for ``autonomous`` noise: {True}
     - for ``autonomous-adaptive`` and log-linear-adaptive+trunc noise: {False} (snr_weighted_ce, noise_sched_cov_weight and an adaptive schedule are mutually exclusive)
   - 3 radom seeds: {1, 2, 3}, take averge
 

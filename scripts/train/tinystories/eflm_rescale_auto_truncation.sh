@@ -21,8 +21,10 @@ PER_GPU_BS="${PER_GPU_BS:-8}"
 CKPT_EVERY="${CKPT_EVERY:-2500}"
 LR="${LR:-3e-4}"
 RHO="${RHO:-1.0}"                   # fixed embedding norm R (rho_min = rho_max = RHO)
-ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257, embed_norm=RHO); null = no truncation
+ALPHA_MAX="${ALPHA_MAX:-null}"     # alpha_star_euclidean(50257, embed_norm=RHO); null = no truncation
 SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM Eq. 16)
+FORWARD_TYPE="${FORWARD_TYPE:-naive}" # gaussian: logits are a residual on log N(xt; a_t e_v, b_t^2 I) / naive: plain logits
+COV_WEIGHT="${COV_WEIGHT:-false}"    # weight the CE by |alpha_t'| (dt -> d alpha); not with SNR_CE or an adaptive schedule
 TAU_MAX="${TAU_MAX:-1.834}"         # autonomous horizon; tau*(R)=-log(1-alpha*(R)) truncates at the decode point
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
@@ -44,6 +46,8 @@ python -u -m main \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
     algo.snr_weighted_ce="${SNR_CE}" \
+    algo.noise_sched_cov_weight="${COV_WEIGHT}" \
+    algo.forward_type="${FORWARD_TYPE}" \
     noise=autonomous \
     noise.tau_max=${TAU_MAX} \
     noise.alpha_max=${ALPHA_MAX} \

@@ -17,8 +17,9 @@ STEPS="${STEPS:-180}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
 RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
-ALPHA_MAX="${ALPHA_MAX:-0.840}"     # alpha_star_euclidean(50257, embed_norm=RHO); null = no truncation
+ALPHA_MAX="${ALPHA_MAX:-null}"     # alpha_star_euclidean(50257, embed_norm=RHO); null = no truncation
 SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM Eq. 16)
+FORWARD_TYPE="${FORWARD_TYPE:-naive}" # must match training
 TAU_MAX="${TAU_MAX:-1.834}"          # autonomous horizon; must match training
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 ETA="${ETA:-0.0}"                    # SDE noise scale; 0 = deterministic ODE
@@ -41,6 +42,7 @@ MARGS=(
     algo.rho_max=${RHO}
     noise.alpha_max=${ALPHA_MAX}
     algo.snr_weighted_ce=${SNR_CE}
+    algo.forward_type=${FORWARD_TYPE}
     noise=autonomous
     noise.tau_max=${TAU_MAX}
     sampler=eflm

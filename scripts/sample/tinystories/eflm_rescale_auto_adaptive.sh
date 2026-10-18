@@ -18,6 +18,7 @@ TOPK_VELOCITY="${TOPK_VELOCITY:-1}"
 VELOCITY="${VELOCITY:-exact}"
 RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
 SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM Eq. 16)
+FORWARD_TYPE="${FORWARD_TYPE:-naive}" # must match training
 TAU_MAX="${TAU_MAX:-1.834}"          # autonomous horizon; must match training
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 
@@ -34,6 +35,7 @@ MARGS=(
     algo.rho_min=${RHO}
     algo.rho_max=${RHO}
     algo.snr_weighted_ce=${SNR_CE}
+    algo.forward_type=${FORWARD_TYPE}
     noise=autonomous-adaptive
     noise.tau_max=${TAU_MAX}
     noise.adaptive_refit_every=50

@@ -31,7 +31,7 @@ R=28: **0.158** (flow-time t* = 1−α*: 0.16 / 0.60 / 0.84) to derive the trunc
     - LR: {3e-4, 1e-3, 5e-3}, Weight Decay: 0.0
     - Betas: (0.9, 0.999), eps: 1e-8, Gradient Clip: 1.0
   - ``noise_sched_cov_weight``:
-    - for ``autonomous`` noise: {True, False}
+    - for ``autonomous`` noise: {True}
     - for ``autonomous-adaptive`` and log-linear-adaptive+trunc noise: {False} (snr_weighted_ce, noise_sched_cov_weight and an adaptive schedule are mutually exclusive)
   - All use cross entropy loss * {w/o SNR}
 

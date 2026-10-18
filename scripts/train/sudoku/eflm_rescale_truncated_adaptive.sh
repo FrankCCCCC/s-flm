@@ -16,6 +16,11 @@ SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
 if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
 RHO="${RHO:-1.0}"                    # fixed embedding norm R (rho_min = rho_max = RHO)
+ALPHA_MAX="${ALPHA_MAX:-0.767}"       # alpha_star_euclidean(12, embed_norm=RHO); null = no truncation
+FORWARD_TYPE="${FORWARD_TYPE:-naive}" # gaussian: logits are a residual on log N(xt; a_t e_v, b_t^2 I) / naive: plain logits
+MAX_STEPS="${MAX_STEPS:-20000}"
+CKPT_EVERY="${CKPT_EVERY:-5000}"
+PER_GPU_BS="${PER_GPU_BS:-256}"      # micro-batch per GPU; global batch stays 256 (accumulation = 256 / (DEVICES x PER_GPU_BS))
 
 GLOBAL_BS=256
 BUF_SIZE=$((50 * GLOBAL_BS))
@@ -34,13 +39,15 @@ python -u -m main \
     algo.self_conditioning="${SELF_COND}" \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
+    algo.forward_type="${FORWARD_TYPE}" \
     noise=log-linear-adaptive \
+    noise.alpha_max="${ALPHA_MAX}" \
     noise.adaptive_refit_every=50 \
     noise.adaptive_buffer_size=${BUF_SIZE} \
     noise.adaptive_ema=0.9 \
     noise.adaptive_uniform_mix=1e-3 \
     loader.global_batch_size=${GLOBAL_BS} \
-    loader.batch_size=256 \
+    loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=256 \
     loader.num_workers=8 \
     eval.generate_samples=False \
@@ -49,6 +56,6 @@ python -u -m main \
     ${SC_STRAT} \
     trainer.val_check_interval=20_000 \
     trainer.limit_val_batches=0 \
-    trainer.max_steps=20_000 \
-    callbacks.checkpoint_every_n_steps.every_n_train_steps=5_000 \
+    trainer.max_steps=${MAX_STEPS} \
+    callbacks.checkpoint_every_n_steps.every_n_train_steps=${CKPT_EVERY} \
     hydra.run.dir="${OUTPUT_DIR}"
