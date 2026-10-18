@@ -77,6 +77,10 @@ def _load_config(run_dir: str, ckpt: str, args):
     cfg.algo.p_self_cond = 0.0
   if cfg.algo.get('snr_weighted_ce') is None:
     cfg.algo.snr_weighted_ce = False  # pre-knob EFLM configs: unweighted CE
+  if cfg.algo.get('noise_sched_cov_weight') is None:
+    cfg.algo.noise_sched_cov_weight = False  # pre-knob EFLM configs: no |alpha'| weight
+  if cfg.algo.get('forward_type') is None:
+    cfg.algo.forward_type = 'naive'  # pre-knob EFLM configs: plain logits
   return cfg
 
 

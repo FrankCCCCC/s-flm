@@ -21,10 +21,13 @@ SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
 if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
 RHO="${RHO:-1.0}"                    # fixed embedding norm R (rho_min = rho_max = RHO)
-TAU_MAX="${TAU_MAX:-3.0}"            # autonomous-clock horizon (noise floor exp(-TAU_MAX))
+TAU_MAX="${TAU_MAX:-1.455}"            # autonomous-clock horizon tau*(RHO=1) (noise floor exp(-TAU_MAX))
 SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM variational bound)
+FORWARD_TYPE="${FORWARD_TYPE:-naive}" # gaussian: logits are a residual on log N(xt; a_t e_v, b_t^2 I) / naive: plain logits
+COV_WEIGHT="${COV_WEIGHT:-false}"    # weight the CE by |alpha_t'| (dt -> d alpha); not with SNR_CE or an adaptive schedule
 MAX_STEPS="${MAX_STEPS:-20000}"
 CKPT_EVERY="${CKPT_EVERY:-5000}"
+PER_GPU_BS="${PER_GPU_BS:-256}"      # micro-batch per GPU; global batch stays 256 (accumulation = 256 / (DEVICES x PER_GPU_BS))
 
 cd "${REPO_ROOT}"
 
@@ -41,10 +44,12 @@ python -u -m main \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
     algo.snr_weighted_ce="${SNR_CE}" \
+    algo.noise_sched_cov_weight="${COV_WEIGHT}" \
+    algo.forward_type="${FORWARD_TYPE}" \
     noise=autonomous \
     noise.tau_max="${TAU_MAX}" \
     loader.global_batch_size=256 \
-    loader.batch_size=256 \
+    loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=256 \
     loader.num_workers=8 \
     eval.generate_samples=False \

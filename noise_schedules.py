@@ -491,6 +491,15 @@ class UnifInfoSchedule(NoiseSchedule):
 
 def get_noise(config):
   noise_config = config.noise
+  # One truncation knob per clock: tau_max (autonomous), alpha_max (others).
+  if noise_config.type == 'autonomous':
+    if noise_config.get('alpha_max') is not None:
+      raise ValueError('noise=autonomous is truncated by noise.tau_max; '
+                       'noise.alpha_max must be null.')
+  elif noise_config.get('tau_max') is not None:
+    raise ValueError(f'noise.tau_max is only for noise=autonomous, got '
+                     f'noise.type={noise_config.type}; truncate with '
+                     f'noise.alpha_max.')
   if noise_config.type == 'gumbel':
     noise = UnifInfoSchedule(
       trainable=noise_config.trainable,

@@ -19,8 +19,9 @@ VELOCITY="${VELOCITY:-exact}"         # sample / exact
 TOPK_VELOCITY="${TOPK_VELOCITY:--1}"  # 1 = top-1, -1 = full vocab (no top-k)
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
 RHO="${RHO:-1.0}"                    # fixed embedding norm R; must match training
-TAU_MAX="${TAU_MAX:-3.0}"            # autonomous-clock horizon; must match training
+TAU_MAX="${TAU_MAX:-1.455}"            # autonomous-clock horizon; must match training
 SNR_CE="${SNR_CE:-false}"            # loss weighting; only affects the reported bound
+FORWARD_TYPE="${FORWARD_TYPE:-naive}" # must match training
 
 cd "${REPO_ROOT}"
 
@@ -38,6 +39,7 @@ python -u -m main \
     algo.rho_min="${RHO}" \
     algo.rho_max="${RHO}" \
     algo.snr_weighted_ce="${SNR_CE}" \
+    algo.forward_type="${FORWARD_TYPE}" \
     noise=autonomous \
     noise.tau_max="${TAU_MAX}" \
     sampler=eflm \
