@@ -28,7 +28,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from omegaconf import OmegaConf
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# SFLM_REPO: import the model code from another checkout (e.g. one with HBFM adaptive curvature).
+REPO = os.environ.get('SFLM_REPO', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, REPO)  # repo-root imports below need this bootstrap first
 import algo, dataloader, main as main_mod  # main registers omegaconf resolvers
 from numeric.geo_bridge import GeoUtils  # curvature-aware manifold coordinate converters
@@ -36,7 +37,8 @@ from numeric.geo_bridge import GeoUtils  # curvature-aware manifold coordinate c
 # Dispatch on config.algo.name (same mapping main.main() uses).
 ALGO_BY_NAME = {'ar': algo.AR, 'mdlm': algo.MDLM, 'duo_base': algo.DUO_BASE,
                 'sfm': algo.SFM, 'eflm': algo.EFLM, 'langflow': algo.LangFlow,
-                'hflm': algo.HFLM, 'flm': algo.FLM, 'candi': algo.CANDI}
+                'hflm': algo.HFLM, 'flm': algo.FLM, 'candi': algo.CANDI,
+                'hbfm': algo.HyperbolicBoundaryFM}
 
 B: int = 1_000_000_000
 M: int = 1_000_000
@@ -81,6 +83,8 @@ def _load_config(run_dir: str, ckpt: str, args):
     cfg.algo.noise_sched_cov_weight = False  # pre-knob EFLM configs: no |alpha'| weight
   if cfg.algo.get('forward_type') is None:
     cfg.algo.forward_type = 'naive'  # pre-knob EFLM configs: plain logits
+  if cfg.algo.name == 'hbfm' and cfg.algo.get('curvature_bound') is None:
+    cfg.algo.curvature_bound = 1  # pre-knob HBFM configs: fixed curvature
   return cfg
 
 

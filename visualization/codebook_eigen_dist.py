@@ -63,7 +63,7 @@ def embedding_matrices(ckpt: str, args):
   # sphere/hyperbolic backbones name the codebook `sphere_embed`; the plain DiT
   # and FLM-DiT ones keep it as the `vocab_embed` parameter.
   W = (bb.sphere_embed.weight if hasattr(bb, 'sphere_embed')
-       else bb.vocab_embed.embedding).detach().double()
+       else bb.vocab_embed.embedding).detach().double().cpu()  # some loaders map to cuda
   normalized = torch.nn.functional.normalize(W, p=2.0, dim=-1)
   normalized_mean_shift = normalized - normalized.mean(dim=0)
   mean_shift_normalized = torch.nn.functional.normalize(W - W.mean(dim=0), p=2.0, dim=-1)
