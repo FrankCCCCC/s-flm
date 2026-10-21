@@ -41,6 +41,10 @@ class HyLaFeatures(nn.Module):
   product estimates the mean of the factors' isometry-invariant kernels.
   Curvature enters only through s, as in the horosphere readout.
 
+  `normalize=False` drops the 1 / sqrt(num_features) factor, as the reference
+  implementation (github.com/ydtydr/HyLa, hype/models.py) does; that code also
+  halves the drawn lambda in the angle, so its `lambda_scale` is 2x `scale`.
+
   `radius_cap` evaluates the map at min(s, radius_cap): with a finite number
   of features the eigenfunctions are all ~0 past s ~ 6 (their e^{(d-1)P/2}
   envelope is a Poisson kernel, sparse near the boundary), so a state pinned
@@ -50,7 +54,7 @@ class HyLaFeatures(nn.Module):
   """
 
   def __init__(self, prod_factor_dim, prod_factor_gaussian_curvature,
-               num_features, scale, seed, radius_cap=None):
+               num_features, scale, seed, radius_cap=None, normalize=True):
     super().__init__()
     if len(set(prod_factor_dim)) != 1:
       raise ValueError(
@@ -63,6 +67,7 @@ class HyLaFeatures(nn.Module):
     self.prod_factor_gaussian_curvature = prod_factor_gaussian_curvature
     self.num_features = num_features
     self.radius_cap = radius_cap
+    self.norm = 1.0 / math.sqrt(num_features) if normalize else 1.0
     per_factor = num_features // num_factors
     gen = torch.Generator().manual_seed(seed)
     omegas = torch.randn(num_factors, per_factor, factor_dim,
@@ -86,15 +91,140 @@ class HyLaFeatures(nn.Module):
     us = us.unflatten(-1, self.omegas.shape[:1] + self.omegas.shape[-1:])
     ss = (rhos * self.kappas).unsqueeze(-1)                     # (B, L, m, 1)
     if self.radius_cap is not None:
+      # A state past the cap (a prompt pinned at the boundary) is evaluated at
+      # a frozen pin: no gradient into its direction, i.e. into the word's
+      # embedding. The envelope's sensitivity to the direction grows like
+      # e^{2P} sinh(s), and letting it reach the embedding from every prompt
+      # position drove the embedding gradient to ~1e3 and collapsed training.
+      pinned = ss > self.radius_cap
       ss = ss.clamp_max(self.radius_cap)
+      us = torch.where(pinned, us.detach(), us)
     dot = torch.einsum('blmd,mkd->blmk', us, self.omegas)       # (B, L, m, k)
     # <omega, z>_H = -log(cosh s - sinh s <u, omega>), e^{s} pulled out of the
     # log so it never overflows; <u, omega> = 0 at the origin gives 0.
     horo = -(ss + ((1 - dot) / 2 + (1 + dot) / 2 * (-2 * ss).exp())
              .clamp_min(torch.finfo(torch.float64).tiny).log())
     feats = ((self.omegas.shape[-1] - 1) / 2 * horo).exp() * torch.cos(
-      self.lambdas * horo + self.biases) / math.sqrt(self.num_features)
+      self.lambdas * horo + self.biases) * self.norm
     return feats.flatten(-2)
+
+
+class HarmonicFeatures(nn.Module):
+  """Hyperbolic-harmonic spherical-harmonic features of the HBFM state (the
+  `sphere` input map, `model.sphere_degree`).
+
+  Per H^3 factor, the dimensionless polar state (s = rho / R, u in S^2) is
+  mapped to the harmonic extensions of the real spherical harmonics,
+
+      h_lm(z) = f_l(s) Y_lm(u),   l = 0..L, m = -l..l,   (L + 1)^2 features,
+
+      f_l(s) = r^l 2F1(l, -1/2; l + 3/2; r^2) / 2F1(l, -1/2; l + 3/2; 1),
+      r = tanh(s / 2),
+
+  f_l being the radial solution of the H^3 Laplace equation regular at the
+  origin, normalized to f_l -> 1 at the boundary. h_lm is the Poisson integral
+  of Y_lm over the boundary, so it is harmonic (Delta h_lm = 0), bounded
+  (|h_lm| <= max |Y_lm| = sqrt(2l + 1)) and tends to Y_lm(u) as s -> inf: a
+  state pinned at the boundary (`HyperbolicBoundaryFM._clean_state`) is seen
+  through its direction, where HyLa's features vanish. f_l rises from 0
+  (l >= 1) at the origin to 1 past s ~ ln(2l), so the basis is a low-pass
+  filter on the direction whose cutoff degree grows with the radius; the
+  plain coordinates z = R tanh(s/2) u are the L = 1 case. Y_lm are the real
+  harmonics, orthonormal under the uniform probability measure on S^2
+  (Y_00 = 1, Y_1m = sqrt(3) u_m). f_l depends on s only: it is tabulated at
+  construction (scipy's 2F1 on a grid of step `TABLE_STEP` up to `TABLE_MAX`,
+  past which f_l = 1 to double precision) and linearly interpolated.
+
+  f_0 = 1 and every f_l saturates at a small radius, so the trunk, which has
+  no time conditioning, is also given the radial channels tanh(s / c) for c in
+  `radial_scales`: num_features = num_factors * ((L + 1)^2 + len(radial_scales)).
+  Nothing is random, so the module adds no checkpoint keys.
+  """
+  TABLE_STEP = 1.0 / 256
+  TABLE_MAX = 36.0        # > 2 atanh(1 - 8 eps) = 34.66, the readback's largest s
+
+  def __init__(self, prod_factor_dim, prod_factor_gaussian_curvature, degree,
+               radial_scales):
+    super().__init__()
+    if any(d != 3 for d in prod_factor_dim):
+      raise ValueError(
+        f'the sphere map needs H^3 factors (harmonics on S^2); got {prod_factor_dim}.')
+    degree = int(degree)
+    if degree < 0 or not radial_scales:
+      raise ValueError('model.sphere_degree must be >= 0 and '
+                       'model.sphere_radial_scales non-empty.')
+    self.prod_factor_dim = prod_factor_dim
+    self.prod_factor_gaussian_curvature = prod_factor_gaussian_curvature
+    self.degree = degree
+    self.num_features = len(prod_factor_dim) * (
+      (degree + 1) ** 2 + len(radial_scales))
+    import numpy as np
+    from scipy.special import hyp2f1
+    s = np.arange(0.0, self.TABLE_MAX + self.TABLE_STEP, self.TABLE_STEP)
+    r = np.tanh(s / 2)
+    table = np.stack([
+      r ** l * hyp2f1(l, -0.5, l + 1.5, r * r)
+      / (math.gamma(l + 1.5) / (math.gamma(1.5) * math.gamma(l + 2)))   # Gauss: 2F1(..; 1)
+      for l in range(degree + 1)], axis=-1)
+    table = np.concatenate([table, table[-1:]], axis=0)   # one spare row for the interpolation
+    self.register_buffer('table', torch.tensor(table, dtype=torch.float64),
+                         persistent=False)
+    self.register_buffer('ell_of_feature', torch.tensor(
+      [l for l in range(degree + 1) for _ in range(2 * l + 1)]), persistent=False)
+    self.register_buffer('radial_scales', torch.tensor(
+      [float(c) for c in radial_scales], dtype=torch.float64), persistent=False)
+    self.register_buffer('kappas', torch.tensor(
+      [1.0 / GeoUtils._curvature_scale(k)
+       for k in prod_factor_gaussian_curvature], dtype=torch.float64),
+      persistent=False)                                   # derived from the config
+
+  def radial(self, s: torch.Tensor) -> torch.Tensor:
+    """f_l(s), l = 0..L, for dimensionless radii s (...) -> (..., L + 1)."""
+    x = (s / self.TABLE_STEP).clamp(0.0, self.table.shape[0] - 2)
+    i = x.floor().long()
+    w = (x - i).unsqueeze(-1)
+    return self.table[i] * (1 - w) + self.table[i + 1] * w
+
+  def spherical_harmonics(self, u: torch.Tensor) -> torch.Tensor:
+    """Real Y_lm(u) of unit vectors u (..., 3) -> (..., (L + 1)^2), l = 0..L,
+    m = -l..l, orthonormal under the uniform probability measure on S^2:
+    Y_lm = N_lm dP_l^m(z) Re (x + iy)^m, Y_l,-m = N_lm dP_l^m(z) Im (x + iy)^m
+    (m > 0) and Y_l0 = N_l0 P_l(z), with dP_l^m = d^m P_l / dz^m (the
+    associated Legendre function without its (1 - z^2)^{m/2}, which (x + iy)^m
+    carries) by the standard recursions, no Condon-Shortley phase."""
+    x, y, z = u.unbind(-1)
+    cols = {}
+    re, im = torch.ones_like(x), torch.zeros_like(x)     # (x + iy)^m
+    for m in range(self.degree + 1):
+      if m > 0:
+        re, im = x * re - y * im, x * im + y * re
+      p_prev, p = None, torch.full_like(x, float(math.prod(range(1, 2 * m, 2))))  # dP_m^m = (2m - 1)!!
+      for l in range(m, self.degree + 1):
+        if l == m + 1:
+          p_prev, p = p, (2 * m + 1) * z * p
+        elif l > m + 1:
+          p_prev, p = p, ((2 * l - 1) * z * p - (l + m - 1) * p_prev) / (l - m)
+        norm = math.sqrt((2 * l + 1) * math.factorial(l - m) / math.factorial(l + m))
+        if m == 0:
+          cols[(l, 0)] = norm * p
+        else:
+          cols[(l, m)] = math.sqrt(2) * norm * p * re
+          cols[(l, -m)] = math.sqrt(2) * norm * p * im
+    return torch.stack([cols[(l, m)] for l in range(self.degree + 1)
+                        for m in range(-l, l + 1)], dim=-1)
+
+  def forward(self, z: torch.Tensor) -> torch.Tensor:
+    """[B, L, sum(d_i)] Cartesian state -> [B, L, num_features], float64:
+    per factor, h_lm(z) for l = 0..L, m = -l..l, then tanh(s / c) per scale."""
+    rhos, us = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
+      z.to(torch.float64), self.prod_factor_dim,
+      self.prod_factor_gaussian_curvature)
+    us = us.unflatten(-1, (len(self.prod_factor_dim), 3))     # (B, L, m, 3)
+    ss = rhos * self.kappas                                     # (B, L, m)
+    harmonics = (self.spherical_harmonics(us)
+                 * self.radial(ss)[..., self.ell_of_feature])   # (B, L, m, (L+1)^2)
+    channels = torch.tanh(ss.unsqueeze(-1) / self.radial_scales)   # (B, L, m, |c|)
+    return torch.cat([harmonics, channels], dim=-1).flatten(-2)
 
 
 class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
@@ -139,22 +269,35 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     else:
       raise ValueError(self.init_mode)
 
-    # Random Laplacian features of the state (`HyLaFeatures`): the trunk then
-    # consumes `hyla_dim` Euclidean features instead of the Poincaré
-    # coordinates (or, with `hyla_concat_state`, next to them); null keeps the
-    # coordinates.
+    # Input map of the state: random Laplacian features (`HyLaFeatures`,
+    # `hyla_dim`) or the hyperbolic-harmonic basis (`HarmonicFeatures`,
+    # `sphere_degree`); the trunk then consumes the features instead of the
+    # Poincaré coordinates (or, with `hyla_concat_state`, next to them); null
+    # keeps the coordinates.
     hyla_dim = config.model.get('hyla_dim', None)
+    sphere_degree = config.model.get('sphere_degree', None)
+    if hyla_dim is not None and sphere_degree is not None:
+      raise ValueError('model.hyla_dim and model.sphere_degree are alternative '
+                       'input maps; set at most one.')
     self.hyla = None
+    self.sphere = None
     self.hyla_concat_state = bool(config.model.get('hyla_concat_state', False))
+    factors = GeoUtils.resolve_prod_factors(
+      config.algo.prod_factor_dim, config.algo.prod_factor_gaussian_curvature,
+      embed_dim)
     if hyla_dim is not None:
       self.hyla = HyLaFeatures(
-        *GeoUtils.resolve_prod_factors(
-          config.algo.prod_factor_dim,
-          config.algo.prod_factor_gaussian_curvature, embed_dim),
-        num_features=hyla_dim, scale=config.model.hyla_scale,
-        seed=config.seed, radius_cap=config.model.get('hyla_radius_cap', None))
-    in_dim = embed_dim if self.hyla is None else (
-      hyla_dim + (embed_dim if self.hyla_concat_state else 0))
+        *factors, num_features=hyla_dim, scale=config.model.hyla_scale,
+        seed=config.seed, radius_cap=config.model.get('hyla_radius_cap', None),
+        normalize=bool(config.model.get('hyla_normalize', True)))
+      in_dim = hyla_dim + (embed_dim if self.hyla_concat_state else 0)
+    elif sphere_degree is not None:
+      self.sphere = HarmonicFeatures(
+        *factors, degree=sphere_degree,
+        radial_scales=list(config.model.get('sphere_radial_scales', [1, 2, 4, 8, 16, 32])))
+      in_dim = self.sphere.num_features
+    else:
+      in_dim = embed_dim
     self.in_proj = nn.Linear(in_dim, dim) if in_dim != dim else None
 
     self.self_conditioning = getattr(
@@ -314,14 +457,16 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     del x0
 
     # [B, L, embed_dim], a Poincaré-ball point consumed as-is (or through its
-    # HyLa features); the HBFM bridge state arrives in float64, the trunk runs
-    # at the parameters' precision.
-    if self.hyla is None:
-      x = xt
-    else:
+    # HyLa / harmonic features); the HBFM bridge state arrives in float64, the
+    # trunk runs at the parameters' precision.
+    if self.hyla is not None:
       x = self.hyla(xt)
       if self.hyla_concat_state:
         x = torch.cat([xt.to(x.dtype), x], dim=-1)
+    elif self.sphere is not None:
+      x = self.sphere(xt)
+    else:
+      x = xt
     x = x.to(self.sphere_embed.weight.dtype)
     if self.in_proj is not None:
       x = self.in_proj(x)

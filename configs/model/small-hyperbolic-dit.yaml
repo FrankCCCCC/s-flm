@@ -7,6 +7,9 @@ hyla_dim: null    # random Laplacian features (HyLa) of the state fed to the DiT
 hyla_scale: 1.0   # std of the HyLa eigenvalue draw lambda ~ N(0, hyla_scale^2) (the paper's s)
 hyla_radius_cap: null   # evaluate the HyLa map at min(s, cap) of the dimensionless radial s = rho/R (the features are ~0 past s ~ 6); null = no cap
 hyla_concat_state: false   # feed the Poincaré coordinates next to the HyLa features (in_proj sees embed_dim + hyla_dim) instead of replacing them
+hyla_normalize: true   # divide the features by sqrt(hyla_dim) (the paper's phi); false = unnormalized as in the reference code
+sphere_degree: null   # hyperbolic-harmonic features of the state fed to the DiT (HarmonicFeatures, the "sphere" map): max degree L of f_l(s) Y_lm(u) per H^3 factor, (L+1)^2 features + the radial channels; null = off; exclusive with hyla_dim
+sphere_radial_scales: [1, 2, 4, 8, 16, 32]   # radial channels tanh(s / c) per factor fed next to the harmonic features (s = rho/R, dimensionless)
 length: 1024
 n_blocks: 12
 n_heads: 12
