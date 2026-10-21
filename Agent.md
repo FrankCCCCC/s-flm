@@ -117,6 +117,34 @@ SLURM binaries live at `/usr/local/slurm/current/bin` (prepend to `PATH`). Parti
   - `kuleshov-compute-03`  — 10× RTX A5000, 24 GB      (partition `desa`)
   - `desa-compute-01`      — 8× RTX 2080 Ti, 11 GB      (partition `desa`; EXCLUDE)
 
+**sc3379@G3** — the account Claude Code sessions run as; submit SLURM directly.
+G3 is a separate CoECIS cluster that shares Unicorn's Slurm DB (docs:
+https://it.coecis.cornell.edu/researchit/g3/).
+
+- Interconnection between Unicorn and G3: from the Unicorn login node, add `-M g3` to
+  `sbatch`/`squeue`/`sinfo`/`scancel` (`simple_slurm`: `clusters="g3"`). Sweep idempotency
+  checks must also use `squeue -M g3`. Direct login `ssh sc3379@g3-login-0{1,2}.coecis.cornell.edu`
+  needs campus/VPN + NetID password (no SSH key set up, so `BatchMode` ssh fails).
+- Account / QoS: account `thickstun`, QoS `g3` (default) or `thickstun`:
+  - `--qos=thickstun` — priority 100, **8 GPUs total for the whole group**, 1-day max wall,
+    preempts `g3`-QoS jobs.
+  - `--qos=g3` — priority 10, scavenges idle GPUs, preemptible, 1-day max wall.
+- Partitions: `g3` (default), `g3-interactive` (8 h max). Unspecified job defaults: 4 h,
+  1 CPU, 1 GB RAM — always set time/mem/cpus.
+- Wall time is **not** infinite (unlike Unicorn): 1-day cap, plus maintenance every 2nd and
+  4th Wednesday 2 PM kills running jobs. Submit with `--requeue`; a requeued job reruns its
+  script and resumes from `${OUTPUT_DIR}/checkpoints/last.ckpt`.
+- GPUs (memory per NVIDIA spec, not checked on the nodes):
+  - `g3-compute-[01-16]` — 8× B300 SXM6, ~288 GB, 256 CPUs, ~2 TB RAM  (`--gres=gpu:nvidia_b300_sxm6_ac:<n>`)
+  - `g3-compute-17`      — 8× B200, ~180 GB, 224 CPUs, ~2 TB RAM       (`--gres=gpu:nvidia_b200:<n>`)
+- Storage: `/home/<netid>` and `/share/<DATASERVER>/` (group NFS), `/scratch/datasets`
+  (shared datasets), `/scratch` (node-local, user cleans up). Slurm does not copy files
+  between clusters — whether this repo (`/share/desa/nfs02/...`) and the `sfm` env are
+  mounted on G3 is **unverified**; check before submitting.
+- Software: CUDA 13.3, cuDNN 9.25.1, Anaconda `/share/apps/software/anaconda3/`. Login
+  nodes are for submission only; build conda envs inside a `salloc` job.
+
+
 **ch2263@Unicorn** — borrowed account, reached over SSH from sc3379.
 
 - Interconnection between sc3379 and ch2263:
