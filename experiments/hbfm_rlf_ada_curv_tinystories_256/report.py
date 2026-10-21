@@ -18,7 +18,7 @@ import statistics
 
 OUT = '/share/desa/nfs02/sc3379/workspace/research/s-flm-dev/s-flm/outputs/hbfm_rlf_ada_curv_tinystories_256'
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'RESULTS.md')
-TAG = re.compile(r'cb-[\d.]+_mode-(\w+?)_rate-([\d.]+)_ub-(na|[\d.]+)_tm-([\d.]+)_lr-([\d.e-]+)_seed-(\d+)$')
+TAG = re.compile(r'cb-[\d.]+_mode-(\w+?)_rate-([\d.]+)_ub-(na|[\d.]+)_tm-([\d.]+)_lr-([\d.e-]+)(?:_fwd-(\w+))?_seed-(\d+)$')
 EVAL = re.compile(r'eval(?:_step(\d+))?(?:_tmax([\d.]+))?$')
 MODE = {'exp': 0, 'texp': 1, 'unif': 2}
 
@@ -54,30 +54,30 @@ def main():
     gen = load(f'{ed}/samples_genppl.json')
     if not (m and e and gen):
       continue
-    mode, rate, ub, tm, lr, seed = m.groups()
+    mode, rate, ub, tm, lr, fwd, seed = m.groups()
     step, tm = int(e.group(1) or 30000), float(e.group(2) or tm)
     lam = (load(f'{os.path.dirname(ed)}/curvature.json') or {}).get(str(step), {}).get('mean')
     text = gen.get('text', [])
-    rows[(mode, float(rate), ub, lr, tm, step, int(seed))] = dict(
+    rows[(mode, float(rate), ub, lr, tm, step, fwd or 'naive', int(seed))] = dict(
       lam=lam, clock=lam * tm if lam else None, ppl=(load(f'{ed}/ppl.json') or {}).get('val/ppl'),
       gen=gen.get('gen_ppl_first_chunk_retok'), ent=gen.get('entropy'), uniq=f'{len(set(text))}/{len(text)}')
 
-  head = '| mode | rate | ub | LR | t_max | step |'
+  head = '| mode | rate | ub | LR | t_max | step | fwd |'
   per = [head + ' seed | λ | λ·t_max | val/ppl | GenPPL | entropy | uniq |',
-         '|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|']
+         '|---|---|---|---|---|---|---|---|---:|---:|---:|---:|---:|---:|']
   groups = {}
   for key in sorted(rows, key=order):
     r = rows[key]
-    mode, rate, ub, lr, tm, step, seed = key
+    mode, rate, ub, lr, tm, step, fwd, seed = key
     rate = '–' if mode == 'unif' else f'{rate:g}'
-    per.append(f'| {mode} | {rate} | {ub} | {lr} | {tm:g} | {step} | {seed} | {fmt(r["lam"], 3)} | '
+    per.append(f'| {mode} | {rate} | {ub} | {lr} | {tm:g} | {step} | {fwd} | {seed} | {fmt(r["lam"], 3)} | '
                f'{fmt(r["clock"], 3)} | {fmt(r["ppl"], 3)} | {fmt(r["gen"])} | {fmt(r["ent"], 3)} | {r["uniq"]} |')
-    groups.setdefault(key[:6], []).append(r)
-  agg = [head + ' n | λ | GenPPL | entropy |', '|---|---|---|---|---|---|---:|---:|---:|---:|']
+    groups.setdefault(key[:7], []).append(r)
+  agg = [head + ' n | λ | GenPPL | entropy |', '|---|---|---|---|---|---|---|---:|---:|---:|---:|']
   for key, rs in sorted(groups.items(), key=lambda kv: order(kv[0])):
-    mode, rate, ub, lr, tm, step = key
+    mode, rate, ub, lr, tm, step, fwd = key
     rate = '–' if mode == 'unif' else f'{rate:g}'
-    agg.append(f'| {mode} | {rate} | {ub} | {lr} | {tm:g} | {step} | {len(rs)} | '
+    agg.append(f'| {mode} | {rate} | {ub} | {lr} | {tm:g} | {step} | {fwd} | {len(rs)} | '
                f'{mean_std([r["lam"] for r in rs], 3)} | {mean_std([r["gen"] for r in rs], 2)} | '
                f'{mean_std([r["ent"] for r in rs], 3)} |')
   table = (f'{len(rows)} evaluated (cell, step, horizon) reads.\n\n### Per read\n\n' + '\n'.join(per)

@@ -4,7 +4,7 @@
 Spec: `setup.md`. Method: `experiments/hbfm_rlf_ada_curv/math.md`. Design: `EXPERIMENT.md`.
 
 Every cell is the spec's HBFM run (small DiT 768/12/12, (H^3)^16 = embed_dim 48 at base curvature
-K = -0.5, naive readout, log-linear noise, 30k steps, global batch 512, bf16, EMA 0.9999, AdamW wd 0,
+K = -0.5, naive readout (horosphere in stage 4), log-linear noise, 30k steps, global batch 512, bf16, EMA 0.9999, AdamW wd 0,
 clip 1.0, checkpoints every 1k + keep-{step}.ckpt every 5k) with the adaptive-curvature bound `cb`
 (`algo.curvature_bound`; 1 = fixed curvature) and the knobs the task varies: time_conversion_mode,
 time_exp_rate, time_range_upper_bound, LR in {3e-4, 5e-4, 1e-3}. Eval as
@@ -63,7 +63,7 @@ SITES = {
 }
 
 MODE_TAG = {'exp': 'exp', 'trunc_exp': 'texp', 'unif': 'unif'}
-SPEC = dict(cb=4.0, mode='exp', rate=3.0, ub=None, lr='3e-4')   # setup.md's proposal, clock free
+SPEC = dict(cb=4.0, mode='exp', rate=3.0, ub=None, lr='3e-4', fwd='naive')   # setup.md's proposal, clock free
 
 
 def cell(**kw):
@@ -99,6 +99,11 @@ STAGES = {
     cell(mode='trunc_exp', ub=0.75),
     cell(mode='trunc_exp', ub=1.5),
   ],
+  # The best cell F with the horosphere readout (setup.md's forward_type axis; requested 2026-10-20),
+  # seeds 1-3 (--seeds 1,2,3); everything else as F.
+  '4': [
+    cell(mode='trunc_exp', ub=1.0, fwd='horosphere'),
+  ],
 }
 
 
@@ -108,13 +113,14 @@ def t_max(c):
 
 def tag_of(c, seed):
   ub = 'na' if c['ub'] is None else f'{c["ub"]:g}'
+  fwd = '' if c['fwd'] == 'naive' else '_fwd-horo'   # naive cells keep their directories
   return (f'cb-{c["cb"]:g}_mode-{MODE_TAG[c["mode"]]}_rate-{c["rate"]:g}_ub-{ub}_tm-{t_max(c):g}'
-          f'_lr-{c["lr"]}_seed-{seed}')
+          f'_lr-{c["lr"]}{fwd}_seed-{seed}')
 
 
 def knobs(c, tm):
   ub = 1.0 if c['ub'] is None else c['ub']
-  return (f'FORWARD_TYPE=naive EMBED_DIM=48 FACTOR_DIM=3 GAUSS_CURV=-0.5 CURV_BOUND={c["cb"]:g} '
+  return (f'FORWARD_TYPE={c["fwd"]} EMBED_DIM=48 FACTOR_DIM=3 GAUSS_CURV=-0.5 CURV_BOUND={c["cb"]:g} '
           f'TIME_CONVERSION_MODE={c["mode"]} PROPOSAL_RATE={c["rate"]:g} TIME_RANGE_UPPER_BOUND={ub:g} '
           f'T_MAX={tm:g} READOUT_PRECISION=float32 GLOBAL_BATCH=512 SEQ_LEN=256')
 

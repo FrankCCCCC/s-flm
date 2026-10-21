@@ -173,3 +173,38 @@ exact arm — seed 1 on ch2263, seeds 2–3 on sc3379 — for ODE@0.75 and SDE-s
 `frontier_cells.csv`, all figure tables in `figures/frontier_tables.md`. 46 seed-1 cells were run on
 both sites (the `_x` jobs) when ch2263 fell to 3 GPUs; the 44 ODE@t_max-1 extras are left to drain
 at the back of ch2263's queue and are not presented.
+
+## Stage 4: F with the horosphere readout (requested 2026-10-20)
+
+The best cell F (`trunc_exp`, rate 3, ub 1, own horizon t_max 1, bound b = 4, LR 3e-4; naive:
+GenPPL 12.21 ± 0.26 @ entropy 3.949 ± 0.016 over seeds 1–3) with `algo.forward_type = horosphere`
+(`setup.md`'s forward_type axis: the DiT logits become a residual on the per-word Busemann
+log-densities), seeds 1–3: `python sweep.py --stage 4 --site a100 --seeds 1,2,3`. Tag suffix
+`_fwd-horo`; naive cells keep their directories (`tag_of`), and `report.py` gained a `fwd` column
+(its regenerated tables differ from the previous ones only by that column).
+
+Everything else is F's. The Hydra config composed for the new cell, diffed against F seed 1's
+`.hydra/config.yaml`, differs only in `algo.forward_type`, the run name / checkpoint path, and keys
+the CE objective does not read (`algo.sc_*`; `sampler.step_type = em`, the step F was sampled with,
+and its unused `gt_method`). The code is the current tree, synced to ch2263 on 2026-10-20: against the
+copy F trained with it adds the `elbo` / `angular` / `sc` objectives
+(`experiments/sc_ang_elbo_tinystories_256`) and leaves the CE loss, the bridge and the horosphere
+readout unchanged. Site `a100`, as all three F seeds: 1 A100 × micro-batch 64 × accum 8, so
+`loader.batch_size` and `trainer.devices` match too. The sample script gets `FORWARD_TYPE` as well
+(`knobs`), so the eval reads the horosphere posterior. Expected cost, from the horosphere readout's
+≈ 2.4× of naive (`claude_test_hbfm_tinystories_256`, stage 4): ≈ 4.6 s/step, ≈ 38 h per seed on one
+A100, plus the eval.
+
+Submitted 2026-10-20 23:34: jobs 447996–447998 (`nlplarge-claire-highpri,nlplarge`, `--requeue`),
+pending: the A100 node was full (8/8 GPUs) and two jobs of another session wait ahead of them (Slurm's
+estimate for the first: 2026-10-21 07:30). The 4-GPU sc3379 nodes were CPU-saturated by other users'
+jobs (`sbatch --test-only`: no start in the scheduling horizon). Results come back with
+`python sweep.py --pull`, then `python report.py`; λ per checkpoint with `curvature_ts.py`.
+Memory check (job 448081, 2026-10-20 23:36, one RTX 6000 Ada 48 GB): 3 optimizer steps of the cell at
+micro-batch 64 peak at 28.5 GB, so the A100 layout fits with room to spare.
+Status 2026-10-21 09:00: seeds 2 and 3 (447997, 447998) started at 04:56 and 05:06 and run at 1.49
+micro-batches/s, i.e. 5.4 s per optimizer step, so about 45 h for 30k steps (done around 2026-10-23
+02:00, plus the evals). The `OSError: Device or resource busy` lines near the top of their logs come
+from data-loader temp-dir cleanup before training starts; the naive seed-1 logs have them too.
+Seed 1 (447996) is still pending: the node's 8 GPUs are taken, and four queued jobs of the
+elbo_ts_sphere session have higher priority.
