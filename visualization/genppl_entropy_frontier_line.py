@@ -14,6 +14,15 @@ temperature curve from `sd-*/tfrontier/nfe-*_t-*/`, plus the top_k_v = 1
 velocity variant, which is temperature-inert and is drawn as a single marker
 per NFE (App. C.8) from the eta=0 ODE cells of `frontier_sweep.py`.
 
+`--hbfm-dir` adds HBFM measured by
+`experiments/hbfm_rlf_ada_curv_tinystories_256/frontier_sweep.py`, per model (ada = adaptive
+curvature, fix = fixed curvature) at the sampler horizon given by `--hbfm-tmax`: the
+exact-velocity temperature curve from `<model>_sd-*/tmax-<t>_exact/` and the T-inert
+top_k_v = 1 marker from `<model>_sd-*/tmax-<t>_k1/`. An arm with a `-ode` / `-sde-<gt>`
+suffix (`frontier_sweep.py --step-type`) is its own method, `hbfm-<model>-ode` /
+`hbfm-<model>-sde-<gt>` (`-k1` for the marker), with its own horizon key in `--hbfm-tmax`
+(e.g. `ada-ode:0.75 ada-sde-sqrt:1`); only the listed (sampler, horizon) pairs are drawn.
+
 Writes the figure and a per-cell csv, and prints the markdown result tables.
 
 Example:
@@ -37,16 +46,36 @@ EFLM_T_RE = re.compile(
 EFLM_K1_RE = re.compile(
   r'/sd-(?P<seed>\d+)/frontier/nfe-(?P<nfe>\d+)_gt-ode_eta-0'
   r'/samples_genppl\.json$')
+HBFM_RE = re.compile(
+  r'/(?P<model>ada|fix)_sd-(?P<seed>\d+)/tmax-(?P<tmax>[\d.]+)_(?P<arm>k1|exact)'
+  r'(?P<step>-ode|-sde-[a-z0-9]+)?'
+  r'/nfe-(?P<nfe>\d+)_t-(?P<temp>[\d.]+)/samples_genppl\.json$')
 EFLM_SDE_RE = re.compile(
   r'/sd-(?P<seed>\d+)/nfe-(?P<nfe>\d+)_eta-(?P<eta>[\d.]+)_t-(?P<temp>[\d.]+)'
   r'/samples_genppl\.json$')
 STYLE = {'mdlm': ('MDLM', '#1f77b4'), 'duo': ('DUO', '#ff7f0e'),
          'flm': ('FLM', '#2ca02c'), 'ar': ('AR', '#d62728'),
          'sfmta': ('S-FLM (trunc+ada)', '#9467bd'),
-         'eflm': ('EFLM (exact vel.)', '#17becf'),
+         'eflm': ('EFLM (exact vel.)', '#bcbd22'),
          'eflm-k1': ('EFLM (k=1 vel.)', '#8c564b'),
-         'eflm-sde': ('EFLM (SDE eta*, exact vel.)', '#e377c2')}
-MARKERS = ['eflm-k1']   # temperature-inert: one point per NFE, not a curve
+         'eflm-sde': ('EFLM (SDE eta*, exact vel.)', '#e377c2'),
+         'hbfm-ada': ('HBFM adaptive curv. (exact vel.)', '#d62728'),
+         'hbfm-fix': ('HBFM fixed curv. (exact vel.)', '#17becf'),
+         'hbfm-ada-k1': ('HBFM adaptive curv. (k=1 vel.)', '#d62728'),
+         'hbfm-fix-k1': ('HBFM fixed curv. (k=1 vel.)', '#17becf'),
+         'hbfm-ada-ode': ('HBFM adaptive curv., ODE (exact vel.)', '#e377c2'),
+         'hbfm-ada-ode-k1': ('HBFM adaptive curv., ODE (k=1 vel.)', '#e377c2'),
+         **{f'hbfm-ada-sde-{gt}{k}': (f'HBFM adaptive curv., SDE g=(1-s)^{p} ({v} vel.)', '#7f7f7f')
+            for gt, p in (('sqrt', '0.5'), ('linear', '1'), ('quad', '2'))
+            for k, v in (('', 'exact'), ('-k1', 'k=1'))}}
+# temperature-inert: one point per NFE, not a curve
+MARKERS = ['eflm-k1', 'hbfm-ada-k1', 'hbfm-fix-k1', 'hbfm-ada-ode-k1',
+           'hbfm-ada-sde-sqrt-k1', 'hbfm-ada-sde-linear-k1', 'hbfm-ada-sde-quad-k1']
+# the HBFM step types: the line / marker shape tells them apart
+LINESTYLE = {'hbfm-ada-ode': '--', 'hbfm-ada-sde-sqrt': ':', 'hbfm-ada-sde-linear': ':',
+             'hbfm-ada-sde-quad': ':'}
+MARKER = {'hbfm-ada-ode-k1': '^', 'hbfm-ada-sde-sqrt-k1': 's', 'hbfm-ada-sde-linear-k1': 's',
+          'hbfm-ada-sde-quad-k1': 's'}
 
 
 def load(dir_, lr):
@@ -87,6 +116,30 @@ def load_eflm(dir_):
                         entropy=d['entropy'],
                         num_unique=len(set(d['text'])),
                         num_samples=len(d['text'])))
+  return cells
+
+
+def load_hbfm(dir_, tmax_of_model):
+  """HBFM cells at each (model, step type)'s chosen sampler horizon (`tmax_of_model`:
+  {'ada': t, 'fix': t, 'ada-ode': t, 'ada-sde-<gt>': t}): the exact-velocity T-curve + the
+  T-inert k=1 marker."""
+  cells = []
+  for path in sorted(glob.glob(os.path.join(
+      dir_, '*_sd-*/tmax-*_*/nfe-*_t-*/samples_genppl.json'))):
+    m = HBFM_RE.search(path)
+    if m is None:
+      continue
+    key = f"{m['model']}{m['step'] or ''}"
+    if tmax_of_model.get(key) != float(m['tmax']):
+      continue
+    d = json.load(open(path))
+    cells.append(dict(method=f'hbfm-{key}' + ('-k1' if m['arm'] == 'k1' else ''),
+                      seed=int(m['seed']), nfe=int(m['nfe']),
+                      temp=float(m['temp']) if m['arm'] == 'exact' else float('nan'),
+                      gen_ppl=d['gen_ppl_first_chunk_retok'],
+                      entropy=d['entropy'],
+                      num_unique=len(set(d['text'])),
+                      num_samples=len(d['text'])))
   return cells
 
 
@@ -148,13 +201,14 @@ def plot(cells, methods, nfes, out, title):
       label, color = STYLE.get(m, (m, None))
       ax.fill_between(c[:, 1], c[:, 3] - c[:, 4], c[:, 3] + c[:, 4],
                       color=color, alpha=0.2, linewidth=0)
-      ax.plot(c[:, 1], c[:, 3], '-o', ms=3.5, color=color, label=label)
+      ax.plot(c[:, 1], c[:, 3], LINESTYLE.get(m, '-') + 'o', ms=3.5, color=color, label=label)
     for m in MARKERS:
       q = point(cells, m, nfe)
       if q is None:
         continue
       label, color = STYLE.get(m, (m, None))
-      ax.errorbar(q[0], q[2], xerr=q[1], yerr=q[3], fmt='*', ms=13,
+      ax.errorbar(q[0], q[2], xerr=q[1], yerr=q[3], fmt=MARKER.get(m, '*'),
+                  ms=9 if m in MARKER else 13,
                   color=color, ecolor=color, elinewidth=1, label=label)
     ax.set_yscale('log')
     ax.set(title=f'NFE = {nfe}',
@@ -255,6 +309,11 @@ def main():
                  help='chosen eta per NFE, e.g. 32:4 64:16 128:32')
   p.add_argument('--eflm-dir', default='outputs/eflm_sde',
                  help="EFLM cells (experiments/eflm_sde); '' to disable")
+  p.add_argument('--hbfm-dir', default='',
+                 help='HBFM cells (experiments/hbfm_rlf_ada_curv_tinystories_256)')
+  p.add_argument('--hbfm-tmax', nargs='+', default=[],
+                 help='sampler horizon per HBFM model / step type, e.g. ada:0.75 fix:0.5 '
+                      'ada-ode:1 ada-sde-sqrt:1')
   p.add_argument('--out', default='experiments/naive_ar_tinystories_s256/'
                  'figures/genppl_entropy_frontier_line.png')
   p.add_argument('--csv', default='experiments/naive_ar_tinystories_s256/'
@@ -271,6 +330,9 @@ def main():
     cells += load_eflm_sde(args.eflm_sde_dir,
                            {int(k): float(v) for k, v in
                             (s.split(':') for s in args.eflm_sde_eta)})
+  if args.hbfm_dir:
+    cells += load_hbfm(args.hbfm_dir, {k: float(v) for k, v in
+                                       (s.split(':') for s in args.hbfm_tmax)})
   methods = [m for m in args.methods.split(',')
              if any(c['method'] == m for c in cells)]
   # Panels follow the swept-curve NFE grid; markers are drawn only where a

@@ -27,6 +27,7 @@ FORWARD_TYPE="${FORWARD_TYPE:-naive}" # gaussian: logits are a residual on log N
 COV_WEIGHT="${COV_WEIGHT:-false}"    # weight the CE by |alpha_t'| (dt -> d alpha); not with SNR_CE or an adaptive schedule
 TAU_MAX="${TAU_MAX:-1.834}"         # autonomous horizon; tau*(R)=-log(1-alpha*(R)) truncates at the decode point
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
+LOSS_TYPE="${LOSS_TYPE:-ce}"         # ce: denoising CE / elbo: the VDM NELBO (algo.loss_type)
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
 # default ddp strategy (find_unused_parameters=false) errors on that -> enable when self-cond.
 if [ "${SELF_COND}" = "true" ]; then SC_STRAT="strategy.find_unused_parameters=true"; else SC_STRAT=""; fi
@@ -48,6 +49,7 @@ python -u -m main \
     algo.snr_weighted_ce="${SNR_CE}" \
     algo.noise_sched_cov_weight="${COV_WEIGHT}" \
     algo.forward_type="${FORWARD_TYPE}" \
+    algo.loss_type="${LOSS_TYPE}" \
     noise=autonomous \
     noise.tau_max=${TAU_MAX} \
     noise.alpha_max=${ALPHA_MAX} \

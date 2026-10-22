@@ -26,7 +26,7 @@ python -u -m main \
     loader.global_batch_size=512 \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \
-    loader.num_workers=8 \
+    loader.num_workers=${NUM_WORKERS:-8} \
     optim.lr=${LR} \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \

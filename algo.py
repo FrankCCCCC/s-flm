@@ -15,7 +15,7 @@ from numeric.geo_bridge import (
   GeoUtils, HyperbolicHeatKernel, BinaryHyperbolicHeatKernel,
   Coordinate, Geometry)
 from numeric.horosphere import HorosphereGeometry
-from numeric.loss import HyperBridge
+from numeric.loss import HyperBridge, Loss
 
 
 class AR(trainer_base.TrainerBase):
@@ -409,6 +409,9 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     if backbone_type == 'sphere-arch' and not self.renormalize_weights:
       raise ValueError('Backbone sphere-arch requires '
                        'algo.renormalize_weights=True.')
+    if self.loss_type not in ('ce', 'elbo'):
+      raise ValueError(f'EFLM requires algo.loss_type in (ce, elbo), got '
+                       f'{self.loss_type}.')
 
   def _process_model_output(self, model_output, xt, sigma,
                             context=None):
@@ -462,24 +465,82 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
     return out
 
   def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
-                    low_var=False, context=None, train_mode=False):
-    del xt, low_var, context
+                    low_var=False, context=None, train_mode=False,
+                    valid_tokens=None):
+    del xt, low_var, context, train_mode
+    if self.loss_type == 'elbo':
+      return self.elbo_loss(log_x_theta, x0, alpha_t, dalpha_t, valid_tokens)
+    elif self.loss_type == 'ce':
+      ce_loss = self.ce_loss(log_x_theta, x0)
 
-    ce_loss = -log_x_theta.gather(
-      -1, x0.unsqueeze(-1)).squeeze(-1)
+      if self.noise_sched_cov_weight:
+        # Change of variables: t ~ U(0, 1) estimates int L dt, so |alpha_t'|
+        # reweights it onto int L d alpha, the uniform-alpha measure (a no-op
+        # on log-linear, where alpha is already affine in t).
+        ce_loss = dalpha_t.abs() * ce_loss
+        return ce_loss
 
-    if self.snr_weighted_ce:
-      # Variational bound: the CE stands in for the ||x - x_hat||^2 of VDM
-      # Eq. 16, weighted by -SNR'(t)/2 (t ~ U(0, 1) is the MC estimator).
-      ce_loss = snr_weight(alpha_t, dalpha_t, self.invert_time_convention,
-                           self.eps) * ce_loss
-    if self.noise_sched_cov_weight:
-      # Change of variables: t ~ U(0, 1) estimates int L dt, so |alpha_t'|
-      # reweights it onto int L d alpha, the uniform-alpha measure (a no-op
-      # on log-linear, where alpha is already affine in t).
-      ce_loss = dalpha_t.abs() * ce_loss
+      if self.snr_weighted_ce:
+        # Variational bound: the CE stands in for the ||x - x_hat||^2 of VDM
+        # Eq. 16, weighted by -SNR'(t)/2 (t ~ U(0, 1) is the MC estimator).
+        ce_loss = snr_weight(alpha_t, dalpha_t, self.invert_time_convention,
+                            self.eps) * ce_loss
+      return ce_loss
+    else:
+      raise ValueError(f"Unsupported loss type: {self.loss_type}")
 
-    return ce_loss
+  def diffusion_loss(self, log_x_theta, x0, alpha_t, dalpha_t):
+    """Diffusion term of the NELBO per token (VDM Eq. 17, Plaid Eq. 5):
+    -SNR'(t)/2 ||e_x0 - x_hat||^2 with Plaid's categorical reparameterization
+    x_hat = sum_v p_theta(v | x_t) e_v (Sec. 3.2). The posterior mean is the
+    Bayes-optimal denoiser, so p_theta = q(v | x_t) minimizes it and makes the
+    bound tight (experiments/elfm_hbfm_ada_curv_elbo_sudoku/math.md)."""
+    with torch.autocast('cuda', enabled=False):  # bf16 would swamp the error
+      table = self._sc_embed_table().float()
+      x_hat = log_x_theta.float().exp() @ table
+      sq_err = (table[x0] - x_hat).square().sum(-1)
+    return snr_weight(alpha_t, dalpha_t, self.invert_time_convention,
+                      self.eps) * sq_err
+
+  def prior_loss(self, x0, alpha_t):
+    b = (alpha_t if self.invert_time_convention else 1.0 - alpha_t).unsqueeze(-1)
+    e = self.backbone.get_rescaled_embeddings(x0, self.rho_min, self.rho_max)
+    ratio = b.square() / self.config.algo.prior_cov
+    prior = 0.5 * (e.shape[-1] * (ratio - 1.0 - ratio.log())
+                   + (1.0 - b).square() * e.square().sum(-1)
+                   / self.config.algo.prior_cov)
+    return prior
+
+  @staticmethod
+  def ce_loss(log_p, x0):
+    return -log_p.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
+
+  def reconstruction_loss(self, x0, alpha_t, valid_tokens):
+    xt = self.q_xt(x0, alpha_t, use_pure_noise=False, valid_tokens=valid_tokens)
+    log_p = self.forward(x0=x0, xt=xt, sigma=self._sigma_from_alphat(alpha_t),
+                         context=None)
+    return self.ce_loss(log_p, x0)
+
+  def endpoint_losses(self, x0, valid_tokens):
+    """The two endpoint terms of the NELBO (VDM Eq. 3, Plaid Eq. 3), [B, L]:
+    the reconstruction CE -log p_theta(x0 | x_t) at the clean end of the
+    trained time range, read from the same categorical readout (Plaid's
+    learned conditional likelihood, Sec. 3.4), and the closed-form prior KL
+    of the noisy end, KL(N((1 - b) e_x0, b^2 I) || N(0, prior_cov I))."""
+    t_clean, t_noisy = ((1.0, self.sampling_eps) if self.invert_time_convention
+                        else (self.sampling_eps, 1.0))
+    t = torch.full((x0.shape[0],), t_clean, device=x0.device)
+    _, alpha_t = self.noise(t)
+    alpha_t = alpha_t.unsqueeze(-1)
+    reconstruction = self.reconstruction_loss(x0, alpha_t, valid_tokens)
+
+    _, alpha_t = self.noise(torch.full_like(t, t_noisy))
+    prior = self.prior_loss(x0, alpha_t)
+    return reconstruction + prior
+
+  def elbo_loss(self, log_x_theta, x0, alpha_t, dalpha_t, valid_tokens):
+    return (self.diffusion_loss(log_x_theta, x0, alpha_t, dalpha_t)
+            + self.endpoint_losses(x0, valid_tokens))
 
   def _lerp(self, clean, noisy, alpha_t):
     # alpha_t = 0 -> clean, alpha_t = 1 -> noisy
@@ -528,7 +589,7 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
       log_x_theta=log_x_theta, xt=xt, x0=x0,
       alpha_t=alpha_t, dalpha_t=dalpha_t,
       low_var=train_mode and self.loss_type == 'low_var',
-      context=context, train_mode=train_mode)
+      context=context, train_mode=train_mode, valid_tokens=valid_tokens)
 
     return loss, t
 
@@ -880,15 +941,25 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
   `_process_model_output` adds to the horosphere (Busemann) log-densities of
   z_t's polar coordinates, so `forward` returns the full log-posterior
   (Invariant 1). The loss is the importance-weighted heat-time
-  integral of the denoising CE. `self.noise` supplies alpha_t only, and
+  integral of the denoising CE (`algo.loss_type=ce`) or of the bridge's
+  path-KL rate plus the reconstruction CE at the horizon, the NELBO
+  (`algo.loss_type=elbo`, slides/oct07_2026). `self.noise` supplies alpha_t only, and
   since the posterior does not depend on t the backbone is not
   time-conditioned by default (`algo.time_conditioning`).
+
+  Adaptive curvature (`algo.curvature_bound` > 1,
+  experiments/hbfm_rlf_ada_curv/math.md): position i runs at curvature
+  lambda_i * K, i.e. the same bridge on its own clock lambda_i * t, with
+  lambda_i read off the backbone's curvature readout (`curvature_scale`). Its
+  CE is weighted by lambda_i, which leaves the mean of the loss unchanged, and
+  lambda is trained to minimize the variance of the loss.
   """
 
   def __init__(self, config, tokenizer):
     super().__init__(config, tokenizer)
     self.renormalize_weights = config.algo.renormalize_weights
     self.invert_time_convention = config.algo.invert_time_convention
+    self.curvature_bound = config.algo.curvature_bound
     self.prod_factor_dim, self.prod_factor_gaussian_curvature = (
       self._resolve_prod_factors(config.algo, self.backbone.embed_dim))
     # sample_radial forms the heat-kernel marginal in linear float64, which
@@ -908,33 +979,11 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
 
   @staticmethod
   def _resolve_prod_factors(algo_config, embed_dim):
-    """`prod_factor_dim` / `prod_factor_gaussian_curvature` as plain lists.
-
-    An int splits embed_dim into equal factors and a float shares the
-    curvature; lists spell the factors out; null means one factor of the full
-    embed_dim at curvature -1. Plain python lists, not ListConfig:
-    `GeoUtils.validate_prod_factors` dispatches on `isinstance(x, list)`.
-    """
-    dims = algo_config.prod_factor_dim
-    curvatures = algo_config.prod_factor_gaussian_curvature
-    if dims is None:
-      dims = [embed_dim]
-    elif isinstance(dims, int):
-      if embed_dim % dims != 0:
-        raise ValueError(f'algo.prod_factor_dim={dims} must divide '
-                         f'model.embed_dim={embed_dim}.')
-      dims = [dims] * (embed_dim // dims)
-    else:
-      dims = [int(d) for d in dims]
-    if curvatures is None:
-      curvatures = [-1.0] * len(dims)
-    elif isinstance(curvatures, (int, float)):
-      curvatures = [float(curvatures)] * len(dims)
-    else:
-      curvatures = [float(k) for k in curvatures]
-    return GeoUtils.validate_prod_factors(
-      prod_factor_dim=dims, prod_factor_gaussian_curvature=curvatures,
-      embedding_size=embed_dim)
+    """`prod_factor_dim` / `prod_factor_gaussian_curvature` as plain lists
+    (`GeoUtils.resolve_prod_factors`, shared with the backbone's HyLa map)."""
+    return GeoUtils.resolve_prod_factors(
+      algo_config.prod_factor_dim, algo_config.prod_factor_gaussian_curvature,
+      embed_dim)
 
   def _validate_configuration(self):
     super()._validate_configuration()
@@ -948,6 +997,12 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     if self.config.algo.time_exp_rate <= 0:
       raise ValueError('time_exp_rate must be > 0, got '
                        f'{self.config.algo.time_exp_rate}.')
+    if self.curvature_bound < 1:
+      raise ValueError('curvature_bound must be >= 1 (1 = fixed curvature), '
+                       f'got {self.curvature_bound}.')
+    if self.loss_type not in ('ce', 'elbo'):
+      raise ValueError(f'HBFM requires algo.loss_type in (ce, elbo), got '
+                       f'{self.loss_type}.')
     mode = self.config.algo.time_conversion_mode
     if mode in ('unif', 'trunc_exp'):
       upper = self.config.algo.time_range_upper_bound
@@ -967,6 +1022,21 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
   def model_forward(self, z, t):
     # HyperbolicModelBase's trunk hook.
     return self.backbone(None, z, t, None)
+
+  def curvature_scale(self, xt):
+    """Adaptive curvature K_i = lambda_i * K of every position: lambda
+    ([B, L], in [1 / curvature_bound, curvature_bound]) from the backbone's
+    curvature readout at the t = 0 state `xt` (every bridge at the origin, the
+    prompt pinned at the clean end) -- what the forward bridge and the sampler
+    both know along the whole path."""
+    sigma = torch.zeros(xt.shape[0], device=xt.device)
+    with torch.amp.autocast('cuda', dtype=torch.float32):
+      raw = self.backbone.curvature(xt, sigma)
+    # Read on the scale of one hidden unit (the sum over the D units over
+    # sqrt(D)): a plain sum would move log lambda by O(lr * D) per optimizer
+    # step and chase the sign of every batch's noisy gradient.
+    raw = raw.to(torch.float64) / self.config.model.hidden_size ** 0.5
+    return self.curvature_bound ** torch.tanh(raw)
 
   def _process_model_output(self, model_output, xt, sigma,
                             context=None):
@@ -1051,13 +1121,17 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     return GeoUtils.hyperbolic_polar_to_poincare_cartesian_prod(
       rhos, thetas, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
 
-  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None):
+  def q_xt(self, x, alpha_t, use_pure_noise, valid_tokens=None,
+           curvature=None):
     """Bridge state at the heat time of `alpha_t` ([B, 1], one per sequence)
     and its importance weight: `(xt, weight)` with `xt` the per-factor
     Poincaré-ball points concatenated, [B, L, sum(d_m)] float64 (the
     `Coordinate.CARTESIAN` output of `poincare_bridge_prod`), and the weight
     [B, 1]. Positions with `valid_tokens == 0` (the sudoku prompt) are pinned
-    at the clean end of the bridge.
+    at the clean end of the bridge. With `curvature` ([B, L],
+    `curvature_scale`) position i is drawn at its own heat time
+    curvature_i * t and the weight is [B, L], weight * curvature_i: the
+    importance weight of that clock.
     """
     if use_pure_noise:
       raise NotImplementedError('HyperbolicBoundaryFM does not support pure-noise training.')
@@ -1068,14 +1142,21 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       exp_rate=self.config.algo.time_exp_rate,
       range_upper_bound=self.config.algo.time_range_upper_bound
     )
+    targets = x
+    if curvature is not None:
+      # One heat time per position: [B * L] times of one-token sequences.
+      infinite_timestep = infinite_timestep * curvature
+      weight = weight * curvature
+      targets = x.reshape(-1, 1)
     xt = HyperbolicHeatKernel.poincare_bridge_prod(
       ts=infinite_timestep.reshape(-1).clamp_max(self.max_heat_time),
-      targets=x,
+      targets=targets,
       word_embedding=self.word_embedding,
       output_coord=Coordinate.CARTESIAN,
       prod_factor_dim=self.prod_factor_dim,
       prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature,
-    )
+      exact_d3=curvature is not None,
+    ).reshape(*x.shape, -1)
 
     if valid_tokens is not None:
       xt = torch.where(valid_tokens.bool().unsqueeze(-1),
@@ -1089,16 +1170,67 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     return out
 
   def nll_per_token(self, log_x_theta, xt, x0, alpha_t, dalpha_t,
-                    weight, low_var=False, context=None, train_mode=False):
-    del xt, alpha_t, dalpha_t, low_var, context
-
-    ce_loss = -log_x_theta.gather(
-      -1, x0.unsqueeze(-1)).squeeze(-1)
-
-    if weight is not None:
-      return ce_loss * weight
+                    weight, low_var=False, context=None, train_mode=False,
+                    valid_tokens=None, curvature=None):
+    del alpha_t, dalpha_t, low_var, train_mode
+    if self.loss_type == 'elbo':
+      return self.elbo_loss(log_x_theta=log_x_theta, xt=xt, x0=x0,
+                            weight=weight, context=context,
+                            valid_tokens=valid_tokens, curvature=curvature)
+    elif self.loss_type == 'ce':
+      loss = self.ce_loss(log_x_theta=log_x_theta, x0=x0)
+      if weight is not None:
+        return loss * weight
+      return loss
     else:
-      return ce_loss
+      raise ValueError(f"Unsupported loss type: {self.loss_type}")
+
+  def diffusion_loss(self, log_x_theta, xt, x0):
+    """Path-KL rate of the bridge at the state `xt`, the diffusion term of the
+    NELBO once weighted by 1 / q(t) (slides/oct07_2026): per factor,
+    (d - 1)^2 kappa^2 / 2 ||sum_v (p_theta(v) - 1[v = x0]) w_v||^2 with w_v
+    the unit vector toward word v's boundary point seen from xt -- its radial
+    and angular components are the slides' l_rad and l_ang
+    (`Loss.bridge_loss_elbo_refactor`, cancellation-free float64). The Bayes
+    posterior minimizes it and makes the bound tight. `log_x_theta` is the
+    full log-posterior, so no horosphere term is added here (Invariant 1)."""
+    rhos, thetas = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
+      xt, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
+    return Loss.bridge_loss_elbo_refactor(
+      logits=log_x_theta, targets=x0, rhos=rhos, thetas=thetas,
+      word_embedding=self.word_embedding,
+      prod_factor_dim=self.prod_factor_dim,
+      prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature)
+
+  @staticmethod
+  def ce_loss(log_x_theta, x0):
+    ce_loss = -log_x_theta.gather(-1, x0.unsqueeze(-1)).squeeze(-1)
+    return ce_loss
+
+  def reconstruction_loss(self, x0, context, valid_tokens, curvature):
+    """-log p_theta(x0 | z_T) at the horizon T of the trained heat-time range
+    (the state at the clean end t of `_sample_t`; under the adaptive
+    curvature position i sits at lambda_i T), the last term of the NELBO. Its
+    prior term is zero: the bridge and the generative SDE both start at the
+    origin."""
+    t_clean = 1.0 if self.invert_time_convention else self.sampling_eps
+    t = torch.full((x0.shape[0],), t_clean, device=x0.device)
+    _, alpha_t = self.noise(t)
+    alpha_t = alpha_t.unsqueeze(-1)
+    xt, _ = self.q_xt(x0, alpha_t, use_pure_noise=False,
+                      valid_tokens=valid_tokens, curvature=curvature)
+    log_p = self.forward(x0=x0, xt=xt, sigma=self._sigma_from_alphat(alpha_t),
+                         context=context)
+    return self.ce_loss(log_p, x0)
+
+  def elbo_loss(self, log_x_theta, xt, x0, weight, context, valid_tokens,
+                curvature):
+    """NELBO per token: the importance-weighted path-KL rate at the sampled
+    heat time plus the reconstruction CE at the horizon."""
+    return (weight * self.diffusion_loss(log_x_theta=log_x_theta, xt=xt, x0=x0)
+            + self.reconstruction_loss(x0=x0, context=context,
+                                       valid_tokens=valid_tokens,
+                                       curvature=curvature))
 
   def nll(self, x0, output_tokens, context,
           current_accumulation_step=None, train_mode=False,
@@ -1115,9 +1247,16 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     alpha_t = alpha_t.unsqueeze(-1)
     dalpha_t = dalpha_t.unsqueeze(-1)
 
+    curvature = None
+    if self.curvature_bound > 1:
+      # The t = 0 state: every bridge at the origin, the prompt pinned clean.
+      prompt = (torch.zeros_like(x0) if valid_tokens is None
+                else valid_tokens == 0)
+      curvature = self.curvature_scale(
+        self._clean_state(x0) * prompt.unsqueeze(-1))
     xt, weight = self.q_xt(
       x0, alpha_t, use_pure_noise=use_pure_noise,
-      valid_tokens=valid_tokens)
+      valid_tokens=valid_tokens, curvature=curvature)
     # Consider t \sim U([0, 1]), p(t) = U([0, 1]), with parametrized time u = - \log t / exp_rate
     # according to change of variable, p(u) = p(t) * |dt/du| = 1 * exp_rate * exp(-exp_rate * u) = exp_rate * t.
     # Furthermore, consider p(t) is not uniform, then, p(u) = p(t) * |dt/du| = p(t) * exp_rate * exp(-exp_rate * u) = p(t) * exp_rate * t.
@@ -1134,7 +1273,21 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
       log_x_theta=log_x_theta, xt=xt, x0=x0,
       alpha_t=alpha_t, dalpha_t=dalpha_t,
       low_var=train_mode and self.loss_type == 'low_var',
-      context=context, train_mode=train_mode, weight=weight)
+      context=context, train_mode=train_mode, weight=weight,
+      valid_tokens=valid_tokens, curvature=curvature)
+    if curvature is not None and curvature.requires_grad:
+      # The curvature leaves the mean of the loss unchanged, so it is trained
+      # on the variance (VDM App. I.2): d E[loss_b^2] = E[2 loss_b d loss_b],
+      # loss_b the sequence's own token-mean loss. Everything else still
+      # receives d loss. The 1 / sqrt(D) keeps this heavy-tailed gradient
+      # below the gradient-clip threshold of the rest of the model; the
+      # optimizer (Adam) is invariant to its scale.
+      valid = (torch.ones_like(loss) if valid_tokens is None
+               else valid_tokens)
+      seq_loss = ((loss * valid).sum(-1, keepdim=True)
+                  / valid.sum(-1, keepdim=True).clamp(min=1)).detach()
+      scale = 2 / self.config.model.hidden_size ** 0.5
+      curvature.register_hook(lambda grad: scale * seq_loss * grad)
     return loss, t
 
 

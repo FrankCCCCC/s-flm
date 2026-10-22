@@ -27,6 +27,10 @@ GT_METHOD="${GT_METHOD:-linear}"     # SDE g(t): const / sqrt / linear / quad
 TEMPERATURE="${TEMPERATURE:-1.0}"
 NUM_SAMPLE_BATCHES="${NUM_SAMPLE_BATCHES:-4}"
 RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}" # false: GenPPL pass only
+LOSS_TYPE="${LOSS_TYPE:-ce}"           # objective of the ppl_eval pass (algo.loss_type): elbo = the NELBO, ce = the denoising CE bound it trained on
+PPL_JSON="${PPL_JSON:-${OUTPUT_DIR}/ppl.json}"   # where the ppl_eval metrics go
+SEED="${SEED:-1}"                      # seed of the ppl_eval pass (the (t, noise) draws)
+RUN_SAMPLE_EVAL="${RUN_SAMPLE_EVAL:-true}"   # false: ppl_eval pass only
 
 cd "${REPO_ROOT}"
 mkdir -p "${OUTPUT_DIR}"
@@ -43,6 +47,7 @@ MARGS=(
     noise.alpha_max=${ALPHA_MAX}
     algo.snr_weighted_ce=${SNR_CE}
     algo.forward_type=${FORWARD_TYPE}
+    algo.loss_type=${LOSS_TYPE}
     noise=autonomous
     noise.tau_max=${TAU_MAX}
     sampler=eflm
@@ -65,7 +70,9 @@ python -u -m main \
     "${MARGS[@]}" \
     eval.checkpoint_path="${CKPT_PATH}" \
     eval.strict_loading=false \
-    eval.results_json_path="${OUTPUT_DIR}/ppl.json" \
+    eval.results_json_path="${PPL_JSON}" \
+    seed=${SEED} \
+    eval.generate_samples=False \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
     trainer.num_nodes=1 \
@@ -75,6 +82,7 @@ python -u -m main \
 fi
 
 # (2) generative perplexity + samples
+if [ "${RUN_SAMPLE_EVAL}" = "true" ]; then
 python -u -m main \
     mode=sample_eval \
     data=tinystories \
@@ -94,3 +102,4 @@ python -u -m main \
     trainer.devices="${DEVICES}" \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}/sample"
+fi

@@ -3,7 +3,7 @@ diffusion_type: euclidean
 backbone: sphere-dit
 parameterization: mean
 time_conditioning: True
-loss_type: ce
+loss_type: ce  # ce: denoising CE (optionally SNR-weighted, below) / elbo: the VDM NELBO -- -SNR'(t)/2 ||e - E_p[e]||^2 + reconstruction CE at the clean end + prior KL (experiments/elfm_hbfm_ada_curv_elbo_sudoku/math.md)
 T: 0
 causal_attention: False
 adaLN: True

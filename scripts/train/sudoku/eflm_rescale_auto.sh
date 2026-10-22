@@ -25,9 +25,10 @@ TAU_MAX="${TAU_MAX:-1.455}"            # autonomous-clock horizon tau*(RHO=1) (n
 SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM variational bound)
 FORWARD_TYPE="${FORWARD_TYPE:-naive}" # gaussian: logits are a residual on log N(xt; a_t e_v, b_t^2 I) / naive: plain logits
 COV_WEIGHT="${COV_WEIGHT:-false}"    # weight the CE by |alpha_t'| (dt -> d alpha); not with SNR_CE or an adaptive schedule
+LOSS_TYPE="${LOSS_TYPE:-ce}"         # ce: denoising CE / elbo: the VDM NELBO (-SNR'(t)/2 ||e - E_p[e]||^2 + reconstruction CE + prior KL; algo.loss_type)
 MAX_STEPS="${MAX_STEPS:-20000}"
 CKPT_EVERY="${CKPT_EVERY:-5000}"
-PER_GPU_BS="${PER_GPU_BS:-256}"      # micro-batch per GPU; global batch stays 256 (accumulation = 256 / (DEVICES x PER_GPU_BS))
+PER_GPU_BS="${PER_GPU_BS:-256}"      # micro-batch per GPU (accumulation = GLOBAL_BATCH / (DEVICES x PER_GPU_BS))
 
 cd "${REPO_ROOT}"
 
@@ -46,11 +47,12 @@ python -u -m main \
     algo.snr_weighted_ce="${SNR_CE}" \
     algo.noise_sched_cov_weight="${COV_WEIGHT}" \
     algo.forward_type="${FORWARD_TYPE}" \
+    algo.loss_type="${LOSS_TYPE}" \
     noise=autonomous \
     noise.tau_max="${TAU_MAX}" \
     loader.global_batch_size=256 \
     loader.batch_size=${PER_GPU_BS} \
-    loader.eval_batch_size=256 \
+    loader.eval_batch_size=${PER_GPU_BS} \
     loader.num_workers=8 \
     eval.generate_samples=False \
     trainer.num_nodes="${NUM_NODES}" \

@@ -3,6 +3,10 @@ type: hyperbolic-dit
 hidden_size: 768
 cond_dim: 128
 embed_dim: null   # manifold dim fed to the DiT; null = hidden_size (state consumed as-is), else lifted by a linear in_proj
+hyla_dim: null    # random Laplacian features (HyLa) of the state fed to the DiT: total feature dim, a multiple of the number of product factors; null = feed the Poincaré coordinates
+hyla_scale: 1.0   # std of the HyLa eigenvalue draw lambda ~ N(0, hyla_scale^2) (the paper's s)
+hyla_radius_cap: null   # evaluate the HyLa map at min(s, cap) of the dimensionless radial s = rho/R (the features are ~0 past s ~ 6); null = no cap
+hyla_concat_state: false   # feed the Poincaré coordinates next to the HyLa features (in_proj sees embed_dim + hyla_dim) instead of replacing them
 length: 1024
 n_blocks: 12
 n_heads: 12
