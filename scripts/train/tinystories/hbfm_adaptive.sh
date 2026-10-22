@@ -27,6 +27,10 @@ SEQ_LEN="${SEQ_LEN:-256}"
 LR="${LR:-3e-4}"
 SEED="${SEED:-1}"
 INIT="${INIT:-ngpt}"
+HYLA_DIM="${HYLA_DIM:-null}"           # random Laplacian features (HyLa) of the state fed to the DiT: total feature dim, a multiple of the factor count; null = feed the Poincaré coordinates
+HYLA_SCALE="${HYLA_SCALE:-1.0}"        # std of the HyLa eigenvalue draw (the paper's s); unused when HYLA_DIM=null
+HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # HyLa map evaluated at min(s, cap) of the dimensionless radial; null = no cap
+HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # true: coordinates + HyLa features / false: HyLa features replace the coordinates
 EMBED_DIM="${EMBED_DIM:-96}"              # manifold dim; null = DiT hidden size
 FACTOR_DIM="${FACTOR_DIM:-3}"             # H^FACTOR_DIM factors, EMBED_DIM/FACTOR_DIM of them
 GAUSS_CURV="${GAUSS_CURV:--1.0}"          # Gaussian curvature K < 0 of every factor
@@ -44,6 +48,10 @@ python -u -m main \
     model.length=${SEQ_LEN} \
     model.embed_dim=${EMBED_DIM} \
     model.init=${INIT} \
+    model.hyla_dim=${HYLA_DIM} \
+    model.hyla_scale=${HYLA_SCALE} \
+    model.hyla_radius_cap=${HYLA_RADIUS_CAP} \
+    model.hyla_concat_state=${HYLA_CONCAT_STATE} \
     algo=hbfm \
     algo.prod_factor_dim=${FACTOR_DIM} \
     algo.prod_factor_gaussian_curvature=${GAUSS_CURV} \

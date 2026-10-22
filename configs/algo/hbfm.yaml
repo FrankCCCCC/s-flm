@@ -3,7 +3,7 @@ diffusion_type: hyperbolic    # label only; reuses the trainer_base.Diffusion pa
 backbone: hyperbolic-dit
 parameterization: mean
 time_conditioning: False      # the bridge posterior q(y | z_s) does not depend on the heat time
-loss_type: ce
+loss_type: ce  # ce: importance-weighted denoising CE / elbo: the NELBO -- importance-weighted path-KL rate (radial + angular) + reconstruction CE at the horizon (experiments/elfm_hbfm_ada_curv_elbo_sudoku/math.md)
 T: 0
 causal_attention: False
 adaLN: True
@@ -17,6 +17,16 @@ invert_time_convention: false # alpha_t=1 is clean (MDLM-like; required by the a
 # so keep the factors small (2 <= d <= ~16).
 prod_factor_dim: 3
 prod_factor_gaussian_curvature: -0.5
+# Adaptive curvature (experiments/hbfm_rlf_ada_curv/math.md): position i runs
+# at curvature lambda_i * K around the base curvature K above, lambda_i in
+# [1 / curvature_bound, curvature_bound] predicted by the backbone (a second
+# readout of the trunk) from the t = 0 state (the prompt) and trained to
+# minimize the variance of the loss;
+# its CE is weighted by lambda_i, so the mean of the loss does not move. 1.0 =
+# off (fixed curvature). The per-position heat times use the closed-form
+# radial sampler of H^3 factors; other factor dims fall back to the
+# quadrature grid, [B * L, 2000] float64 per factor.
+curvature_bound: 1.0
 
 # Heat time t = -log(u) / time_exp_rate, u = 1 - alpha_t the noise schedule's
 # noise fraction, weighted by |alpha'_t| / (time_exp_rate * u)

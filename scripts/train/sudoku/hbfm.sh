@@ -16,12 +16,18 @@ EMBED_DIM="${EMBED_DIM:-96}"            # manifold dim; null = DiT hidden size
 FACTOR_DIM="${FACTOR_DIM:-3}"           # H^FACTOR_DIM factors, EMBED_DIM/FACTOR_DIM of them
 PROD_FACTOR_DIM="${PROD_FACTOR_DIM:-${FACTOR_DIM}}"   # hydra value of algo.prod_factor_dim: an int (equal split) or a list like [3,3,3]
 PROD_FACTOR_CURV="${PROD_FACTOR_CURV:-${GAUSS_CURV}}" # hydra value of algo.prod_factor_gaussian_curvature: a float or a list; GAUSS_CURV stays the scalar |K| used for the unit-time conversions
+CURV_BOUND="${CURV_BOUND:-1.0}"         # adaptive curvature: position i runs at lambda_i * K, lambda_i in [1 / CURV_BOUND, CURV_BOUND] predicted by the DiT (algo.curvature_bound); 1.0 = off
 INIT="${INIT:-ngpt}"
+HYLA_DIM="${HYLA_DIM:-null}"           # random Laplacian features (HyLa) of the state fed to the DiT: total feature dim, a multiple of the factor count; null = feed the Poincaré coordinates
+HYLA_SCALE="${HYLA_SCALE:-1.0}"        # std of the HyLa eigenvalue draw (the paper's s); unused when HYLA_DIM=null
+HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # HyLa map evaluated at min(s, cap) of the dimensionless radial; null = no cap
+HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # true: coordinates + HyLa features / false: HyLa features replace the coordinates
 LR="${LR:-3e-4}"
 SEED="${SEED:-1}"
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-20}"    # exp rate in unit-model time
 READOUT_PRECISION="${READOUT_PRECISION:-float32}" # float64 / float32 (u stays < 3 here)
 FORWARD_TYPE="${FORWARD_TYPE:-horosphere}"  # horosphere: logits are a residual on the Busemann log-densities / naive: plain logits
+LOSS_TYPE="${LOSS_TYPE:-ce}"            # ce: importance-weighted denoising CE / elbo: the NELBO, importance-weighted path-KL + reconstruction CE at the horizon (algo.loss_type)
 TIME_CONVERSION_MODE="${TIME_CONVERSION_MODE:-exp}"        # exp | trunc_exp | unif (algo.time_conversion_mode)
 TIME_RANGE_UPPER_BOUND="${TIME_RANGE_UPPER_BOUND:-1.0}"    # physical heat-time range of trunc_exp / unif (unused by exp)
 UNIT_T_MAX="${UNIT_T_MAX:-0.5}"         # sampler horizon in unit time; MUST mirror the default in scripts/sample/sudoku/hbfm.sh, because trunc_exp / unif validate T_MAX <= TIME_RANGE_UPPER_BOUND at train init too
@@ -44,16 +50,22 @@ python -u -m main \
     model=tiny-hyperbolic-dit \
     model.embed_dim=${EMBED_DIM} \
     model.init="${INIT}" \
+    model.hyla_dim=${HYLA_DIM} \
+    model.hyla_scale=${HYLA_SCALE} \
+    model.hyla_radius_cap=${HYLA_RADIUS_CAP} \
+    model.hyla_concat_state=${HYLA_CONCAT_STATE} \
     optim.lr="${LR}" \
     seed="${SEED}" \
     algo=hbfm \
     algo.prod_factor_dim="${PROD_FACTOR_DIM}" \
     algo.prod_factor_gaussian_curvature="${PROD_FACTOR_CURV}" \
+    algo.curvature_bound=${CURV_BOUND} \
     algo.time_exp_rate=${PROPOSAL_RATE} \
     algo.time_conversion_mode=${TIME_CONVERSION_MODE} \
     algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND} \
     algo.readout_precision=${READOUT_PRECISION} \
     algo.forward_type=${FORWARD_TYPE} \
+    algo.loss_type=${LOSS_TYPE} \
     sampler=hbfm \
     sampler.t_max=${T_MAX} \
     noise=log-linear \

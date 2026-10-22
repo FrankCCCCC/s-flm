@@ -17,12 +17,24 @@ STEPS="${STEPS:-180}"
 VELOCITY="${VELOCITY:-exact}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"       # -1 = posterior-mean drift over the whole vocabulary
 NOISE_REMOVAL="${NOISE_REMOVAL:-greedy}"
+STEP_TYPE="${STEP_TYPE:-em}"             # em: Euler-Maruyama / ode: probability-flow ODE / sde: diffusion scaled by g(t / t_max) (GT_METHOD)
+GT_METHOD="${GT_METHOD:-linear}"
+TEMPERATURE="${TEMPERATURE:-1.0}"
+RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}"   # false: GenPPL pass only
+LOSS_TYPE="${LOSS_TYPE:-ce}"           # objective of the ppl_eval pass (algo.loss_type): elbo = the NELBO, ce = the denoising CE bound it trained on
+PPL_JSON="${PPL_JSON:-${OUTPUT_DIR}/ppl.json}"   # where the ppl_eval metrics go
+SEED="${SEED:-1}"                      # seed of the ppl_eval pass (the (t, noise) draws)
+RUN_SAMPLE_EVAL="${RUN_SAMPLE_EVAL:-true}"   # false: ppl_eval pass only
 MODEL="${MODEL:-small-hyperbolic-dit}"
 SEQ_LEN="${SEQ_LEN:-256}"
 INIT="${INIT:-ngpt}"
 EMBED_DIM="${EMBED_DIM:-96}"
+HYLA_DIM="${HYLA_DIM:-null}"           # HyLa feature dim; must match training (null = off)
+HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # must match training
+HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # must match training
 FACTOR_DIM="${FACTOR_DIM:-3}"
 GAUSS_CURV="${GAUSS_CURV:--1.0}"
+CURV_BOUND="${CURV_BOUND:-1.0}"         # adaptive curvature bound (algo.curvature_bound); must match training, it adds an output channel
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-5}"
 READOUT_PRECISION="${READOUT_PRECISION:-float64}"
 FORWARD_TYPE="${FORWARD_TYPE:-naive}"     # must match training
@@ -42,14 +54,19 @@ MARGS=(
     model.length=${SEQ_LEN}
     model.embed_dim=${EMBED_DIM}
     model.init=${INIT}
+    model.hyla_dim=${HYLA_DIM}
+    model.hyla_radius_cap=${HYLA_RADIUS_CAP}
+    model.hyla_concat_state=${HYLA_CONCAT_STATE}
     algo=hbfm
     algo.prod_factor_dim=${FACTOR_DIM}
     algo.prod_factor_gaussian_curvature=${GAUSS_CURV}
+    algo.curvature_bound=${CURV_BOUND}
     algo.time_exp_rate=${PROPOSAL_RATE}
     algo.time_conversion_mode=${TIME_CONVERSION_MODE}
     algo.time_range_upper_bound=${TIME_RANGE_UPPER_BOUND}
     algo.forward_type=${FORWARD_TYPE}
     algo.readout_precision=${READOUT_PRECISION}
+    algo.loss_type=${LOSS_TYPE}
     noise=log-linear
     loader.global_batch_size=${GLOBAL_BATCH}
     sampler=hbfm
@@ -58,9 +75,12 @@ MARGS=(
     sampler.steps=${STEPS}
     sampler.t_max=${T_MAX}
     sampler.noise_removal=${NOISE_REMOVAL}
+    sampler.step_type=${STEP_TYPE}
+    sampler.gt_method=${GT_METHOD}
 )
 
 # (1) validation perplexity (the importance-weighted denoising bound)
+if [ "${RUN_PPL_EVAL}" = "true" ]; then
 python -u -m main \
     mode=ppl_eval \
     data=tinystories \
@@ -69,7 +89,9 @@ python -u -m main \
     "${MARGS[@]}" \
     eval.checkpoint_path="${CKPT_PATH}" \
     eval.strict_loading=false \
-    eval.results_json_path="${OUTPUT_DIR}/ppl.json" \
+    eval.results_json_path="${PPL_JSON}" \
+    seed=${SEED} \
+    eval.generate_samples=False \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
     trainer.num_nodes=1 \
@@ -77,8 +99,10 @@ python -u -m main \
     trainer.limit_val_batches=${LIMIT_VAL_BATCHES} \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}/ppl"
+fi
 
 # (2) generative perplexity + samples
+if [ "${RUN_SAMPLE_EVAL}" = "true" ]; then
 python -u -m main \
     mode=sample_eval \
     data=tinystories \
@@ -90,10 +114,11 @@ python -u -m main \
     eval.compute_generative_perplexity=True \
     eval.results_json_path="${OUTPUT_DIR}/samples_genppl.json" \
     sampler.num_sample_batches=${NUM_SAMPLE_BATCHES:-4} \
-    sampler.temperature=1.0 \
+    sampler.temperature=${TEMPERATURE} \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
     trainer.num_nodes=1 \
     trainer.devices="${DEVICES}" \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}/sample"
+fi
