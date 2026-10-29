@@ -846,6 +846,83 @@ class Loss:
             loss = loss + (factor_dim - 1) ** 2 * kappa ** 2 * sq_err / 2
         return loss
 
+    @staticmethod
+    def bridge_loss_elbo_mc(
+        logits,
+        targets,
+        rhos,
+        thetas,
+        word_embedding,
+        num_words: int,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ):
+        """Monte-Carlo estimate of `bridge_loss_elbo_refactor` over `num_words`
+        words per token, unbiased in value and gradient.
+
+        Per factor the rate is ||a||^2 with a = sum_v mu_v w_v = E_{v ~ p_theta}[w_v] - w_target.
+        Draw v_1..v_S ~ p_theta (S = `num_words`) and set
+        y_s = r_s w_{v_s} - w_target, r_s = p_theta(v_s) / sg(p_theta(v_s)): r_s = 1 in value, and
+        E[d y_s] = da (score-function term through r_s, pathwise through w_v). The y_s are
+        independent, so the U-statistic over ordered pairs s != s',
+            ||a||^2 ~ (||sum_s y_s||^2 - sum_s ||y_s||^2) / (S (S - 1)),
+        is unbiased for ||a||^2 and its gradient (a single token's estimate can be negative).
+        Cost is (B, L, 1 + S, d_m) per factor instead of float64 (B, L, V) work.
+        Arguments and return as `bridge_loss_elbo_refactor`.
+        """
+        assert num_words >= 2, 'the pair U-statistic needs num_words >= 2'
+        (batch_size, seq_len) = targets.shape
+        V = logits.shape[-1]
+        embedding_size = thetas.shape[-1]
+        if rhos.ndim == 2:
+            rhos = rhos[..., None]
+        dims, curvatures = GeoUtils.validate_prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=embedding_size,
+        )
+        log_p = logits.log_softmax(-1)
+        with torch.no_grad():
+            words = torch.multinomial(log_p.exp().reshape(-1, V).float(), num_words,
+                                      replacement=True).reshape(batch_size, seq_len, num_words)
+        log_p_s = log_p.gather(-1, words).to(torch.float64)
+        ratio = (log_p_s - log_p_s.detach()).exp()                       # (B, L, S), 1 in value
+        phis = HyperBridge._vocab_angles(
+            vocab_size=V, emb_dim=embedding_size, device=thetas.device,
+            dtype=torch.float64, word_embedding=word_embedding,
+        )[torch.cat([targets[..., None], words], -1)]                    # (B, L, 1 + S, D)
+        tiny = torch.finfo(torch.float64).tiny
+
+        # The w_v of bridge_loss_elbo_refactor, for the target (index 0) and the S sampled
+        # words only, then the U-statistic of ||sum_v mu_v w_v||^2. The tensors are
+        # (B, L, 1 + S, d_m), so no activation checkpointing is needed.
+        def factor_sq_error(theta_m, us, ratio, phis_m):
+            inners = (theta_m[:, :, None] * phis_m).sum(-1)              # (B, L, 1 + S) <theta_m, phi_v>
+            sin_half_sq = (1.0 - inners) / 2
+            cos_half_sq = (1.0 + inners) / 2
+            exp_pos = us[..., None].exp()
+            exp_neg = (-us[..., None]).exp()
+            radial_parts = cos_half_sq * exp_neg - sin_half_sq * exp_pos
+            denoms = (sin_half_sq * exp_pos + cos_half_sq * exp_neg).clamp_min(tiny)
+            ws = (((radial_parts - inners) / denoms)[..., None] * theta_m[:, :, None]
+                  + phis_m / denoms[..., None])                          # (B, L, 1 + S, d_m) unit w_v
+            ys = ratio[..., None] * ws[:, :, 1:] - ws[:, :, :1]          # (B, L, S, d_m)
+            return ((ys.sum(-2).square().sum(-1) - ys.square().sum((-2, -1)))
+                    / (num_words * (num_words - 1)))
+
+        loss, offset = 0.0, 0
+        for i, (factor_dim, factor_curvature) in enumerate(zip(dims, curvatures)):
+            theta_m = thetas[:, :, offset:offset + factor_dim]
+            # Per-factor sphere S^{d_m-1}: the block of the boundary table is
+            # re-normalized (a slice of a unit row is not unit).
+            phis_m = HyperBridge._vocab_angles(word_embedding=phis[..., offset:offset + factor_dim])
+            offset += factor_dim
+            kappa = 1.0 / GeoUtils._curvature_scale(factor_curvature)
+            us = (kappa * rhos[:, :, i]).clamp_max(HyperBridge.RHO_MAX)
+            sq_err = factor_sq_error(theta_m, us, ratio, phis_m)
+            loss = loss + (factor_dim - 1) ** 2 * kappa ** 2 * sq_err / 2
+        return loss
+
     """
     Loss of arbitary dimension Poincare Disk, Cross Entropy
     """

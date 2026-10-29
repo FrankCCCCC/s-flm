@@ -32,6 +32,8 @@ HYLA_SCALE="${HYLA_SCALE:-1.0}"        # std of the HyLa eigenvalue draw (the pa
 HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # HyLa map evaluated at min(s, cap) of the dimensionless radial; null = no cap
 HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # true: coordinates + HyLa features / false: HyLa features replace the coordinates
 EMBED_DIM="${EMBED_DIM:-96}"              # manifold dim; null = DiT hidden size
+PRETRAINED_EMBED="${PRETRAINED_EMBED:-null}"   # HF model id (e.g. gpt2) for the word embedding, PCA-reduced to EMBED_DIM; null = random init (INIT)
+EMBED_TRAINABLE="${EMBED_TRAINABLE:-true}"   # false freezes the word embedding
 FACTOR_DIM="${FACTOR_DIM:-3}"             # H^FACTOR_DIM factors, EMBED_DIM/FACTOR_DIM of them
 GAUSS_CURV="${GAUSS_CURV:--1.0}"          # Gaussian curvature K < 0 of every factor
 CURV_BOUND="${CURV_BOUND:-1.0}"           # adaptive curvature: position i runs at lambda_i * K, lambda_i in [1 / CURV_BOUND, CURV_BOUND] predicted by the DiT (algo.curvature_bound); 1.0 = off
@@ -39,6 +41,7 @@ UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-5}"     # exp rate in unit-model time 
 READOUT_PRECISION="${READOUT_PRECISION:-float64}"  # float64 / float32 (see configs/algo/hbfm.yaml)
 FORWARD_TYPE="${FORWARD_TYPE:-naive}"     # naive: plain logits / horosphere: residual on the Busemann log-densities
 LOSS_TYPE="${LOSS_TYPE:-ce}"              # ce: importance-weighted denoising CE / elbo: the NELBO (path-KL rate + reconstruction CE at the horizon)
+ELBO_NUM_WORDS="${ELBO_NUM_WORDS:-null}"   # LOSS_TYPE=elbo: null = exact path-KL rate / S >= 2 = Monte-Carlo estimate over S sampled words (algo.elbo_num_words)
 TIME_CONVERSION_MODE="${TIME_CONVERSION_MODE:-exp}"        # exp | trunc_exp | unif (algo.time_conversion_mode)
 TIME_RANGE_UPPER_BOUND="${TIME_RANGE_UPPER_BOUND:-1.0}"    # physical heat-time range of trunc_exp / unif (unused by exp)
 KEEP_EVERY="${KEEP_EVERY:-5000}"          # persistent keep-{step}.ckpt every N steps (0 = off); must differ from CKPT_EVERY
@@ -67,6 +70,8 @@ python -u -m main \
     model=${MODEL} \
     model.length=${SEQ_LEN} \
     model.embed_dim=${EMBED_DIM} \
+    model.pretrained_embed=${PRETRAINED_EMBED} \
+    model.embed_trainable=${EMBED_TRAINABLE} \
     model.init=${INIT} \
     model.hyla_dim=${HYLA_DIM} \
     model.hyla_scale=${HYLA_SCALE} \
@@ -82,6 +87,7 @@ python -u -m main \
     algo.forward_type=${FORWARD_TYPE} \
     algo.readout_precision=${READOUT_PRECISION} \
     algo.loss_type=${LOSS_TYPE} \
+    algo.elbo_num_words=${ELBO_NUM_WORDS} \
     sampler=hbfm \
     sampler.t_max=${T_MAX} \
     noise=log-linear \

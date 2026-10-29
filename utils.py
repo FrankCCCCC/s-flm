@@ -301,3 +301,19 @@ def exp_map(x: torch.Tensor, delta: torch.Tensor, eps: float):
     + (delta / delta_norm) * torch.sin(delta_norm)
   )
 
+def load_pretrained_word_embedding(model_path: str, low_rank: int=-1):
+  """Load the input token embedding [V, D] of a HF model.
+
+  If low_rank > 0, project the centered embedding onto its top
+  `low_rank` principal components, returning [V, low_rank].
+  """
+  from transformers import AutoModel
+  emb = AutoModel.from_pretrained(model_path).get_input_embeddings()
+  emb = emb.weight.detach().float()
+  if low_rank <= 0:
+    return emb
+  assert low_rank <= emb.shape[1], (
+    f'low_rank={low_rank} > embedding dim {emb.shape[1]}')
+  centered = emb - emb.mean(dim=0, keepdim=True)
+  _, _, vh = torch.linalg.svd(centered, full_matrices=False)
+  return centered @ vh[:low_rank].T

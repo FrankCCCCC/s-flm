@@ -4,6 +4,7 @@ backbone: hyperbolic-dit
 parameterization: mean
 time_conditioning: False      # the bridge posterior q(y | z_s) does not depend on the heat time
 loss_type: ce  # ce: importance-weighted denoising CE / elbo: the NELBO -- importance-weighted path-KL rate (radial + angular) + reconstruction CE at the horizon (experiments/elfm_hbfm_ada_curv_elbo_sudoku/math.md)
+elbo_num_words: null  # loss_type=elbo: null = the exact path-KL rate (sum over all V words) / S >= 2 = its unbiased Monte-Carlo estimate over S words drawn from p_theta per token (numeric.loss.Loss.bridge_loss_elbo_mc)
 T: 0
 causal_attention: False
 adaLN: True
