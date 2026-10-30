@@ -228,6 +228,32 @@ def test_hbfm_path_kl_matches_the_explicit_per_word_form(grad):
     assert torch.allclose(g_got, g_want, rtol=1e-6, atol=1e-9), (g_got - g_want).abs().max()
 
 
+def test_hbfm_path_kl_monte_carlo_is_unbiased():
+  """`algo.elbo_num_words`: the estimate over sampled words averages to the exact rate, in value
+  and in the gradient w.r.t. the logits and the word embedding."""
+  from numeric.loss import Loss
+  torch.manual_seed(6)
+  B, L, V, dims, curvatures, S, N = 2, 3, 12, [3, 3], [-0.5, -1.0], 4, 2000
+  logits = torch.randn(B, L, V, device=DEVICE, requires_grad=True)
+  phis = torch.randn(V, sum(dims), device=DEVICE, dtype=torch.float64, requires_grad=True)
+  targets = torch.randint(0, V, (B, L), device=DEVICE)
+  rhos = torch.rand(B, L, len(dims), device=DEVICE, dtype=torch.float64) * 3
+  thetas = torch.cat([torch.nn.functional.normalize(torch.randn(B, L, d, device=DEVICE, dtype=torch.float64), dim=-1)
+                      for d in dims], -1)
+  exact = Loss.bridge_loss_elbo_refactor(logits, targets, rhos, thetas, phis, dims, curvatures)
+  grads = torch.autograd.grad(exact.sum(), [logits, phis])
+  values, mc_grads = [], [0, 0]
+  for _ in range(N):
+    mc = Loss.bridge_loss_elbo_mc(logits, targets, rhos, thetas, phis, S, dims, curvatures)
+    values.append(mc.detach())
+    mc_grads = [m + g / N for m, g in zip(mc_grads, torch.autograd.grad(mc.sum(), [logits, phis]))]
+  values = torch.stack(values)
+  z = (values.mean(0) - exact.detach()) / (values.std(0) / math.sqrt(N))
+  assert z.abs().max() < 5, z
+  for got, want in zip(mc_grads, grads):          # ~4 % Monte-Carlo error at N = 2000
+    assert (got - want).norm() < 0.1 * want.norm(), ((got - want).norm() / want.norm())
+
+
 # ---------------------------------------------------------------------------
 # The real backbones train through both losses
 # ---------------------------------------------------------------------------

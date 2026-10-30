@@ -138,6 +138,20 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
       nn.init.zeros_(self.sphere_embed.weight)
     else:
       raise ValueError(self.init_mode)
+    # Pretrained HF word embedding, PCA-reduced to embed_dim; overrides the
+    # init above on the first V_pretrained rows (extra rows, e.g. a mask
+    # token, keep their init).
+    pretrained_embed = config.model.get('pretrained_embed', None)
+    if pretrained_embed is not None:
+      weight = utils.load_pretrained_word_embedding(
+        pretrained_embed, low_rank=embed_dim)
+      if weight.shape[0] > vocab_size:
+        raise ValueError(
+          f'pretrained vocab {weight.shape[0]} > model vocab {vocab_size}')
+      with torch.no_grad():
+        self.sphere_embed.weight[:weight.shape[0]].copy_(weight)
+    self.sphere_embed.weight.requires_grad_(
+      bool(config.model.get('embed_trainable', True)))
 
     # Random Laplacian features of the state (`HyLaFeatures`): the trunk then
     # consumes `hyla_dim` Euclidean features instead of the Poincaré

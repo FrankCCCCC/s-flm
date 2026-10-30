@@ -960,6 +960,7 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     self.renormalize_weights = config.algo.renormalize_weights
     self.invert_time_convention = config.algo.invert_time_convention
     self.curvature_bound = config.algo.curvature_bound
+    self.elbo_num_words = config.algo.elbo_num_words
     self.prod_factor_dim, self.prod_factor_gaussian_curvature = (
       self._resolve_prod_factors(config.algo, self.backbone.embed_dim))
     # sample_radial forms the heat-kernel marginal in linear float64, which
@@ -1193,9 +1194,18 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     and angular components are the slides' l_rad and l_ang
     (`Loss.bridge_loss_elbo_refactor`, cancellation-free float64). The Bayes
     posterior minimizes it and makes the bound tight. `log_x_theta` is the
-    full log-posterior, so no horosphere term is added here (Invariant 1)."""
+    full log-posterior, so no horosphere term is added here (Invariant 1).
+    With `algo.elbo_num_words` = S the sum over the V words is replaced by its
+    unbiased Monte-Carlo estimate over S words drawn from p_theta
+    (`Loss.bridge_loss_elbo_mc`)."""
     rhos, thetas = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(
       xt, self.prod_factor_dim, self.prod_factor_gaussian_curvature)
+    if self.elbo_num_words:
+      return Loss.bridge_loss_elbo_mc(
+        logits=log_x_theta, targets=x0, rhos=rhos, thetas=thetas,
+        word_embedding=self.word_embedding, num_words=self.elbo_num_words,
+        prod_factor_dim=self.prod_factor_dim,
+        prod_factor_gaussian_curvature=self.prod_factor_gaussian_curvature)
     return Loss.bridge_loss_elbo_refactor(
       logits=log_x_theta, targets=x0, rhos=rhos, thetas=thetas,
       word_embedding=self.word_embedding,
