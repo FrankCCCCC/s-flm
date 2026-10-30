@@ -9,6 +9,8 @@ Addendum 2026-10-19 (v3 rerun, `results_v3/`): Shannon erank, stable rank and th
 "Three timesteps" below; "effective rank" was renamed PR throughout.
 Addendum 2026-10-19 (setup.md): the slides' angular-Fisher Sigma_t on the tangent space, see "Angular-Fisher Sigma_t"
 below (`visualization/angular_fisher_sigma_t.py`, `figures/angular_fisher_sigma_t_{t,snr}.png`).
+Addendum 2026-10-22 (GOAL2, complete 54/54): the six models at embedding dim 16 / 48 / 768 x 3 seeds, with
+GenPPL, train / valid NELBO, and per-dim angular-Fisher and codebook figures. See "GOAL2" at the end.
 
 TinyStories EFLM, `noise=autonomous` truncated at tau*(R), lr 3e-4, R in {0.1, 0.5, 1.0}. Naive readout (plain CE)
 vs Gaussian readout (|alpha'|-weighted CE). Sigma_t = Cov_{q(v|x_t)}[e_v] is the word-posterior Fisher up to
@@ -452,3 +454,232 @@ weight and code version, one seed, as above. A first 256-state round was cancell
   contextual posterior; its Fisher with respect to x_t^i has the same form. It is not the network's input sensitivity
   J^T (diag p - p p^T) J.
 - **Superseded numbers.** v1 results (`results_v1/`) had no censoring, Sigma_bar from 128 states, and no controls.
+
+## HBFM angular-Fisher Sigma_t: `visualization/angular_fisher_sigma_t_hbfm.py` (2026-10-20)
+
+Setup in EXPERIMENT.md. Medians over 128 states; Sigma_t has 32 tangent dims, Sigma 48 dims.
+
+| run | t | heat | data_freq top1 / k90 / k99 / PR / log10 cond | uniform | model_pred |
+| --- | --- | --- | --- | --- | --- |
+| naive_ada_ub-1 | 0 (clean) | 0.25 | 0.351 / 14 / 29 / 5.5 / 2.21 | 0.103 / 26 / 32 / 23.8 / 0.83 | 0.613 / 4 / 15 / 2.4 / 3.51 |
+| naive_fix_ub-0.5 | 0 (clean) | 0.5 | 0.586 / 7 / 24 / 2.7 / 2.90 | 0.369 / 18 / 30 / 6.2 / 1.87 | 0.723 / 3 / 8 / 1.8 / 4.23 |
+| horo_fix_ub-0.5 | 0 (clean) | 0.5 | 0.593 / 7 / 23 / 2.6 / 2.99 | 0.319 / 19 / 30 / 6.9 / 1.81 | 0.733 / 3 / 7 / 1.8 / 4.61 |
+| naive_ada_ub-1 | 0.5 | 0.054 | 0.167 / 22 / 31 / 14.7 / 1.38 | 0.042 / 29 / 32 / 31.5 / 0.22 | 0.329 / 17 / 30 / 6.8 / 1.95 |
+| naive_fix_ub-0.5 | 0.5 | 0.164 | 0.306 / 20 / 31 / 8.0 / 1.76 | 0.062 / 28 / 32 / 29.1 / 0.50 | 0.587 / 7 / 24 / 2.6 / 2.84 |
+| horo_fix_ub-0.5 | 0.5 | 0.164 | 0.290 / 19 / 30 / 8.6 / 1.80 | 0.065 / 28 / 32 / 28.9 / 0.52 | 0.592 / 6 / 23 / 2.6 / 3.01 |
+| naive_ada_ub-1 | 1 (origin) | 7.9e-5 | 0.104 / 25 / 31 / 21.8 / 1.04 | 0.040 / 29 / 32 / 31.7 / 0.18 | 0.105 / 25 / 31 / 21.8 / 1.04 |
+| naive_fix_ub-0.5 | 1 (origin) | 2.6e-4 | 0.099 / 26 / 32 / 23.4 / 0.86 | 0.038 / 29 / 32 / 31.8 / 0.16 | 0.101 / 26 / 32 / 23.4 / 0.86 |
+| horo_fix_ub-0.5 | 1 (origin) | 2.6e-4 | 0.100 / 25 / 32 / 22.8 / 0.94 | 0.039 / 29 / 32 / 31.8 / 0.17 | 0.101 / 25 / 32 / 22.7 / 0.96 |
+
+Sigma = Cov_{q_data}[v] (48 dims), data_freq: log10 cond 1.29 (ada), 1.06 (fix naive), 1.18 (fix horo), PR 28-31;
+uniform: log10 cond 0.22-0.24, PR 47.5.
+
+1. **The HBFM codebook is well conditioned.** log10 cond(Sigma) is 1.1-1.3 under the frequency prior, against
+   6.6-6.7 for the naive EFLM codebooks (768 dims vs 48, so not like-for-like); the frequency prior still costs about one decade over uniform
+   (0.22-0.24). The worst per-state value, at the clean end with model_pred, is 10^4.2-10^4.6, never near the
+   10^12 censoring that EFLM reaches.
+2. **Horosphere readout = naive readout here.** horo_fix and naive_fix agree within the quartile band on every
+   metric and prior, including model_pred (clean-end log10 cond 4.61 vs 4.23, PR 1.8 vs 1.8). Under the
+   data_freq / uniform priors this is largely the shared seed-1 codebook (see caveats); only model_pred involves
+   the readout.
+3. **Adaptive vs fixed curvature is a clock change.** Plotted against effective heat time the three runs fall on one
+   curve; on the t axis the adaptive run looks better conditioned only because it stops at heat time 0.25
+   (median kappa rho 0.56 at its clean end vs 0.79).
+4. **Skew grows toward the clean end**, as in EFLM: model_pred concentrates 61-73% of tr Sigma_t in one direction
+   (PR 1.8-2.4) at t = 0, and data_freq 35-59%.
+
+Caveats: one seed per config; Sigma_t's spectrum depends on the per-factor metric (raw angles would reweight factor m
+by sinh^2(kappa rho_m)); model_pred is the same plug-in as for EFLM; adaptive + horosphere was not available.
+
+**The three seed-1 codebooks are nearly the same matrix (checked 2026-10-21).** The checkpoints are the right,
+distinct runs (forward_type naive / horosphere / naive + curvature_bound 4 in their configs; different files), but
+all three start from the same seed-1 ngpt init and the 48-dim codebook moves little in 30k steps. EMA
+`sphere_embed.weight`, mean per-row cosine: naive_fix vs horo_fix 0.959 (0.994 at step 5k), vs naive_ada 0.965,
+horo_fix vs naive_ada 0.955; naive_fix seed 1 vs seed 2 (same config) 0.001, |A-B|/|A| = 1.41 = sqrt 2, i.e.
+independent. Row norms stay ~1.02 (init 1.0), and the normalized-mean-shift singular values (30.4-35.6) sit near
+the random-Gaussian Marchenko-Pastur band (31.4-33.4). So the codebook spectra in `figures/codebook_hbfm/` and the
+data_freq / uniform Sigma_t (functions of the codebook and the geometry alone) are expected to look alike across
+the three runs. They say little about forward_type or curvature; a seed-2/3 comparison would show the
+seed-to-seed spread instead.
+
+## GOAL2: the six models at embedding dim 16 / 48 / 768 x 3 seeds (2026-10-22)
+
+**Status: complete, 54/54 cells.** Each cell has an eval (val PPL, GenPPL and entropy on 64 samples) and train /
+valid NELBO. Setup and run commands are in EXPERIMENT.md (GOAL2). Regenerate the table with
+`python experiments/eflm_cov_reparam_fisher_cond/report.py`.
+
+Columns:
+- *val PPL:* exp of the validation training objective. naive uses CE averaged over t; gauss uses |alpha_t'| x CE.
+  This objective is not a likelihood bound and depends on R and on the arm, so compare val PPL only within one
+  arm x R.
+- *NELBO:* the codebase's EFLM ELBO in nats per token (`algo.loss_type=elbo`, EMA weights; `nelbo.py`). It has
+  three terms: the VDM diffusion term, the reconstruction CE at t = sampling_eps and the prior KL at t = 1. It is
+  measured on 2048 sequences of the shuffled train loader or the valid loader, with one (t, noise) draw per
+  sequence. NELBO is comparable across all cells.
+  - Every cell gets the same sequences and the same draws, so differences between cells are paired. The
+    per-sequence standard error of one cell is ~0.03 (0.026-0.17 over all 108 values), but the seed std of one
+    config is 0.003-0.03.
+
+Values are mean ± std over seeds 1-3.
+
+| arm | R | dim | val PPL | GenPPL | entropy | train NELBO | valid NELBO |
+|---|---|---|---|---|---|---|---|
+| naive | 0.1 | 16 | 55.4 ± 0.2 | 15.42 ± 0.53 | 3.86 ± 0.01 | 1.992 ± 0.008 | 2.004 ± 0.016 |
+| naive | 0.1 | 48 | 55.2 ± 0.3 | 15.46 ± 0.41 | 3.86 ± 0.03 | 2.018 ± 0.029 | 2.036 ± 0.031 |
+| naive | 0.1 | 768 | 57.3 ± 0.3 | 12.64 ± 0.59 | 3.64 ± 0.04 | 1.944 ± 0.005 | 1.963 ± 0.004 |
+| naive | 0.5 | 16 | 25.9 ± 0.1 | 15.12 ± 0.78 | 3.86 ± 0.02 | 1.915 ± 0.007 | 1.922 ± 0.005 |
+| naive | 0.5 | 48 | 25.9 ± 0.2 | 14.57 ± 0.35 | 3.88 ± 0.03 | 1.967 ± 0.016 | 1.984 ± 0.017 |
+| naive | 0.5 | 768 | 26.5 ± 0.2 | 12.39 ± 0.64 | 3.79 ± 0.02 | 1.904 ± 0.005 | 1.919 ± 0.004 |
+| naive | 1.0 | 16 | 18.0 ± 0.1 | 15.39 ± 0.18 | 3.87 ± 0.02 | 1.909 ± 0.003 | 1.923 ± 0.006 |
+| naive | 1.0 | 48 | 17.9 ± 0.1 | 15.29 ± 0.33 | 3.90 ± 0.03 | 1.953 ± 0.009 | 1.965 ± 0.007 |
+| naive | 1.0 | 768 | 18.0 ± 0.1 | 13.82 ± 1.09 | 3.87 ± 0.04 | 1.911 ± 0.018 | 1.928 ± 0.032 |
+| gauss | 0.5 | 16 | 26.8 ± 0.1 | 14.39 ± 0.45 | 3.82 ± 0.03 | 1.980 ± 0.005 | 1.991 ± 0.004 |
+| gauss | 0.5 | 48 | 27.9 ± 0.5 | 17.55 ± 2.53 | 3.74 ± 0.08 | 2.081 ± 0.027 | 2.097 ± 0.026 |
+| gauss | 0.5 | 768 | 27.8 ± 0.1 | 15.48 ± 0.07 | 3.83 ± 0.02 | 2.096 ± 0.022 | 2.113 ± 0.018 |
+| gauss | 1.0 | 16 | 18.4 ± 0.0 | 14.62 ± 0.56 | 3.83 ± 0.02 | 1.949 ± 0.020 | 1.966 ± 0.013 |
+| gauss | 1.0 | 48 | 18.4 ± 0.0 | 14.41 ± 0.37 | 3.82 ± 0.02 | 1.978 ± 0.006 | 1.997 ± 0.004 |
+| gauss | 1.0 | 768 | 19.0 ± 0.1 | 15.90 ± 0.58 | 3.87 ± 0.02 | 2.069 ± 0.012 | 2.081 ± 0.013 |
+
+gauss R = 0.1 is listed per seed, because some of its seeds collapse:
+
+| dim | seed | val PPL | GenPPL | entropy | train NELBO | valid NELBO | state |
+|---|---|---|---|---|---|---|---|
+| 16 | 1 | 58.8 | 18.61 | 3.66 | 2.136 | 2.147 | degraded |
+| 16 | 2 | 65.9 | 26.01 | 3.41 | 2.408 | 2.435 | degraded |
+| 16 | 3 | 130.7 | 52.39 | 1.34 | 5.968 | 5.954 | collapsed |
+| 48 | 1 | 119.9 | 60.13 | 1.44 | 5.910 | 5.938 | collapsed |
+| 48 | 2 | 119.9 | 55.11 | 1.41 | 5.927 | 5.928 | collapsed |
+| 48 | 3 | 119.7 | 54.67 | 1.46 | 5.933 | 5.952 | collapsed |
+| 768 | 1 (original) | 172.7 | 45447 | 0.38 | 6.554 | 6.602 | collapsed |
+| 768 | 2 | 78.6 | 88.68 | 2.65 | 3.292 | 3.304 | degraded |
+| 768 | 3 | 81.2 | 74.24 | 2.61 | 3.423 | 3.466 | degraded |
+
+Rough scale reference: s-flm-dev2's `elbo_tune_tinystories_256` loss table uses its own ELBO code on the same
+2048-sequence protocol:
+- MDLM: 1.571 train / 1.589 valid.
+- EFLM CE R 0.5 at lr 1e-3: 1.878 / 1.913.
+- Here, naive R 0.5 dim 768 at lr 3e-4 gives 1.904 / 1.919.
+
+Findings (valid NELBO; per run, train is 0.00-0.03 lower):
+
+1. **Naive arm: dim 16 matches dim 768 on NELBO but not on GenPPL. Dim 48 is worse than both.**
+   - *NELBO:* at R ≥ 0.5, dim 16 is within 0.01 of dim 768 (1.922 vs 1.919 at R 0.5, 1.923 vs 1.928 at R 1.0).
+     Dim 48 is 0.04-0.07 worse than dim 768 and 0.04-0.06 worse than dim 16 (seed std ≤ 0.03). The dimension
+     effect is not monotone.
+   - *G3 seeds 2 / 3 only* (same site at every dim):
+     - dim 48 − dim 16 = +0.06 at R 0.5 and +0.04 at R 1.0.
+     - dim 768 − dim 16 = +0.001 at R 0.5 and +0.025 at R 1.0.
+     - So dim 48 is the worst dim on G3 as well.
+   - *R 0.1:* dim 768 is best (1.963 vs 2.004 at dim 16 and 2.036 at dim 48).
+   - *GenPPL:* dim 768 samples are better in all three R (12.4-13.8 vs 14.6-15.5).
+     - At R 0.1 and 0.5, part of that gap comes with lower entropy (3.64 / 3.79 vs 3.86-3.88).
+     - At R 1.0 the entropy is equal (3.87), and dim 768 is still 1.5 GenPPL lower (13.82 vs 15.29-15.39).
+       On G3 seeds only, this R 1.0 gap shrinks to ~0.9 (14.46 vs 15.30 / 15.46).
+   - *val PPL:* dimension barely changes it (within 0.6 at R ≥ 0.5, within 2.1 at R 0.1). So the trained
+     objective is matched while NELBO and GenPPL differ.
+2. **The gauss arm has a worse NELBO than the naive arm, and the gap grows with dim.**
+   - gauss − naive valid NELBO:
+
+     | R | dim 16 | dim 48 | dim 768 |
+     |---|---|---|---|
+     | 0.5 | +0.069 | +0.113 | +0.194 |
+     | 1.0 | +0.043 | +0.032 | +0.153 |
+
+     On G3 seeds only, dim 768 gives +0.19 at R 0.5 and +0.13 at R 1.0.
+
+   - GenPPL does not follow the same pattern. At dim 16, gauss samples have lower GenPPL than naive (14.39 vs
+     15.12 at R 0.5, 14.62 vs 15.39 at R 1.0), with slightly lower entropy (3.82-3.83 vs 3.86-3.87). At dim 768,
+     gauss is clearly worse (15.48 vs 12.39, 15.90 vs 13.82).
+   - So GenPPL and NELBO rank the two arms differently at small dim.
+   - The arms also differ in loss weight (|alpha'| x CE vs CE), so this is not a pure readout effect. See the
+     readout caveat above.
+3. **gauss R 0.1 is unstable at every dim; the collapse of the original was not a one-off.**
+   - 5 of 9 runs collapse: all three dim-48 seeds, dim-16 seed 3 and the dim-768 original.
+   - The other 4 are degraded: NELBO 2.15-3.47 vs 1.96-2.07 per run for naive R 0.1.
+   - The collapsed dim-16 and dim-48 runs reach the same state. NELBO is 5.91-5.97 (train and valid) for every one
+     of them, val PPL ~120 at dim 48, and entropy 1.3-1.5.
+   - naive R 0.1 never collapses (worst seed NELBO 2.065).
+   - gauss down-weights the clean end by exp(-tau*) = 0.019 at R 0.1, so the clean end gets almost no training
+     signal. That is a plausible cause, but it was not tested.
+4. **Seed spread is small for non-collapsed cells.**
+   - NELBO seed std is 0.003-0.03.
+   - GenPPL seed std is 0.07-1.1, except gauss R 0.5 dim 48 at 2.5, where seed 1 has GenPPL 20.4 and entropy 3.65.
+   - So the gauss − naive gaps in finding 2 and the dim-48 penalty at R 0.5 are well outside seed noise. The
+     dim-48 penalty at R 1.0 is 1-3 seed stds.
+   - The 64-sample GenPPL resampling noise is ~0.3 (eval check, EXPERIMENT.md).
+5. **No overfitting.** Per run, valid − train NELBO is −0.003 to +0.030 for every run with NELBO < 3; the two
+   degraded dim-768 gauss R 0.1 runs give +0.012 and +0.043. MDLM in dev2 has +0.018.
+
+### Angular-Fisher Sigma_t and the codebook spectrum per dim (seed 1)
+
+Figures:
+- `figures/angular_fisher_sigma_t_ed-{16,48,768}_{t,snr}.png`: one figure per dim, data in `data/ed-<dim>/`. The
+  ed-768 data are the originals' `data/*.json`.
+- `figures/codebook_eflm/ed-<dim>/`: the eigenvalue distribution (normalized, mean-shift-normalized and
+  normalized-mean-shift, each also with a log-x version) and the eigen-projection scatter.
+
+All are seed-1 checkpoints. The tangent space has d − 1 dims. Medians over 128 states.
+
+Sigma, the noise-end codebook covariance under the frequency prior (log10 cond / PR, and PR as a fraction of d):
+
+| | dim 16 | dim 48 | dim 768 |
+|---|---|---|---|
+| naive | 0.52-0.61 / 13.5-14.1 (0.84-0.88 d) | 2.05-3.77 / 18.3-22.2 (0.38-0.46 d) | 6.63-6.68 / 6.7-12.1 (≤ 0.016 d) |
+| gauss (non-collapsed seed 1) | 0.69-0.94 (R 0.1: 2.06) | 2.30-2.35 | 3.81-3.92 |
+| uniform prior, naive | 0.16-0.18 | 0.47-0.68 | 2.67-2.84 |
+
+1. **The frequency-induced ill-conditioning of Sigma is mostly a large-dim effect.**
+   - At dim 16 the frequency prior costs ~0.4 decades over uniform, and Sigma is nearly isotropic.
+   - At dim 48 it costs 1.6-3.1 decades. At dim 768 it costs 3.8-4.0 decades.
+   - The naive-vs-gauss tail gap at dim 768 (6.6 vs 3.9) is gone at dim 48 (naive 2.05-2.40 vs gauss 2.30-2.35 at
+     R ≥ 0.5). At dim 16 it is slightly reversed (0.52-0.55 vs 0.69-0.94).
+2. **The clean-end skew does not depend on dim; the tail depth does.**
+   - At t = 0, the head of Sigma_t has the same shape at all three dims (non-collapsed runs):
+     - `data_freq`: lambda_1 / tr 0.49-0.67, k90 3-5, PR 2.0-3.1.
+     - `model_pred`: lambda_1 / tr 0.72-0.83, k90 2, PR 1.4-1.8.
+   - `model_pred` log10 cond grows with dim: 3.8-4.6 at dim 16, 6.2-7.1 at dim 48, 10.7-≥12 at dim 768.
+   - So 1-3 directions carry the clean-end KL at every dim, and the deep tail is a property of the larger
+     embedding.
+3. **Collapsed codebooks stay at their init.**
+   - gauss R 0.1 dim 48 has Sigma PR 36.6 / 48 (`data_freq`) and 47.9 / 48 (uniform), with log10 cond 0.76.
+   - Its normalized-mean-shift singular values (30.3-33.4) sit in the random-matrix band sqrt(V/d)(1 ± sqrt(d/V))
+     = 31.4-33.4. The collapsed dim-768 original looks the same.
+   - In contrast, naive R 0.5 dim 48 has singular values 28.4-43.4 and one dominant direction.
+   - gauss R 0.1 dim 16 seed 1 is degraded but not collapsed. It has the most anisotropic dim-16 Sigma: log10 cond
+     2.06, PR 8.8.
+4. **At dims 16 / 48 the same-seed codebooks share their init, as in HBFM.**
+   - Mean row cosine of the EMA `sphere_embed`:
+     - naive vs gauss R 0.5: 0.962 at dim 16 and 0.877 at dim 48.
+     - naive R 0.5 vs naive R 1.0: 0.995 at dim 16 and 0.980 at dim 48.
+     - seed 1 vs seed 2 of one config: -0.003 at dim 16 and -0.001 at dim 48, i.e. independent.
+     - The seed-2 pairs give the same picture (naive vs gauss 0.975 / 0.901).
+   - So within one dim, the `data_freq` and uniform Sigma of different arms and R are a shared init plus a training
+     change.
+   - That change is still large where the table shows it, e.g. at dim 48 gauss R 0.5 Sigma has PR 8.0 vs 20.3 for
+     naive.
+   - The figures cover seed 1 only. They show the effect of arm and R, not the seed spread.
+
+Caveats (GOAL2):
+- **Training site and code version.** 35 cells trained on G3 (1 B300 x 128 x accumulation 4) and 13 on Unicorn
+  (4 GPUs x 32 x accumulation 4). The global batch is the same.
+  - The six dim-768 seed-1 cells are the original runs. The naive originals were trained with the older `s-flm`
+    checkout.
+  - On G3, rotary embeddings use flash-attn's torch path, which matches the triton kernel bit for bit on an Ada GPU.
+  - Every cell was evaluated on Unicorn with the same code.
+  - Site is confounded with seed. At dims 16 / 48, seed 1 ran on Unicorn and seeds 2 / 3 on G3; the one exception
+    is naive R 0.1 dim 16 seed 2, which also ran on Unicorn.
+    - Over the 10 non-collapsed dim-16/48 cells, seed 1 has the highest GenPPL of the three seeds in 7 and the
+      highest valid NELBO in 5.
+    - The gaps are small: NELBO +0.008 to +0.016 over the G3 mean (+0.042 for gauss R 0.5 dim 48), and GenPPL
+      +0.3 to +1.0 (+4.3 there).
+    - The same-seed codebooks share their init (finding 4 above), so this could be a seed-1 effect or a site
+      effect; the two cannot be separated.
+  - At dim 768, seed 1 is always the original and seeds 2 / 3 are always G3. Here the seed-1 original is the best
+    seed: it has the lowest naive GenPPL in all three R (11.81-12.56 vs 12.27-14.50), and at R 1.0 also the lowest
+    NELBO (1.892 vs 1.937 / 1.954).
+  - Findings 1-2 give the G3-only (seeds 2 / 3) numbers next to the means. The dim-48 penalty and the gauss − naive
+    gap hold on G3 alone.
+- **G3 reruns.** Three G3 cells (naive R 0.5 / 1.0 and gauss R 0.5, dim 768 seed 3) failed to save a checkpoint
+  ("No space left on device" on /share/thickstun) and were retrained from scratch.
+- **NELBO code fix.** The merged `EFLM.reconstruction_loss` passed `context=None`, which crashes the Gaussian
+  readout. It now passes `TrainingContext(alpha_t=alpha_t)`. naive values do not depend on this fix.

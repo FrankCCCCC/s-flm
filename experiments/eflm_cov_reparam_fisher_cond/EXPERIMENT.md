@@ -123,3 +123,112 @@ RTX 6000 Ada with 256 states, so ~40 min at 128). Output: `data/<label>.json`; f
 1 = noise) and `figures/angular_fisher_sigma_t_snr.png` (x = log10 SNR_eff, inverted so the clean end is on the left).
 `--plot` redraws both from `data/*.json`. A first round at 256 states (jobs 420302-420307) was cancelled at about
 t = 0.5 when setup.md fixed 128.
+
+## HBFM angular Fisher Sigma_t and codebook spectra (2026-10-20)
+
+Same metrics, priors, 128 states and `--nt 51` grid as the EFLM run above, for seed 1 of the two HBFM configs in
+`s-flm-dev2/experiments/elbo_tune_tinystories_256/RESULTS.md` ("HBFM CE-trained, (H^3)^16, adaptive curv., ub 1"
+and "... fixed curv., ub 0.5"; all CE-trained, 30k steps, embed 48 = 16 factors of H^3 at K = -0.5, trunc_exp rate 3):
+
+| label | checkpoint (under outputs/) |
+| --- | --- |
+| naive_ada_ub-1 | `hbfm_rlf_ada_curv_tinystories_256/cb-4_mode-texp_rate-3_ub-1_tm-1_lr-3e-4_seed-1` |
+| naive_fix_ub-0.5 | `claude_test_hbfm_tinystories_256/mode-trunc_exp_rate-3_k-0.5_ub-0.5_seed-1` |
+| horo_fix_ub-0.5 | `claude_test_hbfm_tinystories_256/mode-trunc_exp_rate-3_k-0.5_ub-0.5_fwd-horo_seed-1` |
+
+Both named configs are `forward_type=naive`. The horosphere twin exists only for the fixed config; adaptive + horo
+(CE, embed 48) was never trained and is left out.
+
+- **Posterior.** HBFM's bridge direction law is the Poisson kernel, so q(v | z_t) ∝ q(v) prod_m D_m(v)^{-(d-1)}
+  exactly, D_m = cosh s_m - sinh s_m w_m^T u_{v,m}, s_m = kappa rho_m (numeric/horosphere.py `compute_horosphere`).
+- **Sigma_t** = Cov_q[(P_{w_m} u_{v,m} / D_m)_m] on the 32-dim tangent space of (S^2)^16. In the manifold's metric
+  this is the angular Fisher divided by (d-1)^2 kappa^2; per raw angle dw_m it would weight factor m by sinh^2(s_m).
+  Finite-difference KL under per-factor rotations matches it: worst |KL/pred - 1| = 2.7e-4 (fixed) and < 1e-2 (adaptive)
+  at eps = 1e-4, except one adaptive state with a point-mass posterior whose predicted KL (1.6e-15) is at fp64 round-off.
+- **Adaptive curvature** rescales position i's clock to lambda_i tau with the base-K readout. The model reads
+  lambda = 0.2500001 at every position (the lower bound 1 / curvature_bound), so it is the fixed-K bridge on a 4x
+  slower clock (effective heat time <= 0.25 vs 0.5).
+- **Sigma** = Cov_q[v] over all 48 dims (stars in the figure); Sigma_t lives in 32 tangent dims.
+- **Code.** dev1's HBFM has no `algo.curvature_bound`, so models load from `s-flm-dev2` via `SFLM_REPO`
+  (`visualization/loss_geometry.py`), which also gained the `hbfm` algo entry and a `curvature_bound = 1` default.
+
+Run (compute node, 1 GPU, ~5 min per checkpoint):
+
+    SFLM_REPO=/share/desa/nfs02/sc3379/workspace/research/s-flm-dev2/s-flm TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
+      python visualization/angular_fisher_sigma_t_hbfm.py --ckpt <ckpt> --label <label>
+
+Output: `data/hbfm/<label>.json`, `figures/angular_fisher_sigma_t_hbfm_t.png` (x = code t) and
+`figures/angular_fisher_sigma_t_hbfm_heat.png` (x = effective heat time lambda tau(t), log, inverted).
+Codebook spectra: `visualization/codebook_eigen_dist.py --variants normalized,normalized-mean-shift,mean-shift-normalized`
+and `codebook_eigen_proj_scatter.py --mode <each>`, same SFLM_REPO, into `figures/codebook_hbfm/`.
+
+## GOAL2: the six angular-Fisher checkpoints at embedding dim 16 / 48 / 768 x 3 seeds (2026-10-21)
+
+Question: do the six EFLM models above (naive / gauss x R in {0.1, 0.5, 1.0}) keep their GenPPL, entropy and
+Sigma_t shape when the embedding (state) dimension shrinks from 768 to the HBFM sizes 48 and 16, and how large is
+seed-to-seed variance?
+
+- **Grid:** arm {naive, gauss} x R {0.1, 0.5, 1.0} x `model.embed_dim` {16, 48, 768} x seed {1, 2, 3} = 54 cells.
+  The six (768, seed 1) cells are the original runs, symlinked into `outputs/eflm_cov_reparam_fisher_cond/`; 48 are
+  trained. Run name `fwd-{arm}_r-{R}_ed-{dim}_seed-{seed}`, job name `eflm_cov_reparam_fisher_cond_<run>`.
+- **Same config as each original run:** small-sphere-dit, ngpt init, lr 3e-4, seq 256, 30k steps, global batch 512,
+  autonomous clock with TAU_MAX = tau*(R) (3.9811 / 2.4436 / 1.8338; tau* does not depend on the dimension).
+  naive: FORWARD_TYPE=naive, COV_WEIGHT=false. gauss: FORWARD_TYPE=gaussian, COV_WEIGHT=true (CE x |alpha_t'|).
+  So naive vs gauss also differs in the loss weight, as in the originals.
+- **Code change:** `SphereDiT` reads `model.embed_dim` (null = hidden_size, the old behaviour; checkpoints without the
+  key load unchanged). A smaller embed_dim keeps the 768-wide trunk and lifts the state with a linear `in_proj`
+  (as in HyperbolicDiT); the readout is the same V-way head. `EMBED_DIM` knob in
+  `scripts/{train,sample}/tinystories/eflm_rescale_auto_truncation.sh`. Smoke test (dim 16, 20 steps, train + both
+  evals) passed: `sphere_embed` (50258, 16), `in_proj` 16 -> 768.
+- **Caveat:** the naive originals were trained from the older `s-flm` checkout, the new cells from s-flm-dev1.
+- **GPUs / wall clock:** an original run took ~10.3 h on 4x A6000 (+ ~4 min eval): ~41 GPU-h per cell, ~2,000 GPU-h
+  for 48. `sweep.py --cluster unicorn` keeps the original layout (4 GPUs x 32 x accumulation 4, thickstun,desa);
+  `--cluster g3` uses 1 B300 x 128 x accumulation 4 (same global batch, qos g3, checkpoint every 1k steps).
+  G3 is not usable as is: a probe job failed at once without writing its log, i.e. `/share/desa/nfs02` (repo,
+  outputs) is not mounted there. All 48 cells were submitted to Unicorn (jobs 448768-448799, 449152-449185).
+  Observed: ~4 h per cell on thickstun (RTX 6000 Ada), ~9.5 h on kuleshov-compute-03 (A5000).
+- **G3 (2026-10-21, to finish sooner):** the 35 seed-2/3 cells not yet started on Unicorn were cancelled there
+  (with approval) and resubmitted to G3, jobs 74511-74545 (`--cluster g3`, qos g3, 1 B300 x 128 x accumulation 4,
+  ~5.7 it/s = ~6 h per cell). G3 runs from the checkout `/share/thickstun/sychou/workspace_g3/research/s-flm-dev1/s-flm`
+  (G3 has no /share/desa) with the same code (the changed files copied over) and the bs256 TinyStories cache
+  copied into its `data_cache/`; outputs and logs live under that checkout. Two B300 (sm_103) issues with the sfm
+  env (torch 2.7 / CUDA 12.8 / triton 3.3):
+  1. triton 3.3 cannot compile for sm_103, which breaks flash-attn's rotary kernel. `models/dit.py
+     apply_rotary_pos_emb` now uses the torch path on capability >= 10.3, in fp32 like the kernel; on an RTX 6000
+     Ada it matches the triton kernel bit for bit (max |diff| 0). flash-attn's CUDA attention runs on B300 (max
+     |diff| vs SDPA 1e-3, bf16).
+  2. NVRTC 12.8 cannot JIT for sm_103 (`torch.special.entr` in the eval). So G3 only trains (`TRAIN_DONE` marker),
+     and `sweep.py --eval-g3` evaluates each G3-trained cell on Unicorn (1 GPU, ~4 min) into
+     `outputs/eflm_cov_reparam_fisher_cond/<run>/eval`, with `<run>/checkpoints` linked to the G3 run. Every cell
+     is therefore evaluated with the same code on the same kind of GPU. Checked end to end on a 300-step G3 smoke
+     run.
+- **Eval check (2026-10-21):** the six (768, seed 1) originals were re-evaluated with the current code (same
+  sampler settings) into `outputs/eflm_cov_reparam_fisher_cond/reeval/`. Val ppl reproduces to <0.2 %, GenPPL to
+  within ~0.4 (naive 12.40 / 12.00 / 12.56 vs 12.12 / 11.81 / 12.56 original), so the older-checkout eval of the
+  naive originals is comparable with the new cells; run-to-run GenPPL noise at 64 samples is ~0.3.
+- **G3 reruns (2026-10-22):** 74541, 74542 and 74544 (naive R 0.5 / 1.0 and gauss R 0.5, dim 768 seed 3) failed
+  to save a checkpoint ("No space left on device" on /share/thickstun, g3-compute-08). They were resubmitted as
+  76965-76967 and trained from scratch.
+- **NELBO (`nelbo.py`, Unicorn, 1 GPU per dim):** the codebase's EFLM ELBO (`algo.loss_type=elbo`, EMA weights of
+  last.ckpt), nats per token.
+  - Protocol of dev2's `elbo_tune_tinystories_256` loss table: the first 2048 sequences of the shuffled train
+    loader (seed 1) or of the valid loader, one (t, noise) draw per sequence (seed 1). Train and valid get the
+    same draws, and so do all cells.
+  - Output: `data/nelbo/<run>_{train,valid}.json`.
+  - Fix needed in `algo.py`: the merged `EFLM.reconstruction_loss` passed `context=None`, which crashes the
+    Gaussian readout. It now passes `trainer_base.TrainingContext(alpha_t=alpha_t)`.
+- **Per-dim figures (seed 1):**
+  - `visualization/angular_fisher_sigma_t.py --group ed-<dim>` gives `figures/angular_fisher_sigma_t_ed-<dim>_{t,snr}.png`,
+    with data in `data/ed-<dim>/`. ed-768 reuses the originals' `data/*.json`.
+  - `visualization/codebook_eigen_dist.py` and `codebook_eigen_proj_scatter.py` write to
+    `figures/codebook_eflm/ed-<dim>/`.
+- **Table:** `report.py` prints mean ± std over seeds per arm x R x dim. Results are in RESULTS.md (GOAL2).
+
+Run:
+
+    python experiments/eflm_cov_reparam_fisher_cond/sweep.py --cluster unicorn --dims 16 48 --seeds 1 2
+    python experiments/eflm_cov_reparam_fisher_cond/sweep.py [--cluster g3]     # the rest; skips done / queued cells
+    python experiments/eflm_cov_reparam_fisher_cond/sweep.py --cluster g3 --seeds 2 3   # what ran on G3
+    python experiments/eflm_cov_reparam_fisher_cond/sweep.py --eval-g3          # Unicorn evals of G3-trained cells
+    python experiments/eflm_cov_reparam_fisher_cond/nelbo.py --runs <run> ...   # GPU node; skips existing JSONs
+    python experiments/eflm_cov_reparam_fisher_cond/report.py                   # GOAL2 table

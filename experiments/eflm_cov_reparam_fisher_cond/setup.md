@@ -94,3 +94,9 @@ use following checkpoints, put into one figure
 | gauss R=0.1 | `eflm_rescale_auto_trunc_cov_reparam_tinystories_256/ns-auto_r-0.1_lr-3e-4/checkpoints/last.ckpt` |
 | gauss R=0.5 | `eflm_rescale_auto_trunc_cov_reparam_tinystories_256/ns-auto_r-0.5_lr-3e-4/checkpoints/last.ckpt` |
 | gauss R=1.0 | `eflm_rescale_auto_trunc_cov_reparam_tinystories_256/ns-auto_r-1.0_lr-3e-4/checkpoints/last.ckpt` |
+
+---
+
+GOAL2
+
+Check the models used in listed in above table, for each forward_type={naive,guassian} and R={0.1,0.5,1.0}, train EFLM with same config with dim=16,48,and 768, with 3 seeds, skip if already existed

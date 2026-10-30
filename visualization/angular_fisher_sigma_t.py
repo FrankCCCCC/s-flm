@@ -22,6 +22,7 @@ Usage (compute node, 1 GPU; writes data/<label>.json, then redraws figures/ from
   TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 python visualization/angular_fisher_sigma_t.py \
     --ckpt outputs/.../checkpoints/last.ckpt --label gauss_r-0.5 [--nt 51]
   python visualization/angular_fisher_sigma_t.py --plot   # figures only
+  --group ed-16: data/ed-16/<label>.json and figures/angular_fisher_sigma_t_ed-16_{t,snr}.png (one figure per group)
 """
 import argparse, glob, json, os, types
 
@@ -134,7 +135,7 @@ def compute(args):
   print(f'wrote {DATA}/{args.label}.json', flush=True)
 
 
-def plot():
+def plot(group=''):
   import matplotlib
   matplotlib.use('Agg')
   import matplotlib.pyplot as plt
@@ -169,10 +170,10 @@ def plot():
       axes[0, 0].invert_xaxis()  # shared x: invert once, clean end on the left as in the t figure
     axes[0, 0].legend(fontsize=7)
     n = ' / '.join(str(k) for k in sorted({r['n_state'] for r in runs}))
-    fig.suptitle(f'Angular-Fisher Sigma_t = Cov_q[P_w v] on the tangent space (median, quartile band over {n} states; '
+    fig.suptitle(f'{group + ": " if group else ""}Angular-Fisher Sigma_t = Cov_q[P_w v] on the tangent space (median, quartile band over {n} states; '
                  'star = Sigma, near-origin limit)')
     fig.tight_layout()
-    path = f'{FIG}/angular_fisher_sigma_t_{axis}.png'
+    path = f'{FIG}/angular_fisher_sigma_t{"_" + group if group else ""}_{axis}.png'
     tmp = f'{path}.{os.getpid()}.tmp.png'
     fig.savefig(tmp, dpi=120)
     os.replace(tmp, path)  # atomic: concurrent jobs redraw the same figure
@@ -186,7 +187,10 @@ if __name__ == '__main__':
   p.add_argument('--label')
   p.add_argument('--nt', type=int, default=51, help='timestep samples: np.linspace(0, 1, nt), t = 0, 0.02, ..., 1')
   p.add_argument('--plot', action='store_true', help='only redraw the figures from data/*.json')
+  p.add_argument('--group', default='', help='subdirectory of data/ and figure-name tag, e.g. ed-16')
   args = p.parse_args()
+  if args.group:
+    DATA = f'{DATA}/{args.group}'
   if not args.plot:
     compute(args)
-  plot()
+  plot(args.group)
