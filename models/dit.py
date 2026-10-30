@@ -231,6 +231,11 @@ def split_and_apply_rotary_pos_emb(qkv, rotary_cos_sin):
 def apply_rotary_pos_emb(qkv, cos, sin):
   cos = cos[0,:,0,0,:cos.shape[-1]//2]
   sin = sin[0,:,0,0,:sin.shape[-1]//2]
+  if torch.cuda.get_device_capability(qkv.device) >= (10, 3):
+    # B300 (sm_103): triton 3.3 cannot compile flash-attn's rotary kernel; same fp32 math in torch.
+    q, k = (flash_attn.layers.rotary.apply_rotary_emb_torch(qkv[:, :, i].float(), cos.float(), sin.float())
+            for i in (0, 1))
+    return torch.stack([q.to(qkv.dtype), k.to(qkv.dtype), qkv[:, :, 2]], dim=2)
   return flash_attn.layers.rotary.apply_rotary_emb_qkv_(qkv, cos, sin)
 
 
