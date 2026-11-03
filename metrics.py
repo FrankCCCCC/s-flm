@@ -70,6 +70,16 @@ class Perplexity(NLL):
     return torch.exp(self.mean_value / self.weight)
 
 
+class Std(torchmetrics.aggregation.CatMetric):
+  def compute(self) -> torch.Tensor:
+    """Computes the standard deviation of the recorded values.
+
+    Returns:
+      std
+    """
+    return super().compute().std()
+
+
 class Metrics:
   def __init__(self, gen_ppl_eval_model_name_or_path=None,
                eval_ppl_batch_size=None) -> None:
@@ -80,6 +90,9 @@ class Metrics:
     self.train_aux = BPD()
     self.valid_nlls = metrics.clone(prefix='val/')
     self.valid_aux = BPD()
+    # Std of the per-sequence loss across samples.
+    self.train_loss_std = Std()
+    self.valid_loss_std = Std()
     self.gen_ppl = Perplexity()
     self.sample_entropy = torchmetrics.aggregation.MeanMetric()
     self.eval_ppl_batch_size = eval_ppl_batch_size
@@ -97,6 +110,8 @@ class Metrics:
     self.train_aux = self.train_aux.to(*args, **kwargs)
     self.valid_nlls = self.valid_nlls.to(*args, **kwargs)
     self.valid_aux = self.valid_aux.to(*args, **kwargs)
+    self.train_loss_std = self.train_loss_std.to(*args, **kwargs)
+    self.valid_loss_std = self.valid_loss_std.to(*args, **kwargs)
 
   def reset(self):
     self.gen_ppl.reset()
@@ -105,6 +120,8 @@ class Metrics:
     self.train_aux.reset()
     self.valid_nlls.reset()
     self.valid_aux.reset()
+    self.train_loss_std.reset()
+    self.valid_loss_std.reset()
 
   def update_train(self, nll, aux_loss, num_tokens):
     self.train_nlls.update(nll, num_tokens)

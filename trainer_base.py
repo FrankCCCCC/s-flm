@@ -338,6 +338,16 @@ class TrainerBase(L.LightningModule):
              sync_dist=True)
     return losses.loss
 
+  def on_train_batch_end(self, outputs, batch, batch_idx):
+    # With antithetic sampling each micro-batch / rank holds a
+    # t-stratum, so pool all of them and log once per optimizer step.
+    if (batch_idx + 1) % self.trainer.accumulate_grad_batches == 0:
+      self.log(name='trainer/loss_std',
+               value=self.metrics.train_loss_std.compute(),
+               on_step=True,
+               on_epoch=False)
+      self.metrics.train_loss_std.reset()
+
   def on_train_epoch_end(self):
     for k, v in self.metrics.valid_nlls.items():
       self.log(name=k, value=v.compute(), on_step=False,
@@ -361,6 +371,9 @@ class TrainerBase(L.LightningModule):
     for k, v in self.metrics.valid_nlls.items():
       self.log(name=k,  value=v.compute(), on_step=False,
                on_epoch=True, sync_dist=True)
+    self.log(name='val/loss_std',
+             value=self.metrics.valid_loss_std.compute(),
+             on_step=False, on_epoch=True, sync_dist=True)
     if ((self.config.eval.compute_perplexity_on_sanity
          or not self.trainer.sanity_checking)
          and self.config.eval.generate_samples):
@@ -462,6 +475,10 @@ class TrainerBase(L.LightningModule):
     total_num_tokens = per_sample_num_tokens.sum()  # scalar
     mean_token_loss = (total_loss_sum
       / total_num_tokens.clamp(min=1)) # scalar
+
+    loss_std = (self.metrics.train_loss_std if train_mode
+                else self.metrics.valid_loss_std)
+    loss_std.update(per_sample_loss.detach())
 
     if (train_mode and t is not None
         and self.config.noise.adaptive):
