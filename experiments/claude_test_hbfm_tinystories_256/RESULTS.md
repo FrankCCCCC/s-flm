@@ -387,7 +387,9 @@ All 64 samples are distinct in every one of the 152 eval reads (140 distinct (ce
 duplicate re-reads; 145/133 of them existed when this section was first written, before the 2026-09-20 horizon probe); entropy is 3.82–3.96 in every 30k read (spread 0.14), so ranking by GenPPL alone is fair *within*
 this sweep. HBFM's entropy sits ~0.45 nat below MDLM / DUO (like S-FLM's 3.95), so the ~30% lower GenPPL than MDLM / DUO
 is a comparison at lower unigram diversity; against S-FLM + trunc + ada at the same entropy, the best HBFM cell ties
-(12.64 ± 0.43 vs 12.95).
+(12.64 ± 0.43 vs 12.95). **Added 2026-09-30:** the low entropy is entirely the `top_k_velocity=1` sampler (see the
+decoding-rule ladder in Status); at MATCHED entropy HBFM is 35–90% worse than MDLM across H 4.0–4.4, so the comparison
+to MDLM/DUO in this table must not be read as a win.
 
 ### What each axis says
 
@@ -1073,3 +1075,125 @@ the adaptive schedule only partly rescues a mismatched rate. Throughput: Ada 3.2
   axis probe: that would be ~57 h of A6000 time to resolve a tie. The one consistent non-tie: horosphere holds
   +0.01–0.05 nat more entropy at equal GenPPL in all three cells, so if sample diversity is valued it is a marginal
   win, not a neutral one.
+- 2026-09-30 (user question: why does horosphere help on sudoku but not here; why does EFLM's embedding show spectral
+  skew / frequency distortion and HBFM's not). **The second premise had never been measured** — the Sep-25 deck's
+  spectrum plots cover S-FLM and rescaled E-FLM only. Measured now (`logs/codebook/codebook_skew.py`, frequencies
+  counted over all 477M training tokens; `codebook_drift.py` for the 5k→30k movement; logs alongside). Same
+  definitions for every geometry: λmax/λmin of the Gram eigenvalues of the row-normalised `sphere_embed.weight` (the
+  deck's statistic), ‖e_v‖ type-median vs frequency-weighted token-median, Spearman(‖e_v‖, log f), Spearman(|proj on
+  PC1|, log f), centroid ‖mean_v e_v/‖e_v‖‖.
+
+  | codebook @30k | λmax/λmin (row-norm) | ‖e‖ tok-med / type-med | Spearman(‖e‖, log f) | Spearman(\|PC1\|, log f) | centroid |
+  |---|---:|---:|---:|---:|---:|
+  | random N(0,1/48), 50257×48 | 1.13 | 1.00 | – | – | – |
+  | HBFM naive trunc_exp, seeds 1/2/3 | 1.4 / 1.4 / 1.4 | 1.05 / 1.03 / 1.02 | +0.24 / +0.25 / +0.26 | +0.11 / +0.10 / +0.11 | 0.03 |
+  | HBFM horosphere trunc_exp | 1.4 | 1.06 | +0.20 | +0.12 | 0.025 |
+  | HBFM naive spec (exp rate 3) | 1.3 | 1.06 | +0.22 | +0.06 | 0.02 |
+  | EFLM raw-norm naive (GenPPL 34.6) | 49.6 | **44.7** | **+0.98** | +0.44 | 0.02 |
+  | EFLM rescaled R=0.5 lr 1e-3 (11.4) | **564.5** | 1.55 | **+0.99** | −0.23 | 0.33 |
+  | S-FLM naive | 35.8 | 1.55 | **+0.98** | +0.38 | 0.065 |
+
+  HBFM per-factor-normalised (16 unit blocks of 3) gives the same picture: λ ratio 1.3–1.5, Spearman(mean factor
+  norm, log f) +0.21 to +0.29. Movement 5k→30k (per-row cosine median / norm ratio for the 200 most frequent words /
+  Spearman(Δnorm, log f)): HBFM naive 0.987 / 1.08 / +0.71; HBFM horosphere 0.985 / 1.08 / +0.60; EFLM raw 0.966 /
+  **7.94** / +0.98; S-FLM 0.865 / 1.62 / +0.98. In every model the frequent rows move most (HBFM Spearman(1−cos,
+  log f) ≈ +0.9), but only in the Euclidean/spherical models does that movement go into the NORM.
+  Reading: (i) the raw-EFLM norm–frequency split is a parametrisation effect — the raw row norm enters the flow state
+  linearly, so growing ‖e_v‖ raises the SNR of every occurrence of v and the plain CE rewards it in proportion to
+  frequency (no normalisation, wd 0, untied head; SNR weighting is off and made things worse when on); (ii) S-FLM and
+  rescaled EFLM hide the norm from the flow, so what remains is Adam's tangential-update inflation (‖e+Δ‖² = ‖e‖² +
+  ‖Δ‖² for Δ ⊥ e, more updates → more inflation) — harmless to the state but the deck's directional skew (36–564) is
+  real and the state DOES see directions; (iii) HBFM has neither because the bridge reads only per-factor directions
+  at a fixed radius (loss exactly norm-invariant), the DiT reads the bridge state rather than the embedding, the
+  gradient that reaches the codebook is a small, noisy reparameterisation gradient through the Brownian bridge (so the
+  code barely leaves its N(0,1/48) init: λ 1.4 vs 1.13 random, norm 1.04 vs 0.99), and on (S²)¹⁶ a random code is
+  already sufficient — the calibration's one-hot posterior at τ 0.8 was computed with a RANDOM table. Loss weighting
+  is not the cause on either side.
+- 2026-09-30, test of the hypothesis "spectral skew lowers entropy because rare words get ignored (they need more
+  velocity-field precision)". Generated-token mass per training-frequency-rank bin, divided by the training mass in
+  the same bin, from each cell's stored 64×256 sample tokens (`logs/codebook/tail_coverage*.py`, reference = 20
+  bootstrap draws of 64 training windows, whose bin ratios are 1.00 ± 0.01/0.01/0.04/0.14):
+
+  | cell (30k) | λmax/λmin | GenPPL | H (GPT-2 ids) | types | H within top-1000 | top-20 mass | rank 1001–5000 | rank 5001–20000 |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|
+  | training reference | – | – | 5.74 | 1804 | 5.31 | 0.39 | 1.00 | 0.98 |
+  | MDLM | – | 18.96 | 5.70 | 1764 | 5.29 | 0.39 | 0.93 | 0.86 |
+  | HBFM naive trunc_exp s1/s2/s3 | 1.4 | 12.6 | 4.86 / 4.84 / 4.93 | 1179 / 1136 / 1192 | 4.55 / 4.55 / 4.63 | 0.54 | 0.66 / 0.63 / 0.64 | 0.42 / 0.23 / 0.19 |
+  | EFLM rescaled R=0.5 s1/s2/s3 | 564 | 11.4 | 4.67 / 4.73 / 4.62 | 1045 / 1036 / 1009 | 4.33 / 4.45 / 4.32 | 0.57 | 0.72 / 0.62 / 0.64 | 0.52 / 0.24 / 0.53 |
+  | EFLM rescaled R=0.05 (near-collapse) | – | 11.9 | 4.15 | 707 | 3.84 | 0.64 | 0.75 | 0.53 |
+  | EFLM raw-norm | 49.6 | 34.6 | 4.40 | 984 | – | – | 1.02 | 0.69 |
+  | S-FLM + trunc + ada + SC s1 | 36 | 11.5 | 5.00 | 1190 | 4.72 | 0.51 | 0.64 | 0.27 |
+
+  Findings. (1) The skewed codebook does NOT under-generate rare words: rescaled EFLM (λ 564) covers rank 1001–20000
+  as well as or better than HBFM (λ 1.4). (2) EFLM's ~0.2-nat entropy deficit vs HBFM lives entirely INSIDE the
+  top-1000 words (H_head 4.33–4.45 vs 4.55–4.63; fewer torso types 570–606 vs 649–686; more top-20 mass 0.57 vs 0.54)
+  — head/torso concentration, not tail suppression. Entropy does not track λ either: raw EFLM (λ 50) has lower
+  entropy (4.40) than rescaled (λ 564). (3) Tail coverage is a SAMPLER property: the same HBFM spec checkpoint at
+  t_max 0.25/0.5/1/2/3 gives rank-1001–5000 ratios 0.59/0.62/0.72/0.83/0.89 and rank-5001–20000 0.26/0.27/0.31/0.47/
+  0.48, while reported entropy FALLS 3.92→3.85 and GenPPL worsens 12.9→15.6 — longer integration recovers the tail
+  but concentrates the head; entropy and tail coverage move in opposite directions. So the "rare words need more
+  precision" half of the hypothesis is right about the sampler, not about the codebook. (4) The dominant diversity
+  effect is shared by every flow model regardless of geometry or skew: +40% mass on the top-20 words, ~60% of the
+  mid-frequency mass and 20–50% of the 5k–20k band, vs MDLM's near-faithful 0.93/0.86.
+- 2026-09-30, decoding-rule ladder on ONE checkpoint (HBFM naive trunc_exp seed 1, 30k, t_max 0.5, 180 steps;
+  `logs/codebook/decode_ladder.py`, jobs 719728-31). Answers "why do the flow models have lower entropy than MDLM/DUO":
+
+  | decoding rule | GenPPL | H (GPT-2 ids) | types | top-20 mass | rank 1001–5000 | rank 5001–20000 |
+  |---|---:|---:|---:|---:|---:|---:|
+  | default: `top_k_velocity=1` drift, greedy last step | 12.59 | 4.86 | 1179 | 0.54 | 0.66 | 0.42 |
+  | top-1 drift, ancestral last step | 13.07 | 4.88 | 1183 | 0.54 | 0.68 | 0.35 |
+  | **posterior-mean drift (`top_k_velocity=-1`, the yaml default), greedy last** | 26.74 | 5.68 | 1903 | 0.40 | 0.86 | 0.78 |
+  | drift toward a word SAMPLED from the posterior, ancestral last | 27.95 | 5.70 | 1948 | 0.40 | 0.91 | 0.98 |
+  | MDLM (categorical draw per unmasking step) | 18.96 | 5.70 | 1764 | 0.39 | 0.93 | 0.86 |
+  | training distribution | – | 5.74 | 1804 | 0.39 | 1.00 | 0.98 |
+
+  (1) The greedy last step is irrelevant (row 2 = row 1). (2) The entire head-concentration / rare-word suppression is
+  the **top-1 velocity approximation**: with the exact posterior-mean drift the same model reproduces the training
+  unigram distribution to within noise (top-20 0.40 vs 0.39, tail 0.86/0.78), and with a sampled-word drift it is
+  exactly faithful (0.91/0.98) — the trained posterior is well calibrated; `top_k_velocity=1` makes every step chase
+  the current leader and the 256 positions lock into the head. This holds with a codebook that has no skew (λ 1.4),
+  so it is not a codebook effect, and it applies to every flow-model number in this repo, since the TinyStories
+  sample scripts and this sweep hardcode `TOPK_VELOCITY=1` (setup.md: "top_k_v = 1").
+  (3) **This re-reads the headline comparison to MDLM/DUO.** At the default top-1 sampler HBFM's 12.64 beats MDLM's
+  18.76 at ~0.85 nat lower entropy; at MATCHED entropy (H ≈ 5.7) the same HBFM checkpoint reads 26.7 vs MDLM 18.96,
+  i.e. ~40% WORSE. The EFLM SDE frontier already showed the same ordering (at reported-H 4.10: EFLM 9.59 vs MDLM
+  8.70). So "HBFM beats MDLM/DUO on GenPPL" is a statement about a mode-seeking sampler, not about the model;
+  quality-vs-diversity frontiers (top-k ∈ {1,5,20,−1} or a temperature/SDE ladder) are needed for a fair comparison,
+  and the naive-vs-horosphere / rate / curvature rankings inside this sweep are all at the same top-1 sampler and
+  therefore remain valid relative to each other. Fourth variant (posterior-mean drift + ancestral last) still running.
+- 2026-09-30, **top-k velocity ladder = HBFM's quality/diversity frontier, against the baselines' temperature frontiers.**
+  HBFM: naive trunc_exp seed 1, 30k, t_max 0.5, 180 steps, 64 samples (1 seed). Baselines: `naive_ar_tinystories_s256/
+  frontier_cells.csv`, 3-seed means, 512 samples, NFE 256, temperature 0.5–1.2 (the T-grid floor is H ≈ 4.06 for MDLM).
+  Entropy is the reported per-sample metric (rep-H) in both.
+
+  | rep-H | HBFM (top-k drift) | MDLM (T) | DUO (T) | S-FLM sfmta (T) |
+  |---:|---:|---:|---:|---:|
+  | 3.92 | **12.59** (k=1) | below T-grid floor (8.44 @ 4.06) | – | – |
+  | 4.03 | 14.40 (k=2) | ~8.5 | ~9.5 | – |
+  | 4.19 | 17.62 (k=5) | 9.42 | ~10.9 | 13.79 |
+  | 4.32 | 20.23 (k=20) | ~13.2 | ~16.5 | ~16.8 |
+  | 4.39 | 23.59 (k=100) | ~17.2 | ~24 | ~19.9 |
+  | 4.42 | 26.74 (k=all) / 27.95 (sampled drift) | ~19.9 | ~31 | ~22.8 |
+
+  Reading: at every matched entropy in the measured range HBFM is 35–90% WORSE than MDLM and 15–30% worse than the
+  temperature-swept S-FLM, and only ties DUO at the high-entropy end; the top-k family traces a curve that lies
+  uniformly above MDLM's, so no single k closes the gap. The "HBFM 12.64 beats MDLM 18.76" headline compares the k=1
+  corner (H 3.92) against MDLM at T=1 (H 4.39); it is a sampler-sharpness comparison, and MDLM's own curve extrapolates
+  well below 8.4 at H 3.92. **Unigram faithfulness and GenPPL are different axes:** the sampled-drift sampler is MORE
+  faithful than MDLM in the marginals (tail 0.91/0.98 vs 0.93/0.86) yet 47% worse in GenPPL, i.e. the per-position
+  marginals are right but the joint word order is less coherent — plausibly because all 256 positions relax
+  simultaneously in a continuous state and coordinate only through z_t, whereas masked diffusion commits each token as
+  hard evidence for the rest. Implication for a better sampler: k (or T) alone is not enough; a schedule that keeps a
+  broad drift early (diversity) and commits late (top-1 / freezing confident positions, MDLM-style) is the natural
+  next thing to test. Caveats: HBFM is 1 seed / 64 samples / 180 steps vs 3 seeds / 512 samples / NFE 256 for the
+  baselines; HBFM's seed sd is ~4%, far smaller than the gaps.
+- 2026-10-01, **control re-read of the decode-ladder checkpoint with the current code = bit-identical.** Jobs 722717
+  (pinned to thickstun-compute-01) and 725080 (unpinned, also landed on thickstun-compute-01 / Ada, the GPU type of the
+  original `eval/`) re-ran the default decode (`top_k_velocity=1`, greedy last step, t_max 0.5, 180 steps, 64 samples)
+  on `mode-trunc_exp_rate-3_k-0.5_ub-0.5_seed-1/checkpoints/last.ckpt` after the other session's 2026-09-30 edits to
+  algo.py / numeric/geo_bridge.py / models/hyperbolic_dit.py. Both read GenPPL 12.586960792541504 @ reported-H
+  3.9184744358062744, identical to `eval/` to the last digit, and all 64 sample texts are bit-identical (md5 of the
+  `text` array c229074180ff in all three JSONs: `eval/`, `eval_decode_control_tkv1_greedy/`,
+  `eval_decode_control2_tkv1_greedy/`). So the code changes do not touch this decode path, and the 2026-09-30
+  decode-ladder rows (all read on thickstun-compute-01) are reproducible; the analysis doc's "control pending" line in
+  `experiments/analysis/hbfm_horosphere_skew_sampler_2026-09-30.md` §6 is filled in.
