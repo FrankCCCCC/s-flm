@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import utils
-from numeric.geo_bridge import GeoUtils
+from numeric.geo_bridge import GeoUtils, HyperbolicHeatKernel
 from .dit import (
   DDiTBlock,
   DDiTFinalLayer,
@@ -138,13 +138,18 @@ class HarmonicFeatures(nn.Module):
   f_0 = 1 and every f_l saturates at a small radius, so the trunk, which has
   no time conditioning, is also given the radial channels tanh(s / c) for c in
   `radial_scales`: num_features = num_factors * ((L + 1)^2 + len(radial_scales)).
-  Nothing is random, so the module adds no checkpoint keys.
+  `mc_samples` = M (null = off) replaces the harmonics' value by their Monte-Carlo
+  Poisson integral over M fresh boundary angles w ~ P(z, .) = (cosh s - sinh s <u, w>)^{-2},
+  the Poisson kernel being its own importance proposal (every weight is 1): the mean of
+  Y_lm(w) is unbiased for f_l(s) Y_lm(u), bounded by sqrt(2l + 1), and collapses onto
+  Y_lm(u) at the boundary, where the kernel does; the gradient is the closed form's and
+  the radial channels stay exact. The module adds no checkpoint keys.
   """
   TABLE_STEP = 1.0 / 256
   TABLE_MAX = 36.0        # > 2 atanh(1 - 8 eps) = 34.66, the readback's largest s
 
   def __init__(self, prod_factor_dim, prod_factor_gaussian_curvature, degree,
-               radial_scales):
+               radial_scales, mc_samples=None):
     super().__init__()
     if any(d != 3 for d in prod_factor_dim):
       raise ValueError(
@@ -153,9 +158,12 @@ class HarmonicFeatures(nn.Module):
     if degree < 0 or not radial_scales:
       raise ValueError('model.sphere_degree must be >= 0 and '
                        'model.sphere_radial_scales non-empty.')
+    if mc_samples is not None and int(mc_samples) < 1:
+      raise ValueError(f'model.sphere_mc_samples={mc_samples} must be null or an int >= 1.')
     self.prod_factor_dim = prod_factor_dim
     self.prod_factor_gaussian_curvature = prod_factor_gaussian_curvature
     self.degree = degree
+    self.mc_samples = None if mc_samples is None else int(mc_samples)
     self.num_features = len(prod_factor_dim) * (
       (degree + 1) ** 2 + len(radial_scales))
     import numpy as np
@@ -223,6 +231,17 @@ class HarmonicFeatures(nn.Module):
     ss = rhos * self.kappas                                     # (B, L, m)
     harmonics = (self.spherical_harmonics(us)
                  * self.radial(ss)[..., self.ell_of_feature])   # (B, L, m, (L+1)^2)
+    if self.mc_samples is not None:
+      # Monte Carlo over the boundary angle, w ~ P(z, .) exactly (unit importance
+      # weights): no weight to spike near the boundary. The draws carry no graph;
+      # the gradient is the closed form's (straight-through).
+      w = HyperbolicHeatKernel._reflect_to_target(
+        HyperbolicHeatKernel._angular_boost(
+          ss.detach().unsqueeze(-1).expand(*ss.shape, self.mc_samples), 3),
+        us.detach().unsqueeze(-2))                                 # (B, L, m, M, 3)
+      w = w / w.norm(dim=-1, keepdim=True)   # the boost's c0 == -1 rounding at large s
+      mc = self.spherical_harmonics(w).mean(-2)                    # (B, L, m, (L+1)^2)
+      harmonics = harmonics + (mc - harmonics).detach()
     channels = torch.tanh(ss.unsqueeze(-1) / self.radial_scales)   # (B, L, m, |c|)
     return torch.cat([harmonics, channels], dim=-1).flatten(-2)
 
@@ -279,6 +298,9 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     if hyla_dim is not None and sphere_degree is not None:
       raise ValueError('model.hyla_dim and model.sphere_degree are alternative '
                        'input maps; set at most one.')
+    sphere_mc_samples = config.model.get('sphere_mc_samples', None)
+    if sphere_mc_samples is not None and sphere_degree is None:
+      raise ValueError('model.sphere_mc_samples needs the sphere map (model.sphere_degree).')
     self.hyla = None
     self.sphere = None
     self.hyla_concat_state = bool(config.model.get('hyla_concat_state', False))
@@ -294,7 +316,8 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     elif sphere_degree is not None:
       self.sphere = HarmonicFeatures(
         *factors, degree=sphere_degree,
-        radial_scales=list(config.model.get('sphere_radial_scales', [1, 2, 4, 8, 16, 32])))
+        radial_scales=list(config.model.get('sphere_radial_scales', [1, 2, 4, 8, 16, 32])),
+        mc_samples=sphere_mc_samples)
       in_dim = self.sphere.num_features
     else:
       in_dim = embed_dim

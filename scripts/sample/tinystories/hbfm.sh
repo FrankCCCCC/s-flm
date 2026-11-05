@@ -14,6 +14,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/tinystories/eval/hbfm}"
 DEVICES="${DEVICES:-1}"
 EVAL_BS="${EVAL_BS:-16}"
 STEPS="${STEPS:-180}"
+TEMPERATURE="${TEMPERATURE:-1.0}"
+RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}"   # false: GenPPL pass only
 VELOCITY="${VELOCITY:-exact}"
 TOPK_VELOCITY="${TOPK_VELOCITY:-1}"       # -1 = posterior-mean drift over the whole vocabulary
 NOISE_REMOVAL="${NOISE_REMOVAL:-greedy}"
@@ -24,6 +26,10 @@ EMBED_DIM="${EMBED_DIM:-96}"
 HYLA_DIM="${HYLA_DIM:-null}"           # HyLa feature dim; must match training (null = off)
 HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # must match training
 HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # must match training
+HYLA_NORMALIZE="${HYLA_NORMALIZE:-true}"   # must match training
+SPHERE_DEGREE="${SPHERE_DEGREE:-null}"   # sphere map degree; must match training (null = off)
+SPHERE_RADIAL_SCALES="${SPHERE_RADIAL_SCALES:-[1,2,4,8,16,32]}"   # must match training
+SPHERE_MC_SAMPLES="${SPHERE_MC_SAMPLES:-null}"   # MC sphere features at sampling; may differ from training (null = exact closed form, the MC map's mean)
 FACTOR_DIM="${FACTOR_DIM:-3}"
 GAUSS_CURV="${GAUSS_CURV:--1.0}"
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-5}"
@@ -48,6 +54,10 @@ MARGS=(
     model.hyla_dim=${HYLA_DIM}
     model.hyla_radius_cap=${HYLA_RADIUS_CAP}
     model.hyla_concat_state=${HYLA_CONCAT_STATE}
+    model.hyla_normalize=${HYLA_NORMALIZE}
+    model.sphere_degree=${SPHERE_DEGREE}
+    model.sphere_radial_scales="${SPHERE_RADIAL_SCALES}"
+    model.sphere_mc_samples=${SPHERE_MC_SAMPLES}
     algo=hbfm
     algo.prod_factor_dim=${FACTOR_DIM}
     algo.prod_factor_gaussian_curvature=${GAUSS_CURV}
@@ -67,6 +77,7 @@ MARGS=(
 )
 
 # (1) validation perplexity (the importance-weighted denoising bound)
+if [ "${RUN_PPL_EVAL}" = "true" ]; then
 python -u -m main \
     mode=ppl_eval \
     data=tinystories \
@@ -83,6 +94,7 @@ python -u -m main \
     trainer.limit_val_batches=${LIMIT_VAL_BATCHES} \
     +wandb.offline=true \
     hydra.run.dir="${OUTPUT_DIR}/ppl"
+fi
 
 # (2) generative perplexity + samples
 python -u -m main \
@@ -96,7 +108,7 @@ python -u -m main \
     eval.compute_generative_perplexity=True \
     eval.results_json_path="${OUTPUT_DIR}/samples_genppl.json" \
     sampler.num_sample_batches=${NUM_SAMPLE_BATCHES:-4} \
-    sampler.temperature=1.0 \
+    sampler.temperature=${TEMPERATURE} \
     loader.eval_batch_size=${EVAL_BS} \
     loader.num_workers=4 \
     trainer.num_nodes=1 \

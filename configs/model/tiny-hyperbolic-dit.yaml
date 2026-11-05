@@ -10,6 +10,7 @@ hyla_concat_state: false   # feed the Poincaré coordinates next to the HyLa fea
 hyla_normalize: true   # divide the features by sqrt(hyla_dim) (the paper's phi); false = unnormalized as in the reference code
 sphere_degree: null   # hyperbolic-harmonic features of the state fed to the DiT (HarmonicFeatures, the "sphere" map): max degree L of f_l(s) Y_lm(u) per H^3 factor, (L+1)^2 features + the radial channels; null = off; exclusive with hyla_dim
 sphere_radial_scales: [1, 2, 4, 8, 16, 32]   # radial channels tanh(s / c) per factor fed next to the harmonic features (s = rho/R, dimensionless)
+sphere_mc_samples: null   # Monte-Carlo sphere features: mean of Y_lm(w) over this many fresh boundary angles w ~ P(z,.) per H^3 factor (the Poisson kernel as its own proposal, unit weights; exact gradient), every forward in train and eval; null = the closed-form f_l(s) Y_lm(u); needs sphere_degree; adds no checkpoint keys
 length: 180
 n_blocks: 8
 n_heads: 8
