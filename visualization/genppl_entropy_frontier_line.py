@@ -45,7 +45,8 @@ STYLE = {'mdlm': ('MDLM', '#1f77b4'), 'duo': ('DUO', '#ff7f0e'),
          'sfmta': ('S-FLM (trunc+ada)', '#9467bd'),
          'eflm': ('EFLM (exact vel.)', '#9467bd'),
          'eflm-k1': ('EFLM (k=1 vel.)', '#8c564b'),
-         'eflm-sde': ('EFLM (SDE eta*, exact vel.)', '#e377c2')}
+         'eflm-sde': ('EFLM (SDE eta*, exact vel.)', '#e377c2'),
+         'hbfm': ('HBFM (exact vel.)', '#17becf')}
 MARKERS = ['eflm-k1']   # temperature-inert: one point per NFE, not a curve
 
 
@@ -253,6 +254,9 @@ def main():
                  help='EFLM SDE x T cells (experiments/eflm_sde_temp)')
   p.add_argument('--eflm-sde-eta', nargs='+', default=[],
                  help='chosen eta per NFE, e.g. 32:4 64:16 128:32')
+  p.add_argument('--extra', nargs='+', default=[],
+                 help='more frontier dirs with their own LR, DIR:LR (e.g. the HBFM '
+                 'cells, outputs/claude_test_hbfm_frontier:3e-4)')
   p.add_argument('--eflm-dir', default='outputs/eflm_sde',
                  help="EFLM cells (experiments/eflm_sde); '' to disable")
   p.add_argument('--out', default='experiments/naive_ar_tinystories_s256/'
@@ -267,6 +271,9 @@ def main():
   assert cells, f'no frontier samples_genppl.json under {args.dir}'
   if args.eflm_dir:
     cells += load_eflm(args.eflm_dir)
+  for spec in args.extra:
+    d, lr = spec.rsplit(':', 1)
+    cells += load(d, lr)
   if args.eflm_sde_dir:
     cells += load_eflm_sde(args.eflm_sde_dir,
                            {int(k): float(v) for k, v in
