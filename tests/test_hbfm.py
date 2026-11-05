@@ -623,6 +623,10 @@ def test_adaptive_schedule_composes(monkeypatch):
   ['algo.time_conversion_mode=trunc_exp', 'sampler.t_max=2.0'],
   ['algo.time_exp_rate=0'],
   ['model.hyla_dim=30'],      # not a multiple of the 4 factors
+  ['model.sphere_degree=2', 'model.hyla_dim=32'],      # two input maps
+  ['model.sphere_degree=2', 'algo.prod_factor_dim=4'],   # (H^4)^3: no S^2 harmonics
+  ['model.sphere_mc_samples=16'],                        # MC without the sphere map
+  ['model.sphere_degree=2', 'model.sphere_mc_samples=0'],
 ])
 def test_validate_configuration_rejects(monkeypatch, overrides):
   with pytest.raises(ValueError):
@@ -633,9 +637,9 @@ def test_validate_configuration_rejects(monkeypatch, overrides):
 # HyLa: random Laplacian features of the state (models.hyperbolic_dit)
 # ---------------------------------------------------------------------------
 
-def _hyla(dims, curvs, num_features, scale=1.0, seed=0, radius_cap=None):
+def _hyla(dims, curvs, num_features, scale=1.0, seed=0, radius_cap=None, normalize=True):
   from models.hyperbolic_dit import HyLaFeatures
-  return HyLaFeatures(dims, curvs, num_features, scale, seed, radius_cap)
+  return HyLaFeatures(dims, curvs, num_features, scale, seed, radius_cap, normalize)
 
 
 def test_hyla_features_match_the_poincare_formula():
@@ -736,3 +740,365 @@ def test_hyla_concat_state_backbone(monkeypatch):
   assert model.backbone.hyla.radius_cap == 5.0
   loss, _ = model.nll(_tokens(model, 2, 8), None, None)
   assert torch.isfinite(loss).all()
+
+
+def test_hyla_unnormalized_features_match_the_reference_code():
+  """`normalize=False` is the reference implementation's feature,
+  cos(lambda P + b) * PoissonKernel^((d-1)/2) with no 1/sqrt(D) factor."""
+  hyla, plain = _hyla([3], [-1.0], 8, normalize=False), _hyla([3], [-1.0], 8)
+  z = torch.tensor([[[0.3, -0.2, 0.4]]], dtype=torch.float64)
+  assert torch.allclose(hyla(z), plain(z) * math.sqrt(8))
+
+
+def test_hyla_matches_the_reference_implementation():
+  """github.com/ydtydr/HyLa hype/models.py::HyLa.forward, verbatim:
+       PsK = (1 - |x|^2) / |x - b|^2;  angles = Lambdas / 2 * log(PsK)
+       eigs = cos(angles + bias) * sqrt(PsK) ** (dim - 1)
+  on the unit ball (K = -1). Our map is the same function with lambda applied in
+  full (the paper's eq. 1), so the reference's `Lambdas` are 2 x our `lambdas`,
+  and `normalize=False` drops our 1 / sqrt(D)."""
+  hyla = _hyla([3], [-1.0], 16, scale=0.3, seed=5, normalize=False)
+  torch.manual_seed(3)
+  x = torch.randn(7, 3, dtype=torch.float64)
+  x = x / x.norm(dim=-1, keepdim=True) * torch.rand(7, 1, dtype=torch.float64) * 0.9
+  b, Lambdas, bias = hyla.omegas[0], 2 * hyla.lambdas[0], hyla.biases[0]
+  X = x.view(x.size(0), 1, x.size(-1))
+  PsK = (1 - torch.norm(X, 2, dim=-1) ** 2) / (torch.norm(X - b, 2, dim=-1) ** 2)
+  angles = Lambdas / 2.0 * torch.log(PsK)
+  eigs = torch.cos(angles + bias) * torch.sqrt(PsK) ** (3 - 1)
+  assert torch.allclose(hyla(x[None])[0], eigs, atol=1e-12)
+
+
+def test_hyla_radius_cap_stops_the_gradient_at_the_pin():
+  """Past the cap the map is evaluated at a frozen pin: the features of a pinned
+  state do not backpropagate into its direction (the word embedding), while a
+  state inside the cap keeps its full gradient."""
+  hyla = _hyla([3, 3], [-1.0, -0.5], 16, radius_cap=5.0)
+  torch.manual_seed(4)
+  u = torch.randn(1, 2, 2, 3, dtype=torch.float64)
+  u = u / u.norm(dim=-1, keepdim=True)
+  R = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+  s = torch.tensor([35.0, 1.0], dtype=torch.float64)        # position 0 pinned, position 1 inside
+  z = (R[:, None] * torch.tanh(s / 2)[None, :, None, None] * u).flatten(-2).requires_grad_(True)
+  hyla(z).square().sum().backward()
+  assert z.grad[0, 0].abs().max() == 0 and z.grad[0, 1].abs().max() > 0
+
+
+# ---------------------------------------------------------------------------
+# sphere: hyperbolic-harmonic spherical-harmonic features (models.hyperbolic_dit)
+# ---------------------------------------------------------------------------
+
+def _sphere(dims, curvs, degree, radial_scales=(1.0, 4.0, 16.0), mc_samples=None):
+  from models.hyperbolic_dit import HarmonicFeatures
+  return HarmonicFeatures(dims, curvs, degree, list(radial_scales), mc_samples)
+
+
+def _unit(*shape, seed=0):
+  torch.manual_seed(seed)
+  u = torch.randn(*shape, 3, dtype=torch.float64)
+  return u / u.norm(dim=-1, keepdim=True)
+
+
+def test_harmonic_radial_functions_solve_the_h3_laplace_equation():
+  """f_l(s) = r^l 2F1(l, -1/2; l+3/2; r^2) / 2F1(l, -1/2; l+3/2; 1), r = tanh(s/2),
+  is the radial part of a harmonic function f_l(s) Y_lm(u) on H^3:
+  f'' + 2 coth(s) f' - l(l+1) f / sinh^2(s) = 0 (checked on the table by central
+  differences), regular at the origin (f_l(0) = [l = 0]), monotone, and 1 at the
+  boundary. For l = 1 the series sums in closed form, which also checks the
+  tabulation: with a = atanh(r) = s/2,
+  2F1(1, -1/2; 5/2; r^2) = -3 [(r a - 1)/8 - a/(4r) + (a/r - 1)/(8 r^2)]."""
+  sphere = _sphere([3], [-1.0], 8)
+  h = sphere.TABLE_STEP
+  f = sphere.table[:-1]                                      # (N, 9) at s = 0, h, 2h, ...
+  s = torch.arange(f.shape[0], dtype=torch.float64) * h
+  ell = torch.arange(9, dtype=torch.float64)
+  d1 = (f[2:] - f[:-2]) / (2 * h)
+  d2 = (f[2:] - 2 * f[1:-1] + f[:-2]) / h ** 2
+  sm = s[1:-1, None]
+  residual = d2 + 2 / torch.tanh(sm) * d1 - ell * (ell + 1) / torch.sinh(sm) ** 2 * f[1:-1]
+  inside = (sm[:, 0] > 0.25) & (sm[:, 0] < 12)
+  assert residual[inside].abs().max() < 1e-4
+  assert torch.allclose(f[0], torch.tensor([1.0] + [0.0] * 8, dtype=torch.float64))
+  assert torch.allclose(f[-1], torch.ones(9, dtype=torch.float64), atol=1e-12)
+  assert (f[1:] >= f[:-1] - 1e-12).all()
+  for s_ in (0.5, 1.0, 2.0, 4.0, 8.0):
+    r, a = math.tanh(s_ / 2), s_ / 2
+    closed = (4 / 3) * r * -3 * ((r * a - 1) / 8 - a / (4 * r) + (a / r - 1) / (8 * r * r))
+    assert abs(float(sphere.radial(torch.tensor(s_, dtype=torch.float64))[1]) - closed) < 1e-5
+  # The design note's table (2 decimals).
+  doc = {(1, 0.5): 0.32, (1, 1): 0.59, (1, 2): 0.89, (1, 3): 0.98, (2, 0.5): 0.09, (2, 1): 0.32,
+         (2, 2): 0.76, (2, 3): 0.94, (4, 1): 0.09, (4, 2): 0.52, (4, 3): 0.85, (4, 4): 0.97,
+         (8, 2): 0.22, (8, 3): 0.67, (8, 4): 0.91}
+  for (l, s_), v in doc.items():
+    assert abs(float(sphere.radial(torch.tensor(s_, dtype=torch.float64))[l]) - v) < 0.006, (l, s_)
+
+
+def test_spherical_harmonics_are_orthonormal():
+  """The real Y_lm, l <= 6, are orthonormal under the uniform probability measure
+  on S^2 (so each has unit RMS): Gauss-Legendre in cos(theta) x the trapezoid
+  rule in phi, exact at this degree. Y_00 = 1 and the l = 1 block is
+  sqrt(3) (y, z, x) (m = -1, 0, 1): the state's own coordinates."""
+  import numpy as np
+  sphere = _sphere([3], [-1.0], 6)
+  zs, ws = np.polynomial.legendre.leggauss(8)
+  z = torch.tensor(zs, dtype=torch.float64)[:, None].expand(8, 16)
+  phi = (2 * math.pi * torch.arange(16, dtype=torch.float64) / 16)[None].expand(8, 16)
+  u = torch.stack([(1 - z ** 2).sqrt() * phi.cos(), (1 - z ** 2).sqrt() * phi.sin(), z], -1)
+  Y = sphere.spherical_harmonics(u)                                 # (8, 16, 49)
+  w = (torch.tensor(ws, dtype=torch.float64) / 2)[:, None].expand(8, 16) / 16
+  gram = torch.einsum('ij,ijk,ijl->kl', w, Y, Y)
+  assert torch.allclose(gram, torch.eye(49, dtype=torch.float64), atol=1e-10)
+  assert torch.allclose(Y[..., 0], torch.ones(8, 16, dtype=torch.float64))
+  assert torch.allclose(Y[..., 1:4], math.sqrt(3) * u[..., [1, 2, 0]])
+
+
+def test_harmonic_features_are_bounded_and_finite_up_to_the_pin():
+  """Over the whole radial range the readback can produce, s in [0, 34.66] (the
+  boundary pin of `_clean_state` included), every feature is finite,
+  |f_l Y_lm| <= sqrt(2l + 1), the radial channels lie in [0, 1], and the gradient
+  wrt the state is finite: at the origin, and at the pin, where the direction
+  still carries a bounded gradient into the word embedding."""
+  dims, curvs = [3, 3], [-1.0, -0.5]
+  R = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+  sphere = _sphere(dims, curvs, 6)
+  n = 64
+  s = torch.cat([torch.zeros(1), torch.linspace(1e-3, 34.66, n - 2), torch.tensor([34.66])]).double()
+  u = _unit(n, 2, seed=5)
+  z = (R[:, None] * torch.tanh(s / 2)[:, None, None] * u).flatten(-2)[None].requires_grad_(True)
+  feats = sphere(z)
+  assert feats.shape == (1, n, 2 * (49 + 3)) and feats.dtype == torch.float64
+  assert torch.isfinite(feats).all()
+  per = feats.unflatten(-1, (2, 52))
+  assert (per[..., :49].abs() <= (2 * sphere.ell_of_feature + 1).double().sqrt() + 1e-9).all()
+  assert ((per[..., 49:] >= 0) & (per[..., 49:] <= 1)).all()     # tanh(34.66 / 1) == 1.0 in float64
+  feats.square().sum().backward()
+  assert torch.isfinite(z.grad).all()
+  pin = (R[:, None] * u[0]).flatten()[None, None].requires_grad_(True)   # |z| = R, as `_clean_state` emits it
+  fp = sphere(pin)
+  assert torch.isfinite(fp).all()
+  assert torch.allclose(fp.unflatten(-1, (2, 52))[0, 0, :, :49], sphere.spherical_harmonics(u[0]), atol=1e-9)
+  fp.square().sum().backward()
+  assert torch.isfinite(pin.grad).all() and 0 < pin.grad.abs().max() < 1e4
+
+
+def test_harmonic_features_converge_to_the_spherical_harmonics():
+  """s -> inf: f_l -> 1 and h_lm -> Y_lm(u), the Poisson integral's boundary
+  values (within 1e-6 by s = 16); at the origin only the constant l = 0 survives;
+  in between the l = 1 block is f_1(s) times the coordinates' direction."""
+  sphere = _sphere([3], [-1.0], 4, radial_scales=[2.0])
+  u = _unit(5, 1, seed=6)                                     # (5, 1, 3)
+  Y = sphere.spherical_harmonics(u[:, 0])                     # (5, 25)
+  for s_ in (16.0, 25.0, 34.66):
+    feats = sphere((math.tanh(s_ / 2) * u).flatten(-2)[None])[0]        # (5, 26)
+    assert torch.allclose(feats[:, :25], Y, atol=1e-6)
+    assert torch.allclose(feats[:, 25], torch.full((5,), math.tanh(s_ / 2), dtype=torch.float64), atol=1e-6)
+  origin = sphere(torch.zeros(1, 5, 3, dtype=torch.float64))[0]
+  assert torch.allclose(origin, torch.tensor([1.0] + [0.0] * 25, dtype=torch.float64).expand(5, -1))
+  feats = sphere((math.tanh(0.5) * u).flatten(-2)[None])[0]
+  f1 = float(sphere.radial(torch.tensor(1.0, dtype=torch.float64))[1])
+  assert 0.5 < f1 < 0.7 and torch.allclose(feats[:, 1:4], f1 * Y[:, 1:4])
+
+
+@needs_gpu
+def test_sphere_backbone_end_to_end(monkeypatch):
+  model, _ = _build_model(monkeypatch, ['model.sphere_degree=4', 'model.sphere_radial_scales=[1,4,16]'])
+  sphere = model.backbone.sphere
+  assert model.backbone.hyla is None and sphere.degree == 4
+  assert sphere.num_features == 4 * (25 + 3) == model.backbone.in_proj.in_features
+  assert not any(k.startswith('backbone.sphere.') for k in model.state_dict())   # nothing random
+  B, L = 2, 8
+  x = _tokens(model, B, L)
+  loss, _ = model.nll(x, None, None)
+  assert loss.shape == (B, L) and torch.isfinite(loss).all()
+  loss.sum().backward()
+  for p in (model.backbone.sphere_embed.weight, model.backbone.in_proj.weight):
+    assert p.grad is not None and torch.isfinite(p.grad).all()
+  # The sudoku prompt's boundary pin (`_clean_state`) is seen through its
+  # direction: the features there are Y_lm of the word's direction; the
+  # origin (the sampler's start) is seen too.
+  pin = model._clean_state(x)
+  u = torch.nn.functional.normalize(model.word_embedding[x].double().unflatten(-1, (4, 3)), dim=-1)
+  assert torch.allclose(sphere(pin).unflatten(-1, (4, 28))[..., :25], sphere.spherical_harmonics(u), atol=1e-9)
+  sigma = model._sigma_from_alphat(_alpha_at_heat_time(model, B, 0.3))
+  for state in (pin, torch.zeros(B, L, 12, dtype=torch.float64, device=model.device)):
+    assert torch.isfinite(model.forward(xt=state, sigma=sigma)).all()
+
+
+# sphere_mc_samples: Monte-Carlo sphere features, w ~ P(z, .) (unit importance weights)
+
+def test_harmonic_mc_off_is_the_closed_form():
+  """mc_samples=None is the closed form f_l(s) Y_lm(u) next to the radial
+  channels, bit for bit, and draws nothing from the global RNG."""
+  from numeric.geo_bridge import GeoUtils
+  dims, curvs = [3, 3], [-1.0, -0.5]
+  R = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+  sphere = _sphere(dims, curvs, 4)
+  u = _unit(3, 5, 2, seed=11)
+  s = 3 * torch.rand(3, 5, dtype=torch.float64)
+  z = (R[:, None] * torch.tanh(s / 2)[..., None, None] * u).flatten(-2)   # (3, 5, 6)
+  rng = torch.get_rng_state()
+  out = sphere(z)
+  assert torch.equal(torch.get_rng_state(), rng)
+  rhos, us = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(z, dims, curvs)
+  us, ss = us.unflatten(-1, (2, 3)), rhos * sphere.kappas
+  ref = torch.cat([sphere.spherical_harmonics(us) * sphere.radial(ss)[..., sphere.ell_of_feature],
+                   torch.tanh(ss.unsqueeze(-1) / sphere.radial_scales)], dim=-1).flatten(-2)
+  assert torch.equal(out, ref)
+
+
+def test_harmonic_mc_is_unbiased_with_the_closed_form_variance():
+  """w ~ P(z, .) exactly, so the mean of Y_lm(w) over the M draws is unbiased for
+  the closed form f_l(s) Y_lm(u) (within 5 standard errors per feature), and by
+  the addition theorem sum_m Var = (2l + 1)(1 - f_l^2) / M (within 15 %): the
+  draws are independent across samples and positions. The two factors sit at
+  different radii, so each is sampled at its own s."""
+  dims, curvs = [3, 3], [-1.0, -0.5]
+  R = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+  M, reps, deg = 16, 4000, 4
+  n = (deg + 1) ** 2
+  mc, closed = _sphere(dims, curvs, deg, mc_samples=M), _sphere(dims, curvs, deg)
+  radii = [0.0, 0.5, 1.0, 2.0, 3.0, 5.0]
+  sr = torch.tensor([radii, radii[::-1]], dtype=torch.float64).T        # (6, 2): factor 1 reversed
+  u = _unit(len(radii), 1, 2, seed=12).expand(-1, reps, -1, -1)     # one direction pair per position
+  s = sr[:, None].expand(-1, reps, -1)                                 # (6, reps, 2)
+  z = (R[:, None] * torch.tanh(s / 2)[..., None] * u).flatten(-2).reshape(1, -1, 6)
+  torch.manual_seed(0)
+  est = mc(z).unflatten(-1, (2, n + 3))[0, ..., :n].unflatten(0, (len(radii), reps))   # (6, reps, 2, 25)
+  ref = closed(z).unflatten(-1, (2, n + 3))[0, ..., :n].unflatten(0, (len(radii), reps))[:, 0]
+  ell = mc.ell_of_feature.double()
+  f = mc.radial(sr)[..., mc.ell_of_feature]                            # (6, 2, 25)
+  sum_var = (2 * ell + 1) * (1 - f ** 2)          # sum_m Var[Y_lm(w)] / M, per degree
+  bound = 5 * (est.var(1) / reps).sqrt() + 1e-12                       # each feature's own SE
+  assert ((est.mean(1) - ref).abs() <= bound).all()
+  var = est.var(1) * M                                                 # (6, 2, 25)
+  for i in range(len(radii)):
+    for j in range(2):
+      if float(sr[i, j]) not in (0.5, 1.0, 2.0):
+        continue
+      for l in range(1, deg + 1):
+        sel = mc.ell_of_feature == l
+        emp, want = float(var[i, j, sel].sum()), float(sum_var[i, j, sel][0])
+        assert abs(emp / want - 1) < 0.15, (float(sr[i, j]), l, emp, want)
+
+
+def test_harmonic_mc_is_bounded_and_exact_at_the_pin(monkeypatch):
+  """Unit weights make the estimate a convex combination of Y_lm values: over the
+  readback range s in [0, 34.66] it is finite, |h_lm| <= sqrt(2l + 1), the l = 0
+  feature is 1 and the radial channels are the closed form's; at the boundary pin
+  the kernel is a point mass and the estimate is Y_lm(u). A first coordinate
+  rounded to c0 = -1 at s = 34.66 makes the boost scale the rest by ~e^s; the
+  forward's renormalisation restores |w| = 1."""
+  from numeric.geo_bridge import HyperbolicHeatKernel as HK
+  dims, curvs = [3, 3], [-1.0, -0.5]
+  R = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+  mc, closed = _sphere(dims, curvs, 6, mc_samples=16), _sphere(dims, curvs, 6)
+  bound = (2 * mc.ell_of_feature + 1).double().sqrt() + 1e-9
+  n = 64
+  s = torch.cat([torch.zeros(1), torch.linspace(1e-3, 34.66, n - 2), torch.tensor([34.66])]).double()
+  u = _unit(n, 2, seed=5)
+  z = (R[:, None] * torch.tanh(s / 2)[:, None, None] * u).flatten(-2)[None]
+  torch.manual_seed(0)
+  per = mc(z).unflatten(-1, (2, 52))
+  assert torch.isfinite(per).all()
+  assert (per[..., :49].abs() <= bound).all()
+  assert (per[..., 0] - 1).abs().max() <= 1e-12
+  assert torch.equal(per[..., 49:], closed(z).unflatten(-1, (2, 52))[..., 49:])
+  pin = (R[:, None] * u[0]).flatten()[None, None]       # |z| = R, as `_clean_state` emits it
+  fp = mc(pin).unflatten(-1, (2, 52))[0, 0, :, :49]
+  assert torch.allclose(fp, mc.spherical_harmonics(u[0]), rtol=0, atol=1e-12)
+
+  def crafted(shape, d, dtype, device):                 # c0 = -1.0 exactly, rest ~1e-8
+    u0 = torch.zeros(*shape, d, dtype=dtype, device=device)
+    u0[..., 0], u0[..., 1] = -1.0, 1e-8
+    return u0
+  monkeypatch.setattr(HK, '_free_direction', staticmethod(crafted))
+  raw = HK._reflect_to_target(HK._angular_boost(torch.full((4,), 34.66, dtype=torch.float64), 3),
+                              u[0, :1].expand(4, 3))
+  assert raw.norm(dim=-1).min() > 1e6                   # the hazard
+  w = raw / raw.norm(dim=-1, keepdim=True)
+  assert ((w.norm(dim=-1) - 1).abs() <= 1e-12).all()
+  fp = mc(pin).unflatten(-1, (2, 52))[..., :49]         # the forward under the crafted draws
+  assert torch.isfinite(fp).all() and (fp.abs() <= bound).all()
+
+
+def test_harmonic_mc_gradient_is_the_closed_form_gradient():
+  """The draws carry no graph: the gradient wrt the state is the closed form's,
+  bit for bit, from the origin to the boundary pin, where it stays bounded."""
+  dims, curvs = [3, 3], [-1.0, -0.5]
+  R = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+  mc, closed = _sphere(dims, curvs, 6, mc_samples=16), _sphere(dims, curvs, 6)
+  n = 64
+  s = torch.cat([torch.zeros(1), torch.linspace(1e-3, 34.66, n - 2), torch.tensor([34.66])]).double()
+  u = _unit(n + 1, 2, seed=7)
+  z = torch.cat([(R[:, None] * torch.tanh(s / 2)[:, None, None] * u[:n]).flatten(-2),
+                 (R[:, None] * u[n]).flatten()[None]])[None]           # grid (origin first) + the pin
+  a = torch.randn(1, n + 1, 2 * 52, dtype=torch.float64)               # a fixed cotangent
+  grads = []
+  for m in (mc, closed):
+    zz = z.clone().requires_grad_(True)
+    (a * m(zz)).sum().backward()
+    grads.append(zz.grad)
+  assert torch.equal(grads[0], grads[1])
+  assert torch.isfinite(grads[0]).all()
+  assert 0 < grads[0][0, n].abs().max() < 1e4
+
+
+def test_harmonic_mc_draws_are_fresh_seeded_and_shape_determined():
+  """Fresh draws every forward from the global RNG, the same in train and eval;
+  the number drawn depends on the shape only, B * L * m * M * 3 normals (none
+  shared across the batch or the factors); no checkpoint keys."""
+  dims, curvs = [3, 3], [-1.0, -0.5]
+  R = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+  mc = _sphere(dims, curvs, 4, mc_samples=8)
+  z = (R[:, None] * math.tanh(0.5) * _unit(2, 3, 2, seed=8)).flatten(-2)    # s = 1, B = 2
+  z2 = (R[:, None] * math.tanh(1.5) * _unit(2, 3, 2, seed=9)).flatten(-2)   # s = 3, same shape
+  assert not torch.equal(mc(z), mc(z))
+  same = mc(z[:1].expand(2, -1, -1))
+  assert not torch.equal(same[0], same[1])                                  # fresh per batch row
+  torch.manual_seed(5)
+  mc(z)
+  st = torch.get_rng_state()
+  torch.manual_seed(5)
+  torch.randn(2, 3, 2, 8, 3, dtype=torch.float64)                           # (B, L, m, M, 3)
+  assert torch.equal(torch.get_rng_state(), st)
+  torch.manual_seed(3)
+  a = mc(z)
+  torch.manual_seed(3)
+  assert torch.equal(mc(z), a)
+  mc.eval()
+  torch.manual_seed(3)
+  assert torch.equal(mc(z), a)
+  mc.train()
+  torch.manual_seed(4)
+  mc(z)
+  st = torch.get_rng_state()
+  torch.manual_seed(4)
+  mc(z2)
+  assert torch.equal(torch.get_rng_state(), st)
+  assert len(mc.state_dict()) == 0
+
+
+@needs_gpu
+def test_sphere_mc_backbone_end_to_end(monkeypatch):
+  base = ['model.sphere_degree=4', 'model.sphere_radial_scales=[1,4,16]']
+  model, _ = _build_model(monkeypatch, base + ['model.sphere_mc_samples=8'])
+  sphere = model.backbone.sphere
+  assert sphere.mc_samples == 8 and model.backbone.in_proj.in_features == 4 * (25 + 3)
+  B, L = 2, 8
+  x = _tokens(model, B, L)
+  loss, _ = model.nll(x, None, None)
+  assert loss.shape == (B, L) and torch.isfinite(loss).all()
+  loss.sum().backward()
+  for p in (model.backbone.sphere_embed.weight, model.backbone.in_proj.weight):
+    assert p.grad is not None and torch.isfinite(p.grad).all()
+  # Checkpoints are interchangeable with the closed-form map's.
+  closed, _ = _build_model(monkeypatch, base)
+  assert set(model.state_dict()) == set(closed.state_dict())
+  model.load_state_dict(closed.state_dict(), strict=True)
+  closed.load_state_dict(model.state_dict(), strict=True)
+  pin = model._clean_state(x)
+  u = torch.nn.functional.normalize(model.word_embedding[x].double().unflatten(-1, (4, 3)), dim=-1)
+  assert torch.allclose(sphere(pin).unflatten(-1, (4, 28))[..., :25], sphere.spherical_harmonics(u), atol=1e-9)
+  sigma = model._sigma_from_alphat(_alpha_at_heat_time(model, B, 0.3))
+  for state in (pin, torch.zeros(B, L, 12, dtype=torch.float64, device=model.device)):
+    assert torch.isfinite(model.forward(xt=state, sigma=sigma)).all()
