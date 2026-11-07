@@ -301,15 +301,28 @@ def exp_map(x: torch.Tensor, delta: torch.Tensor, eps: float):
     + (delta / delta_norm) * torch.sin(delta_norm)
   )
 
-def load_pretrained_word_embedding(model_path: str, low_rank: int=-1):
+def load_pretrained_word_embedding(model_path: str, low_rank: int=-1,
+                                   tokenizer_name: str=None):
   """Load the input token embedding [V, D] of a HF model.
 
+  If the vocabulary of `tokenizer_name` (the data's tokenizer) differs from
+  the model's, row v is the mean embedding of the model's tokens for the text
+  of word v (e.g. BERT WordPiece pieces of a GPT-2 word), or of [UNK] when the
+  text has none (whitespace); V is then that tokenizer's vocabulary.
   If low_rank > 0, project the centered embedding onto its top
   `low_rank` principal components, returning [V, low_rank].
   """
-  from transformers import AutoModel
+  from transformers import AutoModel, AutoTokenizer
   emb = AutoModel.from_pretrained(model_path).get_input_embeddings()
   emb = emb.weight.detach().float()
+  if tokenizer_name is not None:
+    source = AutoTokenizer.from_pretrained(model_path)
+    target = AutoTokenizer.from_pretrained(tokenizer_name)
+    if source.get_vocab() != target.get_vocab():
+      texts = [target.decode([v]) for v in range(len(target))]
+      pieces = source(texts, add_special_tokens=False)['input_ids']
+      emb = torch.stack([emb[ids or [source.unk_token_id]].mean(0)
+                         for ids in pieces])
   if low_rank <= 0:
     return emb
   assert low_rank <= emb.shape[1], (

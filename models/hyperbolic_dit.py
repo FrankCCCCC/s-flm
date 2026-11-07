@@ -144,7 +144,8 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     pretrained_embed = config.model.get('pretrained_embed', None)
     if pretrained_embed is not None:
       weight = utils.load_pretrained_word_embedding(
-        pretrained_embed, low_rank=embed_dim)
+        pretrained_embed, low_rank=embed_dim,
+        tokenizer_name=config.data.tokenizer_name_or_path)
       if weight.shape[0] > vocab_size:
         raise ValueError(
           f'pretrained vocab {weight.shape[0]} > model vocab {vocab_size}')

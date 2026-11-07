@@ -25,7 +25,12 @@ CKPT_EVERY="${CKPT_EVERY:-2500}"
 MODEL="${MODEL:-small-hyperbolic-dit}"
 SEQ_LEN="${SEQ_LEN:-256}"
 LR="${LR:-3e-4}"
+LR_SCHED="${LR_SCHED:-constant}"          # constant: flat after the 2500-step warmup (configs/lr_scheduler/constant_warmup) / cosine: the same warmup, then cosine decay to 1e-6 at step LR_DECAY_STEPS / linear: the same warmup, then linear decay to 0 at step LR_DECAY_STEPS / wsd: the same warmup, LR_HOLD_STEPS at the peak, then cosine decay to 0 at step LR_DECAY_STEPS
+LR_DECAY_STEPS="${LR_DECAY_STEPS:-${MAX_STEPS}}"   # cosine: the step the decay ends at (the full run length when training in stages)
+LR_SCHED_FROM="${LR_SCHED_FROM:-0}"      # cosine: the step of a constant-LR checkpoint (past its warmup) it resumes; the scheduler counts from 0 there, so no warmup and the decay spans LR_DECAY_STEPS - LR_SCHED_FROM
+LR_HOLD_STEPS="${LR_HOLD_STEPS:-3500}"   # wsd: steps at the peak LR after the 2500-step warmup, then a cosine decay to 0 at step LR_DECAY_STEPS
 SEED="${SEED:-1}"
+DROPOUT="${DROPOUT:-0.1}"           # model.dropout of the DiT blocks (configs/model default 0.1)
 INIT="${INIT:-ngpt}"
 HYLA_DIM="${HYLA_DIM:-null}"           # random Laplacian features (HyLa) of the state fed to the DiT: total feature dim, a multiple of the factor count; null = feed the Poincaré coordinates
 HYLA_SCALE="${HYLA_SCALE:-1.0}"        # std of the HyLa eigenvalue draw (the paper's s); unused when HYLA_DIM=null
@@ -62,6 +67,15 @@ if [ "${KEEP_EVERY}" -gt 0 ]; then
   )
 fi
 
+case "${LR_SCHED}" in
+  constant) SCHED_ARGS=() ;;
+  cosine) W=$(( LR_SCHED_FROM > 0 ? 0 : 2500 ))
+    SCHED_ARGS=(lr_scheduler=cosine_decay_warmup lr_scheduler.warmup_t=${W} lr_scheduler.t_initial=$((LR_DECAY_STEPS - LR_SCHED_FROM - W))) ;;
+  linear) SCHED_ARGS=(lr_scheduler=linear_decay_warmup lr_scheduler.num_training_steps=${LR_DECAY_STEPS}) ;;
+  wsd) SCHED_ARGS=(lr_scheduler=wsd_warmup lr_scheduler.num_stable_steps=${LR_HOLD_STEPS} lr_scheduler.num_decay_steps=$((LR_DECAY_STEPS - 2500 - LR_HOLD_STEPS))) ;;
+  *) echo "LR_SCHED must be constant, cosine, linear or wsd, got ${LR_SCHED}" >&2; exit 1 ;;
+esac
+
 cd "${REPO_ROOT}"
 python -u -m main \
     seed=${SEED} \
@@ -73,6 +87,7 @@ python -u -m main \
     model.pretrained_embed=${PRETRAINED_EMBED} \
     model.embed_trainable=${EMBED_TRAINABLE} \
     model.init=${INIT} \
+    model.dropout=${DROPOUT} \
     model.hyla_dim=${HYLA_DIM} \
     model.hyla_scale=${HYLA_SCALE} \
     model.hyla_radius_cap=${HYLA_RADIUS_CAP} \
@@ -92,6 +107,7 @@ python -u -m main \
     sampler.t_max=${T_MAX} \
     noise=log-linear \
     optim.lr=${LR} \
+    "${SCHED_ARGS[@]}" \
     loader.global_batch_size=${GLOBAL_BATCH} \
     loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=${PER_GPU_BS} \

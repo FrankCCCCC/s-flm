@@ -1,0 +1,4 @@
+_target_: transformers.get_wsd_schedule
+num_warmup_steps: 2500
+num_stable_steps: 3500
+num_decay_steps: ${eval:${trainer.max_steps}-${.num_warmup_steps}-${.num_stable_steps}}
