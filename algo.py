@@ -518,7 +518,7 @@ class EFLM(SelfConditioning, trainer_base.Diffusion):
   def reconstruction_loss(self, x0, alpha_t, valid_tokens):
     xt = self.q_xt(x0, alpha_t, use_pure_noise=False, valid_tokens=valid_tokens)
     log_p = self.forward(x0=x0, xt=xt, sigma=self._sigma_from_alphat(alpha_t),
-                         context=None)
+                         context=trainer_base.TrainingContext(alpha_t=alpha_t))  # the Gaussian readout's a_t / b_t
     return self.ce_loss(log_p, x0)
 
   def endpoint_losses(self, x0, valid_tokens):

@@ -25,16 +25,20 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     self.adaLN = config.algo.adaLN
     dim = config.model.hidden_size
     cond_dim = config.model.cond_dim
-    self.embed_dim = dim
+    # Embedding (state) dimension. Defaults to the hidden width, in which case
+    # the state is consumed as-is; a narrower embed_dim is lifted into the
+    # residual stream by `in_proj` (as in HyperbolicDiT).
+    embed_dim = config.model.get('embed_dim', None) or dim
+    self.embed_dim = embed_dim
     self.init_mode = config.model.init
     self.eps = config.model.eps
     self.init_std = config.model.get('init_std', None)
 
-    self.sphere_embed = nn.Embedding(vocab_size, dim)
+    self.sphere_embed = nn.Embedding(vocab_size, embed_dim)
     if self.init_mode == 'random':
       nn.init.normal_(self.sphere_embed.weight, std=0.02)
     elif self.init_mode == 'ngpt':
-      nn.init.normal_(self.sphere_embed.weight, std=1.0 / math.sqrt(dim))
+      nn.init.normal_(self.sphere_embed.weight, std=1.0 / math.sqrt(embed_dim))
     elif self.init_mode == 'unit_var':
       nn.init.normal_(self.sphere_embed.weight, std=1.0)
     elif self.init_mode == 'hyperbolic':
@@ -48,10 +52,14 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     else:
       raise ValueError(self.init_mode)
 
+    self.in_proj = nn.Linear(embed_dim, dim) if embed_dim != dim else None
+
     self.self_conditioning = getattr(
       config.algo, 'self_conditioning', False)
     self.logit_bias = getattr(config.algo, 'logit_bias', False)
     if self.self_conditioning:
+      assert self.in_proj is None, (
+        'self-conditioning assumes the embedding lives in the hidden space')
       self.W_in = nn.Linear(dim, dim, bias=False)
       self.W_sc = nn.Linear(dim, dim, bias=False)
       self.W_in.weight.data.zero_()
@@ -154,7 +162,7 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     # from fresh init — no patch needed there.
     adaLN_identity_patched = 0
     if self.adaLN and not src_had_adaLN:
-      dim = self.embed_dim
+      dim = self.config.model.hidden_size
       for i, block in enumerate(self.blocks):
         if not block.adaLN:
           continue
@@ -265,7 +273,9 @@ class SphereDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
               context=None) -> torch.Tensor:
     del x0
 
-    x = xt  # [B, L, d]
+    x = xt  # [B, L, embed_dim]
+    if self.in_proj is not None:
+      x = self.in_proj(x)
     lf = context if hasattr(context, 'z_sc') else None
 
     if self.self_conditioning and lf is not None:

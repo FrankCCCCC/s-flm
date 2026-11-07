@@ -192,3 +192,4 @@ multirun/
 experiments/*/logs/
 outputs_old/
 **.env
+**/data/

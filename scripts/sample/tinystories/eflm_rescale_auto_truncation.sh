@@ -22,6 +22,7 @@ SNR_CE="${SNR_CE:-false}"            # weight the CE by -SNR'(t)/2 (VDM Eq. 16)
 FORWARD_TYPE="${FORWARD_TYPE:-naive}" # must match training
 TAU_MAX="${TAU_MAX:-1.834}"          # autonomous horizon; must match training
 SELF_COND="${SELF_COND:-false}"      # self-conditioning; must match training
+EMBED_DIM="${EMBED_DIM:-null}"       # embedding (state) dim; must match training
 ETA="${ETA:-0.0}"                    # SDE noise scale; 0 = deterministic ODE
 GT_METHOD="${GT_METHOD:-linear}"     # SDE g(t): const / sqrt / linear / quad
 TEMPERATURE="${TEMPERATURE:-1.0}"
@@ -39,6 +40,7 @@ MARGS=(
     model=small-sphere-dit
     model.length=${SEQ_LEN:-1024}
     model.init=ngpt
+    model.embed_dim=${EMBED_DIM}
     algo=eflm
     algo.self_conditioning=${SELF_COND}
     algo.renormalize_weights=False
