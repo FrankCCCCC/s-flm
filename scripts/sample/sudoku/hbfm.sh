@@ -16,12 +16,10 @@ FACTOR_DIM="${FACTOR_DIM:-3}"
 PROD_FACTOR_DIM="${PROD_FACTOR_DIM:-${FACTOR_DIM}}"   # hydra value of algo.prod_factor_dim: an int (equal split) or a list like [3,3,3]
 PROD_FACTOR_CURV="${PROD_FACTOR_CURV:-${GAUSS_CURV}}" # hydra value of algo.prod_factor_gaussian_curvature: a float or a list; GAUSS_CURV stays the scalar |K| used for the unit-time conversions
 INIT="${INIT:-ngpt}"
-HYLA_DIM="${HYLA_DIM:-null}"           # HyLa feature dim; must match training (null = off)
-HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # must match training
-HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # must match training
-HYLA_NORMALIZE="${HYLA_NORMALIZE:-true}"   # must match training
-SPHERE_DEGREE="${SPHERE_DEGREE:-null}"   # sphere map degree; must match training (null = off)
+RANDOM_FEATURE_TYPE="${RANDOM_FEATURE_TYPE:-null}"   # must match training: null = the Poincaré coordinates / sphere
+SPHERE_DEGREE="${SPHERE_DEGREE:-4}"   # sphere map only; must match training
 SPHERE_RADIAL_SCALES="${SPHERE_RADIAL_SCALES:-[1,2,4,8,16,32]}"   # must match training
+SPHERE_RADIAL_TYPE="${SPHERE_RADIAL_TYPE:-exp_decay}"   # must match training (no checkpoint key)
 SPHERE_MC_SAMPLES="${SPHERE_MC_SAMPLES:-null}"   # MC sphere features at sampling; may differ from training (null = exact closed form, the MC map's mean)
 SEED="${SEED:-1}"
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-20}"
@@ -57,12 +55,10 @@ python -u -m main \
     model=tiny-hyperbolic-dit \
     model.embed_dim=${EMBED_DIM} \
     model.init="${INIT}" \
-    model.hyla_dim=${HYLA_DIM} \
-    model.hyla_radius_cap=${HYLA_RADIUS_CAP} \
-    model.hyla_concat_state=${HYLA_CONCAT_STATE} \
-    model.hyla_normalize=${HYLA_NORMALIZE} \
+    model.random_feature_type=${RANDOM_FEATURE_TYPE} \
     model.sphere_degree=${SPHERE_DEGREE} \
     model.sphere_radial_scales="${SPHERE_RADIAL_SCALES}" \
+    model.sphere_radial_type=${SPHERE_RADIAL_TYPE} \
     model.sphere_mc_samples=${SPHERE_MC_SAMPLES} \
     seed="${SEED}" \
     algo=hbfm \

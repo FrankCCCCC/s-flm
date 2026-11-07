@@ -32,6 +32,7 @@ import pytest
 import torch
 
 from conftest import REPO_ROOT  # noqa: F401  (repo root on sys.path)
+from numeric.geo_bridge import Coordinate
 
 torch.manual_seed(0)
 
@@ -622,11 +623,13 @@ def test_adaptive_schedule_composes(monkeypatch):
   ['algo.time_conversion_mode=unif', 'sampler.t_max=2.0'],  # > time_range_upper_bound=1.0
   ['algo.time_conversion_mode=trunc_exp', 'sampler.t_max=2.0'],
   ['algo.time_exp_rate=0'],
-  ['model.hyla_dim=30'],      # not a multiple of the 4 factors
-  ['model.sphere_degree=2', 'model.hyla_dim=32'],      # two input maps
-  ['model.sphere_degree=2', 'algo.prod_factor_dim=4'],   # (H^4)^3: no S^2 harmonics
   ['model.sphere_mc_samples=16'],                        # MC without the sphere map
-  ['model.sphere_degree=2', 'model.sphere_mc_samples=0'],
+  ['model.random_feature_type=sphere', 'model.sphere_mc_samples=0'],
+  ['model.random_feature_type=sphere', 'model.sphere_radial_type=bogus'],
+  ['model.random_feature_type=sphere', 'model.sphere_radial_type=constant'],   # see SphericalFeature.radial
+  ['model.random_feature_type=sphere', 'model.sphere_degree=null'],
+  ['model.random_feature_type=SPHERE'],                  # the value is lower case
+  ['model.random_feature_type=hyla'],                    # a class, not a model option
 ])
 def test_validate_configuration_rejects(monkeypatch, overrides):
   with pytest.raises(ValueError):
@@ -634,12 +637,27 @@ def test_validate_configuration_rejects(monkeypatch, overrides):
 
 
 # ---------------------------------------------------------------------------
-# HyLa: random Laplacian features of the state (models.hyperbolic_dit)
+# HyLa: random Laplacian features of the state (random_features.hyla)
 # ---------------------------------------------------------------------------
 
+class _BoundFeatureMap:
+  """A feature map with its product factors bound, as `HyperbolicDiT.forward` calls it."""
+
+  def __init__(self, feature_map, dims, curvs):
+    self.feature_map, self.dims, self.curvs = feature_map, dims, curvs
+
+  def __call__(self, z, input_coord=Coordinate.CARTESIAN):
+    return self.feature_map(z, input_coord, self.dims, self.curvs)
+
+  def __getattr__(self, name):
+    return getattr(self.feature_map, name)
+
+
 def _hyla(dims, curvs, num_features, scale=1.0, seed=0, radius_cap=None, normalize=True):
-  from models.hyperbolic_dit import HyLaFeatures
-  return HyLaFeatures(dims, curvs, num_features, scale, seed, radius_cap, normalize)
+  from random_features.hyla import HyLaFeatures
+  hyla = _BoundFeatureMap(HyLaFeatures(num_features, len(dims), scale, seed, radius_cap, normalize), dims, curvs)
+  hyla(torch.zeros(1, 1, sum(dims), dtype=torch.float64))   # the first forward draws the features
+  return hyla
 
 
 def test_hyla_features_match_the_poincare_formula():
@@ -682,33 +700,15 @@ def test_hyla_features_estimate_the_isometry_invariant_kernel():
   assert torch.allclose(gram, kernel, atol=0.02)
 
 
-@needs_gpu
-def test_hyla_backbone_end_to_end(monkeypatch):
-  model, _ = _build_model(monkeypatch, ['model.hyla_dim=32', 'model.hyla_scale=0.5'])
-  hyla = model.backbone.hyla
-  assert hyla is not None and hyla.omegas.shape == (4, 8, 3)
-  assert model.backbone.in_proj.in_features == 32
-  keys = set(model.state_dict())                          # checkpointed draws
-  assert {'backbone.hyla.omegas', 'backbone.hyla.lambdas', 'backbone.hyla.biases'} <= keys
-  assert 'backbone.hyla.kappas' not in keys               # derived from the config
-  B, L = 2, 8
-  x = _tokens(model, B, L)
-  # The feature map is differentiable in the state, so the embedding keeps
-  # its gradient path through the bridge once the zero-init readout moves.
-  xt, _ = model.q_xt(x, _alpha_at_heat_time(model, B, 0.3), use_pure_noise=False)
-  xt = xt.detach().requires_grad_(True)
-  hyla(xt).square().sum().backward()
-  assert torch.isfinite(xt.grad).all() and xt.grad.abs().sum() > 0
-  loss, t = model.nll(x, None, None)
-  assert loss.shape == (B, L) and torch.isfinite(loss).all()
-  loss.sum().backward()
-  for p in (model.backbone.sphere_embed.weight, model.backbone.in_proj.weight):
-    assert p.grad is not None and torch.isfinite(p.grad).all()
-  # The sampler starts at the origin, whose features are cos(b) / sqrt(D).
-  origin = torch.zeros(B, L, 12, dtype=torch.float64, device=model.device)
-  assert torch.allclose(hyla(origin)[0, 0], hyla.biases.cos().flatten() / math.sqrt(32))
-  sigma = model._sigma_from_alphat(_alpha_at_heat_time(model, B, 0.3))
-  assert torch.isfinite(model.forward(xt=origin, sigma=sigma)).all()
+def test_hyla_is_not_a_model_option():
+  """`HyLaFeatures` stays a class, but neither model config can select it."""
+  import omegaconf
+  from hydra.errors import ConfigCompositionException
+  with pytest.raises(ConfigCompositionException, match='model.hyla_dim'):
+    _compose(['model.hyla_dim=32'])
+  for name in ('tiny', 'small'):
+    keys = omegaconf.OmegaConf.load(REPO_ROOT / 'configs' / 'model' / f'{name}-hyperbolic-dit.yaml')
+    assert not any(key.startswith('hyla') for key in keys)
 
 
 def test_hyla_radius_cap_is_a_finite_pin_radius():
@@ -730,16 +730,6 @@ def test_hyla_radius_cap_is_a_finite_pin_radius():
   assert torch.allclose(capped(state(1.0)), plain(state(1.0)))
   assert plain(state(35.0)).abs().max() < 1e-10
   assert capped(state(35.0)).norm(dim=-1).min() > 1e-2
-
-
-@needs_gpu
-def test_hyla_concat_state_backbone(monkeypatch):
-  model, _ = _build_model(monkeypatch, [
-    'model.hyla_dim=32', 'model.hyla_concat_state=true', 'model.hyla_radius_cap=5.0'])
-  assert model.backbone.in_proj.in_features == 12 + 32
-  assert model.backbone.hyla.radius_cap == 5.0
-  loss, _ = model.nll(_tokens(model, 2, 8), None, None)
-  assert torch.isfinite(loss).all()
 
 
 def test_hyla_unnormalized_features_match_the_reference_code():
@@ -785,12 +775,14 @@ def test_hyla_radius_cap_stops_the_gradient_at_the_pin():
 
 
 # ---------------------------------------------------------------------------
-# sphere: hyperbolic-harmonic spherical-harmonic features (models.hyperbolic_dit)
+# sphere: hyperbolic-harmonic spherical-harmonic features (random_features.hyperbolic_spherical_feat)
 # ---------------------------------------------------------------------------
 
-def _sphere(dims, curvs, degree, radial_scales=(1.0, 4.0, 16.0), mc_samples=None):
-  from models.hyperbolic_dit import HarmonicFeatures
-  return HarmonicFeatures(dims, curvs, degree, list(radial_scales), mc_samples)
+def _sphere(dims, curvs, degree, radial_scales=(1.0, 4.0, 16.0), mc_samples=None, radial_type='exp_decay'):
+  from random_features.hyperbolic_spherical_feat import SphericalFeature
+  return _BoundFeatureMap(
+    SphericalFeature(len(dims), degree, list(radial_scales), radial_type=radial_type, mc_samples=mc_samples),
+    dims, curvs)
 
 
 def _unit(*shape, seed=0):
@@ -901,11 +893,11 @@ def test_harmonic_features_converge_to_the_spherical_harmonics():
 
 @needs_gpu
 def test_sphere_backbone_end_to_end(monkeypatch):
-  model, _ = _build_model(monkeypatch, ['model.sphere_degree=4', 'model.sphere_radial_scales=[1,4,16]'])
-  sphere = model.backbone.sphere
-  assert model.backbone.hyla is None and sphere.degree == 4
+  model, _ = _build_model(monkeypatch, ['model.random_feature_type=sphere', 'model.sphere_degree=4', 'model.sphere_radial_scales=[1,4,16]'])
+  sphere = _BoundFeatureMap(model.backbone.random_feature, *model.backbone.prod_factors)
+  assert sphere.degree == 4
   assert sphere.num_features == 4 * (25 + 3) == model.backbone.in_proj.in_features
-  assert not any(k.startswith('backbone.sphere.') for k in model.state_dict())   # nothing random
+  assert not any(k.startswith('backbone.random_feature.') for k in model.state_dict())   # nothing random
   B, L = 2, 8
   x = _tokens(model, B, L)
   loss, _ = model.nll(x, None, None)
@@ -924,6 +916,106 @@ def test_sphere_backbone_end_to_end(monkeypatch):
     assert torch.isfinite(model.forward(xt=state, sigma=sigma)).all()
 
 
+def test_feature_factory_builds_the_sphere_map_and_rejects_the_rest():
+  from random_features.feature_factory import RandomFeatureFactory, RandomFeatureType
+  from random_features.hyperbolic_spherical_feat import SphericalFeature
+  sphere = RandomFeatureFactory.create_random_features(
+    RandomFeatureType.SPHERE, degree=2, radial_scales=[1.0], num_factors=3, harmonic_mc_samples=4)
+  assert isinstance(sphere, SphericalFeature)
+  assert (sphere.degree, sphere.mc_samples, sphere.radial_type) == (2, 4, 'exp_decay')
+  assert sphere.num_features == 3 * (9 + 1)
+  with pytest.raises(ValueError):
+    RandomFeatureFactory.create_random_features('hyla', degree=2, radial_scales=[1.0])
+
+
+# sphere_radial_type: the radial profile of the harmonic features
+
+def test_harmonic_rejects_unsupported_radial_types():
+  for radial_type in ('bogus', 'constant'):               # constant: see SphericalFeature.radial
+    with pytest.raises(ValueError):
+      _sphere([3], [-1.0], 2, radial_type=radial_type)
+
+
+def test_harmonic_state_gradient_is_bounded_at_the_origin():
+  """f_l(s) ~ s^l cancels the 1 / s of du/dz, so the gradient w.r.t. the state stays bounded
+  as s -> 0 and finite exactly at the origin: the property a flat f_l = 1 loses."""
+  sphere = _sphere([3], [-1.0], 4)
+  u = _unit(1, 1, seed=13)
+  cotangent = torch.randn(1, 1, sphere.num_features, dtype=torch.float64)
+  for s in (1e-1, 1e-3, 1e-6, 0.0):
+    z = (math.tanh(s / 2) * u).clone().requires_grad_(True)
+    (cotangent * sphere(z)).sum().backward()
+    assert z.grad.norm() < 20.0, s
+
+
+# From `HarmonicFeatures` at commit 7830625, the code behind the recorded experiment numbers, for the state below.
+SPHERE_GOLDEN_STATE = [[[0.3, -0.2, 0.5, -0.4, 0.7, 0.1], [0.0, 0.0, 0.0, 0.8485, 0.0, 1.1313]]]
+SPHERE_GOLDEN_FEATURES = [
+  1, -0.42457729118358295, 1.0614432279589574, 0.63686593677537429,
+  -0.32844615759867513, -0.54741026266445869, 0.58468780563700451, 0.82111539399668798,
+  0.13685256566611462, -0.15183230691487243, -0.48510218923185316, -0.44486806661293238,
+  0.11481510945078345, 0.66730209991939859, 0.20212591217993878, -0.029706320918127228,
+  0.89339333376361973, 0.34488146399061514, 1, 1.063631028833639,
+  0.15194728983337702, -0.60778915933350808, -0.78060637638617147, 0.19515159409654287,
+  -0.50701871422990619, -0.11151519662659591, -0.46000018608470805, -0.0083524721201448503,
+  -0.16367435828141991, -0.39465762213599376, -0.1456479241883919, 0.22551864122056786,
+  -0.096450961130122428, 0.62524219870799236, 0.86384400699819985, 0.31588953585894847,
+  1, 0, 0, 0,
+  0, 0, -0, 0,
+  0, 0, 0, -0,
+  -0, -0, 0, 0,
+  0, 0, 1, 0,
+  1.3856259105064692, 1.0392500530935553, 0, 0,
+  1.0285456505000961, 1.8590471982398249, 0.6971632403900343, 0,
+  0, 0, 0.21158598497487319, 2.1386184447295236,
+  1.4756006871007035, 0.45182190580912662, 0.99999999864707911, 0.98985197869765396,
+]
+SPHERE_GOLDEN_GRAD = [
+  -1.9520729503980525, -9.3195914053073192, -4.3567245861129429, -2.1913201927807959,
+  -0.63221322588785878, -2.081550662102543, 0, 0,
+  0, 40.679510650778987, 5.8265345360743552, 55.295514761994184,
+]
+
+
+def test_sphere_features_match_the_recorded_model():
+  """(H^3)^2 at K = -1, -0.5, degree 3: features and gradient at an interior state, at one
+  factor's origin and at a factor near the boundary stay what the recorded runs computed."""
+  sphere = _sphere([3, 3], [-1.0, -0.5], 3, radial_scales=(1.0, 4.0))
+  z = torch.tensor(SPHERE_GOLDEN_STATE, dtype=torch.float64, requires_grad=True)
+  out = sphere(z)
+  expected = torch.tensor(SPHERE_GOLDEN_FEATURES, dtype=torch.float64)
+  assert torch.allclose(out.detach().flatten(), expected, rtol=1e-9, atol=1e-10)
+  (torch.linspace(-1.0, 1.0, 36, dtype=torch.float64) * out).sum().backward()
+  expected = torch.tensor(SPHERE_GOLDEN_GRAD, dtype=torch.float64)
+  assert torch.allclose(z.grad.flatten(), expected, rtol=1e-9, atol=1e-10)
+
+
+def test_sphere_radial_type_reaches_the_backbone(monkeypatch):
+  model, _ = _build_model(monkeypatch, ['model.random_feature_type=sphere', 'model.sphere_radial_type=exp_decay'])
+  assert model.backbone.random_feature.radial_type == 'exp_decay'
+
+
+def test_random_features_are_off_by_default_with_the_best_sphere_settings(monkeypatch):
+  """`random_feature_type` alone is the switch; the `sphere_*` defaults are the best settings
+  measured (experiments/claude_test_hbfm_rlf_*/RESULTS.md, stages 4-7)."""
+  import omegaconf
+  from models.hyperbolic_dit import HyperbolicDiT
+  for name in ('tiny', 'small'):
+    config = omegaconf.OmegaConf.load(REPO_ROOT / 'configs' / 'model' / f'{name}-hyperbolic-dit.yaml')
+    assert config.random_feature_type is None
+    assert (config.sphere_degree, list(config.sphere_radial_scales), config.sphere_radial_type,
+            config.sphere_mc_samples) == (4, [1, 2, 4, 8, 16, 32], 'exp_decay', None)
+  off, _ = _build_model(monkeypatch)
+  assert off.backbone.random_feature is None and off.backbone.in_proj.in_features == 12
+  on, _ = _build_model(monkeypatch, ['model.random_feature_type=sphere'])
+  assert on.backbone.random_feature.degree == 4 and on.backbone.in_proj.in_features == 4 * (25 + 6)
+  # A config written before the key existed keeps the coordinates.
+  older = _compose()
+  with omegaconf.open_dict(older.model):
+    del older.model['random_feature_type']
+  assert HyperbolicDiT(older, vocab_size=12).random_feature is None
+
+
 # sphere_mc_samples: Monte-Carlo sphere features, w ~ P(z, .) (unit importance weights)
 
 def test_harmonic_mc_off_is_the_closed_form():
@@ -940,7 +1032,8 @@ def test_harmonic_mc_off_is_the_closed_form():
   out = sphere(z)
   assert torch.equal(torch.get_rng_state(), rng)
   rhos, us = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(z, dims, curvs)
-  us, ss = us.unflatten(-1, (2, 3)), rhos * sphere.kappas
+  kappas = rhos.new_tensor([1.0 / GeoUtils._curvature_scale(k) for k in curvs])
+  us, ss = us.unflatten(-1, (2, 3)), rhos * kappas
   ref = torch.cat([sphere.spherical_harmonics(us) * sphere.radial(ss)[..., sphere.ell_of_feature],
                    torch.tanh(ss.unsqueeze(-1) / sphere.radial_scales)], dim=-1).flatten(-2)
   assert torch.equal(out, ref)
@@ -1080,9 +1173,9 @@ def test_harmonic_mc_draws_are_fresh_seeded_and_shape_determined():
 
 @needs_gpu
 def test_sphere_mc_backbone_end_to_end(monkeypatch):
-  base = ['model.sphere_degree=4', 'model.sphere_radial_scales=[1,4,16]']
+  base = ['model.random_feature_type=sphere', 'model.sphere_degree=4', 'model.sphere_radial_scales=[1,4,16]']
   model, _ = _build_model(monkeypatch, base + ['model.sphere_mc_samples=8'])
-  sphere = model.backbone.sphere
+  sphere = _BoundFeatureMap(model.backbone.random_feature, *model.backbone.prod_factors)
   assert sphere.mc_samples == 8 and model.backbone.in_proj.in_features == 4 * (25 + 3)
   B, L = 2, 8
   x = _tokens(model, B, L)
@@ -1102,3 +1195,142 @@ def test_sphere_mc_backbone_end_to_end(monkeypatch):
   sigma = model._sigma_from_alphat(_alpha_at_heat_time(model, B, 0.3))
   for state in (pin, torch.zeros(B, L, 12, dtype=torch.float64, device=model.device)):
     assert torch.isfinite(model.forward(xt=state, sigma=sigma)).all()
+
+
+# ---------------------------------------------------------------------------
+# FeatureBase: the feature maps read the state in any `Coordinate`
+# ---------------------------------------------------------------------------
+
+FACTOR_DIMS, FACTOR_CURVS = [3, 3], [-1.0, -0.5]
+FACTOR_RADII = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+
+
+def _feature_maps():
+  return _hyla(FACTOR_DIMS, FACTOR_CURVS, 16), _sphere(FACTOR_DIMS, FACTOR_CURVS, 3)
+
+
+def _polar_state():
+  """Intrinsic radii (2, 4, 2) and concatenated unit directions (2, 4, 6)."""
+  torch.manual_seed(0)
+  rhos = 6 * torch.rand(2, 4, 2, dtype=torch.float64)
+  us = torch.nn.functional.normalize(
+    torch.randn(2, 4, 2, 3, dtype=torch.float64), dim=-1).flatten(-2)
+  return rhos, us
+
+
+def _concat_blocks(radii, us):
+  """The per-factor vectors radius_i * u_i, concatenated."""
+  return (radii.unsqueeze(-1) * us.unflatten(-1, (2, 3))).flatten(-2)
+
+
+@pytest.mark.parametrize('map_index, num_features', [(0, 16), (1, 2 * (16 + 3))], ids=['hyla', 'sphere'])
+def test_feature_maps_agree_across_input_coordinates(map_index, num_features):
+  """The same state gives the same features in every coordinate system, read with
+  each factor's own dimension and curvature."""
+  feature_map = _feature_maps()[map_index]
+  rhos, us = _polar_state()
+  rs = FACTOR_RADII * torch.tanh(rhos / (2 * FACTOR_RADII))
+  ref = feature_map((rhos, us), Coordinate.HYPERBOLIC_POLAR)
+  assert feature_map.num_features == num_features
+  assert ref.shape == (2, 4, num_features) and ref.dtype == torch.float64
+  for state, coord in [(_concat_blocks(rs, us), Coordinate.CARTESIAN),
+                       (_concat_blocks(rhos, us), Coordinate.HYPERBOLIC_CARTESIAN),
+                       ((rs, us), Coordinate.POINCARE_DISK_POLAR)]:
+    assert torch.allclose(feature_map(state, coord), ref, atol=1e-10), coord
+  with pytest.raises(ValueError):
+    feature_map(_concat_blocks(rs, us), 'not_a_coordinate')
+
+
+@pytest.mark.parametrize('map_index', [0, 1], ids=['hyla', 'sphere'])
+def test_feature_maps_take_the_curvature_per_call(map_index):
+  """Curvature enters only through s = rho sqrt(|K|): one map, K = -4 at half the radii
+  equals K = -1, and differs from K = -1 at the same radii."""
+  feature_map = _feature_maps()[map_index].feature_map
+  rhos, us = _polar_state()
+  at_k1 = feature_map((rhos, us), Coordinate.HYPERBOLIC_POLAR, FACTOR_DIMS, [-1.0, -1.0])
+  at_k4 = feature_map((rhos / 2, us), Coordinate.HYPERBOLIC_POLAR, FACTOR_DIMS, [-4.0, -4.0])
+  assert torch.allclose(at_k1, at_k4, atol=1e-10)
+  assert not torch.allclose(
+    at_k1, feature_map((rhos, us), Coordinate.HYPERBOLIC_POLAR, FACTOR_DIMS, [-4.0, -4.0]), atol=1e-3)
+
+
+def test_feature_maps_reject_factors_they_cannot_read():
+  from random_features.hyla import HyLaFeatures
+  from random_features.hyperbolic_spherical_feat import SphericalFeature
+  z = torch.zeros(1, 1, 12, dtype=torch.float64)
+  cart = Coordinate.CARTESIAN
+  with pytest.raises(ValueError):                         # 30 is not a multiple of 4 factors
+    HyLaFeatures(30, 4, 1.0, 0)(z, cart, [3] * 4, [-1.0] * 4)
+  with pytest.raises(ValueError):                         # no shared factor dimension
+    HyLaFeatures(32, 2, 1.0, 0)(z, cart, [4, 8], [-1.0, -1.0])
+  with pytest.raises(ValueError):                         # (H^4)^3: no S^2 harmonics
+    SphericalFeature(3, 2, [1.0])(z, cart, [4] * 3, [-1.0] * 3)
+  with pytest.raises(ValueError):                         # built for 3 factors, so num_features would lie
+    SphericalFeature(3, 2, [1.0])(z, cart, [3] * 4, [-1.0] * 4)
+  with pytest.raises(ValueError):                         # built for 4 factors
+    HyLaFeatures(24, 4, 1.0, 0)(z, cart, [4] * 3, [-1.0] * 3)
+  hyla = HyLaFeatures(24, 4, 1.0, 0)
+  hyla(z, cart, [3] * 4, [-1.0] * 4)
+  with pytest.raises(ValueError):                         # the first forward fixed the layout
+    hyla(torch.zeros(1, 1, 8, dtype=torch.float64), cart, [2] * 4, [-1.0] * 4)
+
+
+def test_hyla_checkpoint_restores_the_draw_before_the_first_forward():
+  """A map that has not drawn yet takes the checkpoint's draw, not one from its own seed,
+  and moves it to the state's device (Lightning hands it a CPU checkpoint)."""
+  from random_features.hyla import HyLaFeatures
+  saved = _hyla(FACTOR_DIMS, FACTOR_CURVS, 16, seed=1)
+  restored = HyLaFeatures(16, len(FACTOR_DIMS), 1.0, seed=2)
+  assert len(restored.state_dict()) == 0
+  restored.load_state_dict(saved.state_dict(), strict=True)
+  rhos, us = _polar_state()
+  z = _concat_blocks(FACTOR_RADII * torch.tanh(rhos / (2 * FACTOR_RADII)), us)
+  device = 'cuda' if torch.cuda.is_available() else 'cpu'
+  out = restored(z.to(device), Coordinate.CARTESIAN, FACTOR_DIMS, FACTOR_CURVS)
+  assert torch.allclose(out.cpu(), saved(z), atol=1e-12)     # up to CPU / GPU rounding
+  fresh = _hyla(FACTOR_DIMS, FACTOR_CURVS, 16, seed=2)
+  assert not torch.allclose(out.cpu(), fresh(z))
+
+
+@pytest.mark.parametrize('map_index', [0, 1], ids=['hyla', 'sphere'])
+def test_feature_maps_read_float32_states_in_float64(map_index):
+  feature_map = _feature_maps()[map_index]
+  rhos, us = _polar_state()
+  rs = FACTOR_RADII * torch.tanh(rhos / (2 * FACTOR_RADII))
+  for state, coord in [(_concat_blocks(rs, us).float(), Coordinate.CARTESIAN),
+                       (_concat_blocks(rhos, us).float(), Coordinate.HYPERBOLIC_CARTESIAN),
+                       ((rs.float(), us.float()), Coordinate.POINCARE_DISK_POLAR),
+                       ((rhos.float(), us.float()), Coordinate.HYPERBOLIC_POLAR)]:
+    assert feature_map(state, coord).dtype == torch.float64, coord
+
+
+@pytest.mark.parametrize('map_index', [0, 1], ids=['hyla', 'sphere'])
+def test_poincare_polar_state_on_the_boundary_is_finite(map_index):
+  """r = R exactly is capped like the Cartesian readback, instead of giving rho = inf."""
+  feature_map = _feature_maps()[map_index]
+  _, us = _polar_state()
+  rs = FACTOR_RADII.expand(2, 4, 2)
+  assert feature_map((rs, us), Coordinate.POINCARE_DISK_POLAR).isfinite().all()
+
+
+def test_hyla_first_forward_under_inference_mode_keeps_usable_buffers():
+  """The draw outlives the call that made it, so sampling first must not break a later gradient."""
+  from random_features.hyla import HyLaFeatures
+  dims, curvs = [3, 3], [-1.0, -0.5]
+  z = torch.full((1, 1, 6), 0.1, dtype=torch.float64)
+  hyla = HyLaFeatures(16, 2, 1.0, 0)
+  with torch.inference_mode():
+    hyla(z, Coordinate.CARTESIAN, dims, curvs)
+  assert not any(getattr(hyla, name).is_inference() for name in hyla.FEATURE_BUFFERS)
+  state = z.clone().requires_grad_(True)
+  hyla(state, Coordinate.CARTESIAN, dims, curvs).square().sum().backward()
+  assert state.grad.isfinite().all()
+
+
+def test_building_a_feature_map_leaves_the_global_rng_alone():
+  """HyLa draws from its own generator, so the trunk's init stream is unchanged."""
+  torch.manual_seed(7)
+  expected = torch.rand(3)
+  torch.manual_seed(7)
+  _feature_maps()
+  assert torch.equal(torch.rand(3), expected)

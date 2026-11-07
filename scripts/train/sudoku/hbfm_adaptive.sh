@@ -17,14 +17,11 @@ FACTOR_DIM="${FACTOR_DIM:-3}"           # H^FACTOR_DIM factors, EMBED_DIM/FACTOR
 PROD_FACTOR_DIM="${PROD_FACTOR_DIM:-${FACTOR_DIM}}"   # hydra value of algo.prod_factor_dim: an int (equal split) or a list like [3,3,3]
 PROD_FACTOR_CURV="${PROD_FACTOR_CURV:-${GAUSS_CURV}}" # hydra value of algo.prod_factor_gaussian_curvature: a float or a list; GAUSS_CURV stays the scalar |K| used for the unit-time conversions
 INIT="${INIT:-ngpt}"
-HYLA_DIM="${HYLA_DIM:-null}"           # random Laplacian features (HyLa) of the state fed to the DiT: total feature dim, a multiple of the factor count; null = feed the Poincaré coordinates
-HYLA_SCALE="${HYLA_SCALE:-1.0}"        # std of the HyLa eigenvalue draw (the paper's s); unused when HYLA_DIM=null
-HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # HyLa map evaluated at min(s, cap) of the dimensionless radial; null = no cap
-HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # true: coordinates + HyLa features / false: HyLa features replace the coordinates
-HYLA_NORMALIZE="${HYLA_NORMALIZE:-true}"   # true: features / sqrt(HYLA_DIM) (the paper) / false: unnormalized (reference code)
-SPHERE_DEGREE="${SPHERE_DEGREE:-null}"   # hyperbolic-harmonic features (HarmonicFeatures, the "sphere" map) of the state fed to the DiT: max degree L, (L+1)^2 + radial channels per H^3 factor; null = off; exclusive with HYLA_DIM
+RANDOM_FEATURE_TYPE="${RANDOM_FEATURE_TYPE:-null}"   # input map of the state fed to the DiT: null = the Poincaré coordinates / sphere = hyperbolic-harmonic features (SphericalFeature)
+SPHERE_DEGREE="${SPHERE_DEGREE:-4}"   # sphere map only: max degree L, (L+1)^2 + radial channels per H^3 factor
 SPHERE_RADIAL_SCALES="${SPHERE_RADIAL_SCALES:-[1,2,4,8,16,32]}"   # radial channels tanh(s / c) of the sphere map, a hydra list
-SPHERE_MC_SAMPLES="${SPHERE_MC_SAMPLES:-null}"   # Monte-Carlo sphere features: boundary angles w ~ P(z,.) per H^3 factor (unit weights, fresh each forward); null = closed form; needs SPHERE_DEGREE
+SPHERE_RADIAL_TYPE="${SPHERE_RADIAL_TYPE:-exp_decay}"   # radial profile of the sphere map: exp_decay = f_l(s), the only one (SphericalFeature.radial notes why a flat f_l = 1 was removed)
+SPHERE_MC_SAMPLES="${SPHERE_MC_SAMPLES:-null}"   # Monte-Carlo sphere features: boundary angles w ~ P(z,.) per H^3 factor (unit weights, fresh each forward); null = closed form; needs RANDOM_FEATURE_TYPE=sphere
 LR="${LR:-3e-4}"
 SEED="${SEED:-1}"
 UNIT_PROPOSAL_RATE="${UNIT_PROPOSAL_RATE:-20}"    # exp rate in unit-model time
@@ -48,13 +45,10 @@ python -u -m main \
     model=tiny-hyperbolic-dit \
     model.embed_dim=${EMBED_DIM} \
     model.init="${INIT}" \
-    model.hyla_dim=${HYLA_DIM} \
-    model.hyla_scale=${HYLA_SCALE} \
-    model.hyla_radius_cap=${HYLA_RADIUS_CAP} \
-    model.hyla_concat_state=${HYLA_CONCAT_STATE} \
-    model.hyla_normalize=${HYLA_NORMALIZE} \
+    model.random_feature_type=${RANDOM_FEATURE_TYPE} \
     model.sphere_degree=${SPHERE_DEGREE} \
     model.sphere_radial_scales="${SPHERE_RADIAL_SCALES}" \
+    model.sphere_radial_type=${SPHERE_RADIAL_TYPE} \
     model.sphere_mc_samples=${SPHERE_MC_SAMPLES} \
     optim.lr="${LR}" \
     seed="${SEED}" \

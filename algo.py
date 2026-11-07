@@ -876,7 +876,7 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
   @staticmethod
   def _resolve_prod_factors(algo_config, embed_dim):
     """`prod_factor_dim` / `prod_factor_gaussian_curvature` as plain lists
-    (`GeoUtils.resolve_prod_factors`, shared with the backbone's HyLa map)."""
+    (`GeoUtils.resolve_prod_factors`, shared with the backbone's feature map)."""
     return GeoUtils.resolve_prod_factors(
       algo_config.prod_factor_dim, algo_config.prod_factor_gaussian_curvature,
       embed_dim)

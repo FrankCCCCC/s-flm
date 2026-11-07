@@ -34,7 +34,9 @@ class Coordinate:
     """String tags selecting polar vs Cartesian output from kernel/bridge methods."""
 
     HYPERBOLIC_POLAR: str = "polar"
+    POINCARE_DISK_POLAR: str = "poincare_disk_polar"
     CARTESIAN: str = "cartesian"
+    HYPERBOLIC_CARTESIAN: str = "hyperbolic_cartesian"
 
 # ---------------------------------------------------------------------------
 # Numerical-stability boundary constants
@@ -397,10 +399,10 @@ class GeoUtils:
         thetas: torch.Tensor,
         gaussian_curvature: float=-1.0,
     ) -> torch.Tensor:
-        """Compute z = R * tanh(rho / 2R) * direction inside the open disk of radius `R = 1/sqrt(|K|)`.
+        r"""Compute z = \kappa * tanh(rho / 2\kappa) * direction inside the open disk of radius `\kappa = 1/sqrt(|K|)`.
 
         `tanh` saturates to 1.0 in float64 for its argument `>= ~36`. The scale is
-        clamped below 1 by one ulp so the strict invariant `||z|| < R` holds for
+        clamped below 1 by one ulp so the strict invariant `||z|| < \kappa` holds for
         arbitrarily large `rho`.
 
         Args:
@@ -410,13 +412,13 @@ class GeoUtils:
 
         Returns:
             `torch.FloatTensor` of shape `(batch_size, 2)`: Poincare-disk Cartesian
-            coordinates `(x, y)` with `||z|| < R` (`< 1` at `K = -1`).
+            coordinates `(x, y)` with `||z|| < \kappa` (`< 1` at `K = -1`).
         """
-        R = GeoUtils._curvature_scale(gaussian_curvature)
+        kappa = GeoUtils._curvature_scale(gaussian_curvature)
         direction = GeoUtils._binary_polar_direction(thetas=thetas)
-        scale = torch.tanh(rhos / (2.0 * R))
+        scale = torch.tanh(rhos / (2.0 * kappa))
         one_minus_eps = 1.0 - torch.finfo(scale.dtype).eps
-        scale = scale.clamp(max=one_minus_eps) * R
+        scale = scale.clamp(max=one_minus_eps) * kappa
         return scale.unsqueeze(-1) * direction
 
     @staticmethod
@@ -425,11 +427,11 @@ class GeoUtils:
         thetas: torch.FloatTensor,
         gaussian_curvature: float=-1.0,
     ) -> torch.FloatTensor:
-        """Convert `(rho, theta)` on `H^2` to Lorentz-Cartesian coordinates.
+        r"""Convert `(rho, theta)` on `H^2` to Lorentz-Cartesian coordinates.
 
         The `d == 2` lift consuming a scalar angle per sample, on the curvature-`K`
-        hyperboloid of radius `R = 1/sqrt(|K|)`:
-        `z = R * (cosh(rho/R), sinh(rho/R) cos theta, sinh(rho/R) sin theta)`.
+        hyperboloid of radius `\kappa = 1/sqrt(|K|)`:
+        `z = \kappa * (cosh(rho/\kappa), sinh(rho/\kappa) cos theta, sinh(rho/\kappa) sin theta)`.
 
         Args:
             rhos (`torch.FloatTensor` of shape `(batch_size,)`): hyperbolic radial.
@@ -440,13 +442,13 @@ class GeoUtils:
             `torch.FloatTensor` of shape `(batch_size, 3)`: Lorentz-Cartesian
             coordinates satisfying `<z,z>_L = 1/K` (`= -1` at `K = -1`).
         """
-        R = GeoUtils._curvature_scale(gaussian_curvature)
-        unit_rhos = rhos / R
+        kappa = GeoUtils._curvature_scale(gaussian_curvature)
+        unit_rhos = rhos / kappa
         sinh_r = torch.sinh(unit_rhos)
         return torch.stack(
             [torch.cosh(unit_rhos), sinh_r * thetas.cos(), sinh_r * thetas.sin()],
             dim=-1,
-        ) * R
+        ) * kappa
 
     @staticmethod
     def hyperbolic_polar_to_poincare_cartesian(
@@ -454,10 +456,10 @@ class GeoUtils:
         thetas: torch.Tensor,
         gaussian_curvature: float=-1.0,
     ) -> torch.Tensor:
-        """Compute `z = R * tanh(rho / 2R) * u` inside the open ball of radius `R = 1/sqrt(|K|)`.
+        r"""Compute `z = \kappa * tanh(rho / 2\kappa) * u` inside the open ball of radius `\kappa = 1/sqrt(|K|)`.
 
         `tanh` saturates to 1.0 in float64 for its argument `>= ~36`. The scale is
-        clamped below 1 by one ulp so the strict invariant `||z|| < R` holds for
+        clamped below 1 by one ulp so the strict invariant `||z|| < \kappa` holds for
         arbitrarily large `rho`.
 
         Args:
@@ -467,13 +469,13 @@ class GeoUtils:
 
         Returns:
             `torch.FloatTensor` of shape `(..., d)`: Poincare-ball Cartesian
-            coordinates with `||z|| < R`.
+            coordinates with `||z|| < \kappa`.
         """
-        R = GeoUtils._curvature_scale(gaussian_curvature)
+        kappa = GeoUtils._curvature_scale(gaussian_curvature)
         direction = GeoUtils._polar_direction(thetas=thetas)
-        scale = torch.tanh(rhos / (2.0 * R))
+        scale = torch.tanh(rhos / (2.0 * kappa))
         one_minus_eps = 1.0 - torch.finfo(scale.dtype).eps
-        scale = scale.clamp(max=one_minus_eps) * R
+        scale = scale.clamp(max=one_minus_eps) * kappa
         return scale.unsqueeze(-1) * direction
 
     @staticmethod
@@ -481,14 +483,14 @@ class GeoUtils:
         z: torch.Tensor,
         gaussian_curvature: float=-1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Inverse of [`hyperbolic_polar_to_poincare_cartesian`]: Poincare-ball
-        Cartesian `z` -> polar `(rho, u)` with `rho = 2R atanh(||z|| / R)`,
-        `u = z / ||z||`, `R = 1 / sqrt(|K|)`.
+        r"""Inverse of [`hyperbolic_polar_to_poincare_cartesian`]: Poincare-ball
+        Cartesian `z` -> polar `(rho, u)` with `rho = 2\kappa atanh(||z|| / \kappa)`,
+        `u = z / ||z||`, `\kappa = 1 / sqrt(|K|)`.
 
-        Asssume a polar cooridnate on hyperbolic, (R, \theta); a Poincare ball coordinate (\rho, \theta),
-        The conversion from R -> \rho -> R has rounding errors, therefore, we cannot reverse the R back accurately since
-        \rho = \tanh(R/2) and R = 2 * R * \atanh(\rho) is numerically unstable while \rho is close to boundary 1.0. Thus, 
-        we clamp the \rho to 1.0 - 8.0 * torch.finfo(z.dtype).eps to avoid the numerical instability. 8.0 is heuristic, since
+        Assume a polar coordinate on hyperbolic, (\rho, u); a Poincare ball coordinate (r, u),
+        The conversion from \rho -> r -> \rho has rounding errors, therefore, we cannot reverse the \rho back accurately since
+        r = \kappa \tanh(\rho / 2\kappa) and \rho = 2 \kappa \atanh(r / \kappa) is numerically unstable while r / \kappa is close to boundary 1.0. Thus,
+        we clamp the r / \kappa to 1.0 - 8.0 * torch.finfo(z.dtype).eps to avoid the numerical instability. 8.0 is heuristic, since
         1 - torch.finfo(z.dtype).eps is not enough to avoid the numerical instability.
 
         Args:
@@ -500,12 +502,69 @@ class GeoUtils:
                 - `rhos` of shape `(...)`, `>= 0`.
                 - `u` of shape `(..., d)`, unit direction on `S^{d-1}` (zero at the origin).
         """
-        R = GeoUtils._curvature_scale(gaussian_curvature)
+        kappa = GeoUtils._curvature_scale(gaussian_curvature)
         direction = GeoUtils._polar_direction(thetas=z)
         cap = 1.0 - 8.0 * torch.finfo(z.dtype).eps
-        scale = (z.norm(dim=-1) / R).clamp(max=cap)
-        rhos = 2.0 * R * torch.atanh(scale)
+        scale = (z.norm(dim=-1) / kappa).clamp(max=cap)
+        rhos = 2.0 * kappa * torch.atanh(scale)
         return rhos, direction
+
+    @staticmethod
+    def hyperbolic_polar_to_poincare_polar(
+        rhos: torch.Tensor,
+        thetas: torch.Tensor,
+        gaussian_curvature: float=-1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        r"""Compute `r = \kappa * tanh(rho / 2 \kappa)` inside the open ball of radius `\kappa = 1/sqrt(|K|)`.
+
+        `tanh` saturates to 1.0 in float64 for its argument `>= ~36`. The scale is
+        clamped below 1 by one ulp so the strict invariant `r < \kappa` holds for
+        arbitrarily large `rho`.
+
+        Args:
+            rhos (`torch.FloatTensor` of shape `(...,)`): hyperbolic radial coordinate.
+            thetas (`torch.FloatTensor` of shape `(..., d)`): unit direction on `S^{d-1}`.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit ball model.
+
+        Returns:
+            `Tuple[torch.Tensor, torch.Tensor]`:
+                - `rs` of shape `(...,)`, the Poincare-ball radial coordinate, `r < \kappa`.
+                - `u` of shape `(..., d)`, unit direction on `S^{d-1}` (zero where `thetas` is zero).
+        """
+        kappa = GeoUtils._curvature_scale(gaussian_curvature)
+        direction = GeoUtils._polar_direction(thetas=thetas)
+        scale = torch.tanh(rhos / (2.0 * kappa))
+        one_minus_eps = 1.0 - torch.finfo(scale.dtype).eps
+        scale = scale.clamp(max=one_minus_eps) * kappa
+        return scale, direction
+
+    @staticmethod
+    def poincare_polar_to_hyperbolic_polar(
+        rs: torch.Tensor,
+        thetas: torch.Tensor,
+        gaussian_curvature: float=-1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        r"""Inverse of [`hyperbolic_polar_to_poincare_polar`]: `\rho = 2 \kappa * arctanh(r / \kappa)` with `\kappa = 1/sqrt(|K|)`.
+
+        `arctanh` diverges as `r / \kappa -> 1`, so `r / \kappa` is clamped to `1 - 8 eps`,
+        the cap of [`poincare_cartesian_to_hyperbolic_polar`], which keeps `\rho` finite
+        on and past the boundary.
+
+        Args:
+            rs (`torch.FloatTensor` of shape `(...,)`): Poincare-ball radial coordinate.
+            thetas (`torch.FloatTensor` of shape `(..., d)`): unit direction on `S^{d-1}`.
+            gaussian_curvature (`float`): curvature `K < 0`; `-1.0` = unit ball model.
+
+        Returns:
+            `Tuple[torch.Tensor, torch.Tensor]`:
+                - `rhos` of shape `(...,)`, the hyperbolic radial coordinate, `>= 0`.
+                - `u` of shape `(..., d)`, unit direction on `S^{d-1}` (zero where `thetas` is zero).
+        """
+        kappa = GeoUtils._curvature_scale(gaussian_curvature)
+        direction = GeoUtils._polar_direction(thetas=thetas)
+        cap = 1.0 - 8.0 * torch.finfo(rs.dtype).eps
+        scale = 2 * kappa * torch.arctanh((rs / kappa).clamp(max=cap))
+        return scale, direction
 
     @staticmethod
     def validate_prod_factors(
@@ -682,6 +741,76 @@ class GeoUtils:
             ]
         )
         return torch.stack(rhos, dim=-1), torch.cat(us, dim=-1)
+
+    @staticmethod
+    def poincare_polar_to_hyperbolic_polar_prod(
+        rs: torch.Tensor,
+        thetas: torch.Tensor,
+        prod_factor_dim: Optional[List[int]] = None,
+        prod_factor_gaussian_curvature: Optional[List[float]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Product-manifold form of [`poincare_polar_to_hyperbolic_polar`].
+
+        Args:
+            rs (`torch.Tensor` of shape `(..., num_factors)`):
+                Poincare-ball radius of each factor.
+            thetas (`torch.Tensor` of shape `(..., embedding_size)`):
+                Per-factor unit directions, concatenated.
+            prod_factor_dim (`List[int]`, *optional*):
+                Dimension `d_i >= 2` of each factor; must sum to `embedding_size`.
+            prod_factor_gaussian_curvature (`List[float]`, *optional*):
+                Curvature `K_i < 0` of each factor; same length as `prod_factor_dim`.
+                Both lists default together to the single factor `[embedding_size]` at
+                `[-1.0]`, which reproduces [`poincare_polar_to_hyperbolic_polar`].
+
+        Returns:
+            `Tuple[torch.Tensor, torch.Tensor]`:
+                - `rhos` of shape `(..., num_factors)`, one intrinsic radius per factor.
+                - `u` of shape `(..., embedding_size)`, the per-factor unit directions
+                  concatenated.
+        """
+        prod_factor_dim, prod_factor_gaussian_curvature = GeoUtils.validate_prod_factors(
+            prod_factor_dim=prod_factor_dim,
+            prod_factor_gaussian_curvature=prod_factor_gaussian_curvature,
+            embedding_size=thetas.shape[-1],
+        )
+        rhos, us = zip(
+            *[
+                GeoUtils.poincare_polar_to_hyperbolic_polar(
+                    rs[..., i], u_i, gaussian_curvature=factor_curv
+                )
+                for i, (u_i, factor_curv) in enumerate(
+                    zip(thetas.split(prod_factor_dim, dim=-1), prod_factor_gaussian_curvature)
+                )
+            ]
+        )
+        return torch.stack(rhos, dim=-1), torch.cat(us, dim=-1)
+
+    @staticmethod
+    def hyperbolic_cartesian_to_hyperbolic_polar_prod(
+        z: torch.Tensor,
+        prod_factor_dim: List[int],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Read the per-factor vectors `z_i = rho_i * u_i` as polar `(rho_i, u_i)`.
+
+        The norm of each block is its intrinsic radius, so no curvature enters.
+
+        Args:
+            z (`torch.Tensor` of shape `(..., embedding_size)`):
+                Per-factor vectors `rho_i * u_i`, concatenated.
+            prod_factor_dim (`List[int]`):
+                Dimension `d_i >= 2` of each factor; must sum to `embedding_size`.
+
+        Returns:
+            `Tuple[torch.Tensor, torch.Tensor]`:
+                - `rhos` of shape `(..., num_factors)`, one intrinsic radius per factor.
+                - `u` of shape `(..., embedding_size)`, the per-factor unit directions
+                  concatenated (zero at the origin).
+        """
+        blocks = z.split(prod_factor_dim, dim=-1)
+        rhos = torch.stack([z_i.norm(dim=-1) for z_i in blocks], dim=-1)
+        us = torch.cat([GeoUtils._polar_direction(thetas=z_i) for z_i in blocks], dim=-1)
+        return rhos, us
 
     @staticmethod
     def hyperbolic_polar_to_lorentz_cartesian(

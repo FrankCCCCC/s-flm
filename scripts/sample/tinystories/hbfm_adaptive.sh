@@ -23,12 +23,10 @@ MODEL="${MODEL:-small-hyperbolic-dit}"
 SEQ_LEN="${SEQ_LEN:-256}"
 INIT="${INIT:-ngpt}"
 EMBED_DIM="${EMBED_DIM:-96}"
-HYLA_DIM="${HYLA_DIM:-null}"           # HyLa feature dim; must match training (null = off)
-HYLA_RADIUS_CAP="${HYLA_RADIUS_CAP:-null}"   # must match training
-HYLA_CONCAT_STATE="${HYLA_CONCAT_STATE:-false}"   # must match training
-HYLA_NORMALIZE="${HYLA_NORMALIZE:-true}"   # must match training
-SPHERE_DEGREE="${SPHERE_DEGREE:-null}"   # sphere map degree; must match training (null = off)
+RANDOM_FEATURE_TYPE="${RANDOM_FEATURE_TYPE:-null}"   # must match training: null = the Poincaré coordinates / sphere
+SPHERE_DEGREE="${SPHERE_DEGREE:-4}"   # sphere map only; must match training
 SPHERE_RADIAL_SCALES="${SPHERE_RADIAL_SCALES:-[1,2,4,8,16,32]}"   # must match training
+SPHERE_RADIAL_TYPE="${SPHERE_RADIAL_TYPE:-exp_decay}"   # must match training (no checkpoint key)
 SPHERE_MC_SAMPLES="${SPHERE_MC_SAMPLES:-null}"   # MC sphere features at sampling; may differ from training (null = exact closed form, the MC map's mean)
 FACTOR_DIM="${FACTOR_DIM:-3}"
 GAUSS_CURV="${GAUSS_CURV:--1.0}"
@@ -49,12 +47,10 @@ MARGS=(
     model.length=${SEQ_LEN}
     model.embed_dim=${EMBED_DIM}
     model.init=${INIT}
-    model.hyla_dim=${HYLA_DIM}
-    model.hyla_radius_cap=${HYLA_RADIUS_CAP}
-    model.hyla_concat_state=${HYLA_CONCAT_STATE}
-    model.hyla_normalize=${HYLA_NORMALIZE}
+    model.random_feature_type=${RANDOM_FEATURE_TYPE}
     model.sphere_degree=${SPHERE_DEGREE}
     model.sphere_radial_scales="${SPHERE_RADIAL_SCALES}"
+    model.sphere_radial_type=${SPHERE_RADIAL_TYPE}
     model.sphere_mc_samples=${SPHERE_MC_SAMPLES}
     algo=hbfm
     algo.prod_factor_dim=${FACTOR_DIM}
