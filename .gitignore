@@ -191,3 +191,4 @@ multirun/
 *.npz
 experiments/*/logs/
 outputs_old/
+**.env
