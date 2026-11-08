@@ -30,7 +30,7 @@ INIT="${INIT:-ngpt}"
 RANDOM_FEATURE_TYPE="${RANDOM_FEATURE_TYPE:-null}"   # input map of the state fed to the DiT: null = the Poincaré coordinates / sphere = hyperbolic-harmonic features (SphericalFeature)
 SPHERE_DEGREE="${SPHERE_DEGREE:-4}"   # sphere map only: max degree L, (L+1)^2 + radial channels per H^3 factor
 SPHERE_RADIAL_SCALES="${SPHERE_RADIAL_SCALES:-[1,2,4,8,16,32]}"   # radial channels tanh(s / c) of the sphere map, a hydra list
-SPHERE_RADIAL_TYPE="${SPHERE_RADIAL_TYPE:-exp_decay}"   # radial profile of the sphere map: exp_decay = f_l(s), the only one (SphericalFeature.radial notes why a flat f_l = 1 was removed)
+SPHERE_RADIAL_TYPE="${SPHERE_RADIAL_TYPE:-exp_decay}"   # radial profile of the sphere map: exp_decay = f_l(s) (SphericalFeature.radial notes why a flat f_l = 1 was removed); phase = f_l(s) with the tanh channels replaced by the boundary-phase eigenfunctions, mu = 2 + i / c (Re / Im per scale and (l, m), no MC form)
 SPHERE_MC_SAMPLES="${SPHERE_MC_SAMPLES:-null}"   # Monte-Carlo sphere features: boundary angles w ~ P(z,.) per H^3 factor (unit weights, fresh each forward); null = closed form; needs RANDOM_FEATURE_TYPE=sphere
 EMBED_DIM="${EMBED_DIM:-96}"              # manifold dim; null = DiT hidden size
 FACTOR_DIM="${FACTOR_DIM:-3}"             # H^FACTOR_DIM factors, EMBED_DIM/FACTOR_DIM of them

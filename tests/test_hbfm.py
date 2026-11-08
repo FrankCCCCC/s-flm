@@ -368,6 +368,7 @@ def _reference_log_posterior(model, rhos, thetas):
 @pytest.mark.parametrize('precision,atol', [('float64', 1e-9), ('float32', 1e-4)])
 def test_horosphere_readout_is_bayes_posterior(monkeypatch, precision, atol):
   model, _ = _build_model(monkeypatch, [
+    'algo.forward_type=horosphere',
     'algo.prod_factor_dim=[3,3,3,3]',
     'algo.prod_factor_gaussian_curvature=[-1.0,-4.0,-0.25,-2.0]',
     f'algo.readout_precision={precision}'])
@@ -449,7 +450,8 @@ def test_naive_readout_is_plain_log_softmax(monkeypatch):
   logits = torch.randn(2, 8, model.vocab_size)
   with torch.no_grad():
     log_p = model._process_model_output(logits, None, None, None)
-  assert torch.allclose(log_p, logits.double().log_softmax(-1))
+  assert log_p.dtype == model.readout_dtype
+  assert torch.allclose(log_p.double(), logits.double().log_softmax(-1), atol=1e-5)
 
 
 def test_unknown_forward_type_raises_at_readout(monkeypatch):
@@ -464,7 +466,8 @@ def test_unknown_forward_type_raises_at_readout(monkeypatch):
 
 @needs_gpu
 def test_nll_end_to_end_is_finite_and_differentiable(monkeypatch):
-  model, _ = _build_model(monkeypatch)
+  # Horosphere: under naive the zero-init readout gives the embedding no gradient at step 0.
+  model, _ = _build_model(monkeypatch, ['algo.forward_type=horosphere'])
   B, L = 2, 8
   x = _tokens(model, B, L)
   loss, t = model.nll(x, None, None)
@@ -526,7 +529,7 @@ def test_bayes_limits_at_init(monkeypatch):
   """At init the DiT readout is zero (DDiTFinalLayer zero-init), so the
   log-posterior is the horosphere term alone: uniform (CE = log V) at the
   origin, one-hot (CE = 0) near the boundary."""
-  model, _ = _build_model(monkeypatch)
+  model, _ = _build_model(monkeypatch, ['algo.forward_type=horosphere'])
   B, L = 2, 8
   x = _tokens(model, B, L)
   ce_origin = _ce_at_heat_time(model, x, 1e-6)
@@ -627,6 +630,7 @@ def test_adaptive_schedule_composes(monkeypatch):
   ['model.random_feature_type=sphere', 'model.sphere_mc_samples=0'],
   ['model.random_feature_type=sphere', 'model.sphere_radial_type=bogus'],
   ['model.random_feature_type=sphere', 'model.sphere_radial_type=constant'],   # see SphericalFeature.radial
+  ['model.random_feature_type=sphere', 'model.sphere_radial_type=phase', 'model.sphere_mc_samples=4'],   # no MC phase
   ['model.random_feature_type=sphere', 'model.sphere_degree=null'],
   ['model.random_feature_type=SPHERE'],                  # the value is lower case
   ['model.random_feature_type=hyla'],                    # a class, not a model option
@@ -1194,6 +1198,114 @@ def test_sphere_mc_backbone_end_to_end(monkeypatch):
   assert torch.allclose(sphere(pin).unflatten(-1, (4, 28))[..., :25], sphere.spherical_harmonics(u), atol=1e-9)
   sigma = model._sigma_from_alphat(_alpha_at_heat_time(model, B, 0.3))
   for state in (pin, torch.zeros(B, L, 12, dtype=torch.float64, device=model.device)):
+    assert torch.isfinite(model.forward(xt=state, sigma=sigma)).all()
+
+
+# sphere_radial_type=phase: the boundary-phase eigenfunctions r_{2+i/c,l} / C (the radial design note)
+
+def _phase_closed_form(lam, l, s):
+  """r_{mu,l}(s) / C(mu, l), mu = 2 + i lam, in closed form for l <= 1 (the Rodrigues
+  step of the design note, k = mu - 1): l = 0 is sinh(k s) / sinh(s), l = 1 is
+  (k cosh(ks) sinh(s) - sinh(ks) cosh(s)) / ((k - 1) sinh^2(s)) (lam > 0)."""
+  import numpy as np
+  k = 1 + 1j * lam
+  if l == 0:
+    return np.sinh(k * s) / np.sinh(s)
+  return (k * np.cosh(k * s) * np.sinh(s) - np.sinh(k * s) * np.cosh(s)) / ((k - 1) * np.sinh(s) ** 2)
+
+
+def test_phase_radial_matches_the_closed_forms():
+  """The ODE table (`phase_radial`) is the regular solution of the H^3 radial
+  eigen-equation, boundary-normalised: it equals the closed forms for l <= 1, is the
+  harmonic f_l at mu = 2 (lambda = 0) for every l, tends to e^{i lambda s} (modulus 1)
+  at the boundary for every l, and stays bounded in between (the note's sup: sqrt(1 +
+  lambda^2) at l = 0, 1.08 at l >= 1)."""
+  import numpy as np
+  from random_features.hyperbolic_spherical_feat import SphericalFeature
+  sphere = _sphere([3], [-1.0], 4)
+  s = np.arange(0.0, 34.66, 1.0 / 64)
+  for l in range(5):
+    f = SphericalFeature.phase_radial(2 + 0j, l, s)
+    table = sphere.radial(torch.tensor(s, dtype=torch.float64))[:, l].numpy()
+    assert np.abs(f - table).max() < 1e-5, l      # the f_l table is itself interpolated
+    assert np.abs(f.imag).max() < 1e-12
+  pts = np.array([0.5, 1.0, 2.0, 5.0, 10.0, 20.0])
+  for lam in (1.0, 0.25, 1 / 32):
+    for l in (0, 1):
+      got = SphericalFeature.phase_radial(2 + 1j * lam, l, np.concatenate([[0.0], pts]))[1:]
+      assert np.abs(got - _phase_closed_form(lam, l, pts)).max() < 1e-7, (lam, l)
+    for l in range(5):
+      r = SphericalFeature.phase_radial(2 + 1j * lam, l, s)
+      assert np.isfinite(r).all()
+      assert np.abs(r).max() <= (math.sqrt(1 + lam ** 2) if l == 0 else 1.08) + 1e-9, (lam, l)
+      far = SphericalFeature.phase_radial(2 + 1j * lam, l, np.array([0.0, 16.0, 34.66]))[1:]
+      assert np.abs(far - np.exp(1j * lam * np.array([16.0, 34.66]))).max() < 1e-6, (lam, l)
+
+
+def test_phase_features_layout_bounds_and_pin():
+  """radial_type='phase': per factor the (L+1)^2 harmonics f_l Y_lm (as exp_decay's),
+  then Re and Im of Y_lm(u) r_{2+i/c,l}(s) / C per scale c; finite with a finite
+  gradient from the origin to the pin, where they are Y_lm(u) cos / sin(s / c); at the
+  origin only l = 0 survives, r_{mu,0}(0) / C = mu - 1 = 1 + i / c."""
+  import numpy as np
+  from random_features.hyperbolic_spherical_feat import SphericalFeature
+  dims, curvs, scales = [3, 3], [-1.0, -0.5], [1.0, 4.0]
+  R = torch.tensor([1.0, 2.0 ** 0.5], dtype=torch.float64)
+  phase = _sphere(dims, curvs, 4, scales, radial_type='phase')
+  exp_decay = _sphere(dims, curvs, 4, scales)
+  assert phase.num_features == 2 * 25 * (1 + 2 * 2) and len(phase.state_dict()) == 0
+  n = 32
+  s = torch.cat([torch.zeros(1), torch.linspace(1e-3, 34.66, n - 2), torch.tensor([34.66])]).double()
+  u = _unit(n, 2, seed=5)
+  z = (R[:, None] * torch.tanh(s / 2)[:, None, None] * u).flatten(-2)[None].requires_grad_(True)
+  feats = phase(z)
+  assert feats.shape == (1, n, 250) and feats.dtype == torch.float64 and torch.isfinite(feats).all()
+  per = feats.unflatten(-1, (2, 125))[0]                                  # (n, factor, 125)
+  assert torch.allclose(per[..., :25], exp_decay(z.detach()).unflatten(-1, (2, 27))[0, ..., :25])
+  Y = phase.spherical_harmonics(u)                                        # (n, 2, 25)
+  ch = per[..., 25:].unflatten(-1, (2, 25, 2))                            # (n, factor, c, lm, re/im)
+  ell = phase.ell_of_feature
+  from numeric.geo_bridge import GeoUtils
+  # The radius the map reads back from the state (near the pin it differs from s by
+  # float64 rounding of tanh(s / 2), which the c = 1 phase resolves).
+  s_read = (GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(z.detach(), dims, curvs)[0] / R)[0]   # (n, factor)
+  for j, c in enumerate(scales):
+    for i in (5, 17, n - 1):
+      for f in range(2):
+        ref = np.stack([SphericalFeature.phase_radial(2 + 1j / c, l, np.array([0.0, float(s_read[i, f])]))[1]
+                        for l in range(5)])[ell.numpy()]
+        ref = torch.tensor(np.stack([ref.real, ref.imag], -1))            # (25, 2)
+        assert torch.allclose(ch[i, f, j], Y[i, f, :, None] * ref, atol=1e-5), (c, i, f)
+  assert torch.allclose(ch[0, :, :, ell == 0, 0], torch.ones(2, 2, 1, dtype=torch.float64))
+  assert torch.allclose(ch[0, :, :, ell == 0, 1], torch.tensor([1.0, 0.25], dtype=torch.float64)[None, :, None])
+  assert ch[0, :, :, ell > 0].abs().max() < 1e-9
+  feats.square().sum().backward()
+  assert torch.isfinite(z.grad).all()
+  pin = (R[:, None] * u[0]).flatten()[None, None]                         # |z| = R, the `_clean_state` pin
+  fp = phase(pin).unflatten(-1, (2, 125))[0, 0, :, 25:].unflatten(-1, (2, 25, 2))
+  s_pin = GeoUtils.poincare_cartesian_to_hyperbolic_polar_prod(pin, dims, curvs)[0][0, 0] / R
+  assert (s_pin > 34).all()                                               # the readback's largest radius
+  for j, c in enumerate(scales):
+    rot = torch.stack([(s_pin / c).cos(), (s_pin / c).sin()], -1)          # (factor, 2)
+    assert torch.allclose(fp[:, j], Y[0, :, :, None] * rot[:, None], atol=1e-4), c
+
+
+@needs_gpu
+def test_sphere_phase_backbone_end_to_end(monkeypatch):
+  base = ['model.random_feature_type=sphere', 'model.sphere_degree=2', 'model.sphere_radial_scales=[1,4]']
+  model, _ = _build_model(monkeypatch, base + ['model.sphere_radial_type=phase'])
+  sphere = model.backbone.random_feature
+  assert sphere.radial_type == 'phase' and model.backbone.in_proj.in_features == 4 * 9 * (1 + 2 * 2)
+  assert not any(k.startswith('backbone.random_feature.') for k in model.state_dict())
+  B, L = 2, 8
+  x = _tokens(model, B, L)
+  loss, _ = model.nll(x, None, None)
+  assert loss.shape == (B, L) and torch.isfinite(loss).all()
+  loss.sum().backward()
+  for p in (model.backbone.sphere_embed.weight, model.backbone.in_proj.weight):
+    assert p.grad is not None and torch.isfinite(p.grad).all()
+  sigma = model._sigma_from_alphat(_alpha_at_heat_time(model, B, 0.3))
+  for state in (model._clean_state(x), torch.zeros(B, L, 12, dtype=torch.float64, device=model.device)):
     assert torch.isfinite(model.forward(xt=state, sigma=sigma)).all()
 
 

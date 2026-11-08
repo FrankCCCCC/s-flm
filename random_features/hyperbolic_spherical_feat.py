@@ -3,7 +3,8 @@ from typing import List, Tuple, Union
 
 import torch
 import numpy as np
-from scipy.special import hyp2f1
+from scipy.integrate import solve_ivp
+from scipy.special import gamma, hyp2f1
 
 from numeric.geo_bridge import GeoUtils, HyperbolicHeatKernel
 from .feature_base import FeatureBase
@@ -44,10 +45,19 @@ class SphericalFeature(FeatureBase):
   Y_lm(u) at the boundary, where the kernel does; the gradient is the closed form's and
   the radial channels stay exact. The module adds no checkpoint keys.
 
-  `radial_type` names the radial profile of the harmonics: `exp_decay` is the f_l
-  above and the only one; `radial` notes why a flat f_l = 1 was removed.
+  `radial_type` names the radial part of the map: `exp_decay` is the f_l above with the
+  tanh channels; `radial` notes why a flat f_l = 1 was removed. `phase` keeps the harmonics
+  f_l Y_lm and replaces the tanh channels by the boundary-phase family of the
+  radial-eigenfunction design note (experiments/claude_test_hbfm_rlf_tinystories_256/
+  HBFM Radial Eigenfunctions.html): per scale c, mu = 2 + i / c, the real and imaginary
+  parts of Y_lm(u) r_{mu,l}(s) / C(mu, l), l = 0..L, r_{mu,l} being the radial solution
+  of Delta f = mu (mu - 2) f regular at the origin (r ~ s^l) and
+  C(mu, l) = (2l + 1)!! Gamma(mu - 1) / Gamma(mu + l) its boundary amplitude: r / C ->
+  e^{i s / c} at the boundary (modulus 1, the pin stays visible), and mu = 2 (c -> inf)
+  is f_l. Tabulated by the float64 ODE route (`phase_radial`); `num_features` =
+  `num_factors` * (L + 1)^2 * (1 + 2 len(radial_scales)). Exclusive with `mc_samples`.
   """
-  RADIAL_TYPES = ('exp_decay',)
+  RADIAL_TYPES = ('exp_decay', 'phase')
   TABLE_STEP = 1.0 / 256
   TABLE_MAX = 36.0        # > 2 atanh(1 - 8 eps) = 34.66, the readback's largest s
 
@@ -67,6 +77,8 @@ class SphericalFeature(FeatureBase):
         raise ValueError(f'model.sphere_mc_samples={mc_samples} must be null or an int >= 1.')
     if radial_type not in self.RADIAL_TYPES:
         raise ValueError(f'model.sphere_radial_type={radial_type} must be one of {self.RADIAL_TYPES}.')
+    if radial_type == 'phase' and mc_samples is not None:
+        raise ValueError("model.sphere_radial_type='phase' has no Monte-Carlo form (sphere_mc_samples).")
     self.num_factors = int(num_factors)
     self.degree = degree = int(degree)
     self.mc_samples = None if mc_samples is None else int(mc_samples)
@@ -80,6 +92,12 @@ class SphericalFeature(FeatureBase):
     table = np.concatenate([table, table[-1:]], axis=0)   # one spare row for the interpolation
     self.register_buffer('table', torch.tensor(table, dtype=torch.float64),
                          persistent=False)
+    if radial_type == 'phase':
+        phase = np.stack([np.stack([self.phase_radial(2 + 1j / c, l, s) for l in range(degree + 1)], -1)
+                          for c in radial_scales], -2)             # (N, |c|, L + 1), complex
+        phase = np.concatenate([phase, phase[-1:]], axis=0)
+        self.register_buffer('phase', torch.tensor(np.stack([phase.real, phase.imag], -1)),
+                             persistent=False)                    # (N + 1, |c|, L + 1, 2)
     self.register_buffer('ell_of_feature', torch.tensor(
         [l for l in range(degree + 1) for _ in range(2 * l + 1)]), persistent=False)
     self.register_buffer('radial_scales', torch.tensor(
@@ -88,7 +106,16 @@ class SphericalFeature(FeatureBase):
   @property
   def num_features(self) -> int:
     """The number of features produced by this module, over all product factors."""
-    return self.num_factors * ((self.degree + 1) ** 2 + len(self.radial_scales))
+    num_radial = (2 * len(self.radial_scales) * (self.degree + 1) ** 2 if self.radial_type == 'phase'
+                  else len(self.radial_scales))
+    return self.num_factors * ((self.degree + 1) ** 2 + num_radial)
+
+  def _lerp(self, table: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+    """A radial table linearly interpolated at radii s (...) -> (..., *table.shape[1:])."""
+    x = (s / self.TABLE_STEP).clamp(0.0, table.shape[0] - 2)
+    i = x.floor().long()
+    w = (x - i).reshape(*x.shape, *[1] * (table.dim() - 1))
+    return table[i] * (1 - w) + table[i + 1] * w
 
   def exp_decay_radial(self, s: torch.Tensor) -> torch.Tensor:
     r"""
@@ -96,13 +123,31 @@ class SphericalFeature(FeatureBase):
 
     f_l(s), l = 0..L, for dimensionless radii s (...) -> (..., L + 1).
     """
-    x = (s / self.TABLE_STEP).clamp(0.0, self.table.shape[0] - 2)
-    i = x.floor().long()
-    w = (x - i).unsqueeze(-1)
-    return self.table[i] * (1 - w) + self.table[i + 1] * w
+    return self._lerp(self.table, s)
+
+  @staticmethod
+  def phase_radial(mu, l, s, s0=0.01):
+    r"""
+    $\mu = 2 + i / c$ per radial scale $c$, with eigenvalue $\eta = \mu (\mu - 2) = -1 / c^2 + 2 i / c$
+
+    r_{mu,l}(s) / C(mu, l) on the ascending numpy grid s, complex128: the design note's
+    ODE route. g = sinh(s) r solves g'' = [(mu - 1)^2 + l (l + 1) / sinh^2 s] g, started at s0
+    from the series r = s^l (1 + a s^2) and integrated by DOP853 (the regular solution
+    dominates forward for Re mu >= 1, so this is stable); below s0 the series itself.
+    """
+    a = (mu * (mu - 2) - l * (l + 3) / 3) / (4 * l + 6)
+    r0 = s0 ** l * (1 + a * s0 ** 2)
+    dr0 = l * s0 ** (l - 1) * (1 + a * s0 ** 2) + 2 * a * s0 ** (l + 1) if l else 2 * a * s0
+    sol = solve_ivp(lambda t, y: [y[1], ((mu - 1) ** 2 + l * (l + 1) / np.sinh(t) ** 2) * y[0]],
+                    (s0, s[-1]), [np.sinh(s0) * r0 + 0j, np.cosh(s0) * r0 + np.sinh(s0) * dr0 + 0j],
+                    method='DOP853', rtol=1e-12, atol=0, dense_output=True)
+    t = np.maximum(s, s0)
+    r = np.where(s < s0, s ** l * (1 + a * s * s), sol.sol(t)[0] / np.sinh(t))
+    return r * gamma(mu + l) / (math.prod(range(1, 2 * l + 2, 2)) * gamma(mu - 1))
 
   def radial(self, s: torch.Tensor, radial_type: str="exp_decay") -> torch.Tensor:
-    """f_l(s), l = 0..L, for dimensionless radii s (...) -> (..., L + 1)."""
+    """The radial table `radial_type` at dimensionless radii s: `exp_decay` is f_l(s), l = 0..L,
+    (...) -> (..., L + 1); `phase` is Re and Im of r_{2+i/c,l}(s) / C, (...) -> (..., |c|, L + 1, 2)."""
     if radial_type == "exp_decay":
       return self.exp_decay_radial(s=s)
 
@@ -135,6 +180,8 @@ class SphericalFeature(FeatureBase):
       the free positions at s < 0.01: no NaN in either arm; largest total gradient norm 13.1 (constant) vs 2.13
       (exp_decay); loss over the last 250 steps 0.0257 vs 0.0062. So the cost seen was spikes and slower learning.
       """
+    elif radial_type == "phase":
+      return self._lerp(self.phase, s)
     else:
       raise ValueError(f'Unknown radial_type {radial_type}.')
 
@@ -188,7 +235,8 @@ class SphericalFeature(FeatureBase):
     Returns:
       `torch.Tensor` of shape `(B, L, num_features)`, float64: per factor, h_lm(z)
       for l = 0..L, m = -l..l (their Monte-Carlo Poisson integrals if `mc_samples`
-      is set), then tanh(s / c) per radial scale c.
+      is set), then tanh(s / c) per radial scale c, or (`phase`) Re and Im of
+      Y_lm(u) r_{2+i/c,l}(s) / C per scale.
     """
     if any(d != 3 for d in prod_factor_dim):
       raise ValueError(
@@ -200,8 +248,8 @@ class SphericalFeature(FeatureBase):
     kappas = rhos.new_tensor(
       [1.0 / GeoUtils._curvature_scale(k) for k in prod_factor_gaussian_curvature])
     ss = rhos * kappas                                          # (B, L, m)
-    harmonics = (self.spherical_harmonics(us)
-                 * self.radial(ss, radial_type=self.radial_type)[..., self.ell_of_feature])   # (B, L, m, (L+1)^2)
+    Y = self.spherical_harmonics(us)                            # (B, L, m, (L+1)^2)
+    harmonics = Y * self.radial(ss)[..., self.ell_of_feature]   # f_l for either radial_type
     if self.mc_samples is not None:
         # Monte Carlo over the boundary angle, w ~ P(z, .) exactly (unit importance
         # weights): no weight to spike near the boundary. The draws carry no graph;
@@ -213,5 +261,9 @@ class SphericalFeature(FeatureBase):
         w = w / w.norm(dim=-1, keepdim=True)   # the boost's c0 == -1 rounding at large s
         mc = self.spherical_harmonics(w).mean(-2)                    # (B, L, m, (L+1)^2)
         harmonics = harmonics + (mc - harmonics).detach()
-    channels = torch.tanh(ss.unsqueeze(-1) / self.radial_scales)   # (B, L, m, |c|)
+    if self.radial_type == 'phase':                                  # (B, L, m, |c| (L+1)^2 2)
+      channels = (Y[..., None, :, None]
+                  * self.radial(ss, radial_type='phase')[..., self.ell_of_feature, :]).flatten(-3)
+    else:
+      channels = torch.tanh(ss.unsqueeze(-1) / self.radial_scales)   # (B, L, m, |c|)
     return torch.cat([harmonics, channels], dim=-1).flatten(-2)

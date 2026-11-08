@@ -67,10 +67,10 @@ class HyperbolicDiT(nn.Module, huggingface_hub.PyTorchModelHubMixin):
     if sphere_mc_samples is not None and random_feature_type is None:
       raise ValueError('model.sphere_mc_samples needs the sphere map (model.random_feature_type).')
     self.random_feature = None
-    self.prod_factors = GeoUtils.resolve_prod_factors(
-      config.algo.prod_factor_dim, config.algo.prod_factor_gaussian_curvature,
-      embed_dim)
     if random_feature_type is not None:
+      self.prod_factors = GeoUtils.resolve_prod_factors(
+        config.algo.prod_factor_dim, config.algo.prod_factor_gaussian_curvature,
+        embed_dim)
       self.random_feature = RandomFeatureFactory.create_random_features(
         random_feature_type,
         degree=sphere_degree,
