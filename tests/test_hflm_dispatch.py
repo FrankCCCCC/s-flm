@@ -53,6 +53,7 @@ def _sampler_config(*, predictor='hflm', prior_cov=0.25, rho_max=12.0,
       'invert_time_convention': invert_time_convention,
       'prior_cov': prior_cov,
       'rho_max': rho_max,
+      'gaussian_curvature': -1.0,
     },
   }
   return omegaconf.OmegaConf.create(cfg)
@@ -203,10 +204,12 @@ def test_get_sampler_resolves_hflm():
   `predictor='hflm'` with `prior_cov` / `rho_max` set from config.algo.
   """
   config = _sampler_config(predictor='hflm', prior_cov=0.25, rho_max=12.0)
+  config.algo.gaussian_curvature = -0.5        # not the sampler's default
   sampler = samplers.get_sampler(config)
   assert isinstance(sampler, samplers.HFLMSampler)
   assert sampler.prior_cov == pytest.approx(0.25)
   assert sampler.rho_max == pytest.approx(12.0)
+  assert sampler.gaussian_curvature == pytest.approx(-0.5)
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,14 @@ def test_single_ball_round_trip_and_cap(K, dtype):
   rho = torch.tensor([0.0, 1e-4, 1e-2, 1.0, 3.0 * R, 8.0 * R, 16.0 * R, 30.0 * R], dtype=dtype)
   u = _unit(8, 5, dtype=dtype)
   z = GeoUtils.hyperbolic_polar_to_poincare_cartesian(rho, u, gaussian_curvature=K)
-  assert (z.norm(dim=-1) < R).all()
+  # The scale is capped at 1 - eps, but u is unit only up to rounding: the computed norm of
+  # a saturated point can reach R (~0.5% of float32 draws). Along an axis u is exactly unit,
+  # so there the cap is strict.
+  assert (z.norm(dim=-1) <= R * (1 + eps)).all()
+  axis = torch.zeros_like(u)
+  axis[:, 0] = 1.0
+  z_axis = GeoUtils.hyperbolic_polar_to_poincare_cartesian(rho, axis, gaussian_curvature=K)
+  assert (z_axis.norm(dim=-1) < R).all()
   rho_back, u_back = GeoUtils.poincare_cartesian_to_hyperbolic_polar(z, gaussian_curvature=K)
   assert rho_back.dtype == dtype and u_back.dtype == dtype
   # Absolute error bound of the ball representation: eps R e^{rho/R} / 2 (x4 slack).

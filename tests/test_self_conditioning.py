@@ -64,7 +64,8 @@ def _make_config(algo_name, *, d=16, length=6, vocab_size=12, n_blocks=1,
       'self_conditioning': self_conditioning,
       'p_self_cond': p_self_cond,
       'prior_cov': 0.25,
-      'rho_max': 12,
+      'rho_min': None,                     # EFLM's default: no radial rescale
+      'rho_max': 12 if is_hflm else None,
       'gaussian_curvature': -1.0,
     },
   }
@@ -107,6 +108,9 @@ class _Stub:
       self.prior_cov = a.prior_cov
       self.rho_max = a.rho_max
       self.gaussian_curvature = a.gaussian_curvature
+    if algo_name == 'eflm':
+      self.rho_min = a.rho_min
+      self.rho_max = a.rho_max
     self._algo_cls = _ALGO_CLS[algo_name]
 
   def __getattr__(self, name):

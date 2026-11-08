@@ -34,6 +34,13 @@ from conftest import REPO_ROOT  # noqa: F401  (ensures repo root on sys.path)
 
 torch.manual_seed(0)
 
+# models/dit.py's flash_attn rotary kernel only takes GPU tensors, so any
+# DiT-block forward needs CUDA (as in tests/test_self_conditioning.py).
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+needs_gpu = pytest.mark.skipif(
+  not torch.cuda.is_available(),
+  reason='DiT forward requires flash-attn rotary (GPU tensors)')
+
 
 # ---------------------------------------------------------------------------
 # Config + stub helpers
@@ -123,7 +130,7 @@ class _LangFlowStub:
     self.time_conditioning = config.algo.time_conditioning
     self.antithetic_sampling = True
     self.global_step = global_step
-    self.device = torch.device('cpu')
+    self.device = next(backbone.parameters()).device
     self.T = 0
 
   def __getattr__(self, name):
@@ -137,13 +144,13 @@ class _LangFlowStub:
     raise AttributeError(name)
 
 
-def _build_langflow_stub(**cfg_kwargs):
+def _build_langflow_stub(*, device='cpu', **cfg_kwargs):
   vocab_size = cfg_kwargs.pop('vocab_size', 16)
   global_step = cfg_kwargs.pop('global_step', 10_000)
   config = _make_config(vocab_size=vocab_size, **cfg_kwargs)
-  backbone = _make_backbone(config, vocab_size)
+  backbone = _make_backbone(config, vocab_size).to(device)
   backbone.eval()  # deterministic forward (no dropout) for allclose checks
-  noise = _make_noise(trainable=True)
+  noise = _make_noise(trainable=True).to(device)
   stub = _LangFlowStub(config, backbone, noise, global_step=global_step)
   return stub, config, backbone
 
@@ -312,15 +319,16 @@ def test_q_xt_keeps_prompt_positions_clean():
 # Backbone forward accepts non-unit input (ARCH §9 "Backbone forward")
 # ===========================================================================
 
+@needs_gpu
 def test_sphere_dit_forward_accepts_raw_scale_input():
   """ARCH §9: feeding a raw-scale `z_gamma` (‖·‖≈√D) through `SphereDiT.forward`
   yields finite logits (LayerNorm handles the scale)."""
   V, d = 12, 64
   config = _make_config(d=d, length=4, vocab_size=V, init='unit_var', n_blocks=1)
-  backbone = _make_backbone(config, vocab_size=V).eval()
+  backbone = _make_backbone(config, vocab_size=V).to(DEVICE).eval()
   B, L = 2, 4
-  z_gamma = torch.randn(B, L, d)  # per-coord var 1 -> ‖·‖≈√D
-  sigma = torch.zeros(B)
+  z_gamma = torch.randn(B, L, d, device=DEVICE)  # per-coord var 1 -> ‖·‖≈√D
+  sigma = torch.zeros(B, device=DEVICE)
   out = backbone(None, z_gamma, sigma, None)
   assert tuple(out.shape) == (B, L, V)
   assert torch.isfinite(out).all()
@@ -334,6 +342,7 @@ def _vanilla_forward(backbone, z, sigma):
   return backbone(None, z, sigma, None)
 
 
+@needs_gpu
 def test_off_flags_equal_baseline_no_context():
   """ARCH §8 I / #8: with `self_conditioning=false` and `logit_bias=false`,
   `SphereDiT.forward` (no LangFlowContext) is identical to today's vanilla
@@ -342,17 +351,18 @@ def test_off_flags_equal_baseline_no_context():
   config = _make_config(d=d, length=4, vocab_size=V, init='unit_var',
                         self_conditioning=False, logit_bias=False, n_blocks=1)
   torch.manual_seed(7)
-  backbone_a = _make_backbone(config, vocab_size=V).eval()
+  backbone_a = _make_backbone(config, vocab_size=V).to(DEVICE).eval()
   torch.manual_seed(7)
-  backbone_b = _make_backbone(config, vocab_size=V).eval()
+  backbone_b = _make_backbone(config, vocab_size=V).to(DEVICE).eval()
   B, L = 2, 4
-  z = torch.randn(B, L, d)
-  sigma = torch.zeros(B)
+  z = torch.randn(B, L, d, device=DEVICE)
+  sigma = torch.zeros(B, device=DEVICE)
   out_a = backbone_a(None, z, sigma, None)
   out_b = _vanilla_forward(backbone_b, z, sigma)
   assert torch.allclose(out_a, out_b, atol=1e-6)
 
 
+@needs_gpu
 def test_self_cond_on_at_step0_zero_init_equals_baseline():
   """ARCH §8 I / #8: with `self_conditioning=true` but zero-init W_in/W_sc (step
   0), `forward` equals the self-cond-OFF baseline (the projections contribute 0).
@@ -363,12 +373,12 @@ def test_self_cond_on_at_step0_zero_init_equals_baseline():
   cfg_off = _make_config(d=d, length=4, vocab_size=V, init='unit_var',
                          self_conditioning=False, logit_bias=False, n_blocks=1)
   torch.manual_seed(11)
-  bb_on = _make_backbone(cfg_on, vocab_size=V).eval()
+  bb_on = _make_backbone(cfg_on, vocab_size=V).to(DEVICE).eval()
   torch.manual_seed(11)
-  bb_off = _make_backbone(cfg_off, vocab_size=V).eval()
+  bb_off = _make_backbone(cfg_off, vocab_size=V).to(DEVICE).eval()
   B, L = 2, 4
-  z = torch.randn(B, L, d)
-  sigma = torch.zeros(B)
+  z = torch.randn(B, L, d, device=DEVICE)
+  sigma = torch.zeros(B, device=DEVICE)
   ctx_on = algo.LangFlowContext(z_sc=None, alpha=None, sigma=None, r=0.0)
   out_on = bb_on(None, z, sigma, ctx_on)
   out_off = bb_off(None, z, sigma, None)
@@ -423,6 +433,7 @@ def test_process_model_output_is_log_softmax():
   assert torch.allclose(out, raw.float().log_softmax(-1), atol=1e-6)
 
 
+@needs_gpu
 def test_plaid_bias_is_full_gaussian_loglik():
   """ARCH §5.2 / #9: with `logit_bias=true` and r>0, `SphereDiT.forward` adds the
   FULL Gaussian log-likelihood (Eq. 44) minus the const ||z_gamma||^2 term:
@@ -433,12 +444,12 @@ def test_plaid_bias_is_full_gaussian_loglik():
   cfg = _make_config(d=d, length=4, vocab_size=V, init='unit_var',
                      self_conditioning=False, logit_bias=True, n_blocks=1)
   torch.manual_seed(3)
-  backbone = _make_backbone(cfg, vocab_size=V).eval()
+  backbone = _make_backbone(cfg, vocab_size=V).to(DEVICE).eval()
   B, L = 2, 4
-  z = torch.randn(B, L, d)
-  sigma_in = torch.zeros(B)  # gamma time signal (0 -> sigma^2=0.5)
-  alpha = torch.full((B, 1), 0.6)
-  sigma = torch.full((B, 1), 0.8)
+  z = torch.randn(B, L, d, device=DEVICE)
+  sigma_in = torch.zeros(B, device=DEVICE)  # gamma time signal (0 -> sigma^2=0.5)
+  alpha = torch.full((B, 1), 0.6, device=DEVICE)
+  sigma = torch.full((B, 1), 0.8, device=DEVICE)
   r = 1.0
   ctx_bias = algo.LangFlowContext(z_sc=None, alpha=alpha, sigma=sigma, r=r)
   ctx_nobias = algo.LangFlowContext(z_sc=None, alpha=alpha, sigma=sigma, r=0.0)
@@ -450,25 +461,30 @@ def test_plaid_bias_is_full_gaussian_loglik():
   coef1 = (r * alpha / (sigma ** 2)).unsqueeze(-1)  # [B,1,1]
   coef2 = (r * alpha ** 2 / (2 * sigma ** 2)).unsqueeze(-1)  # [B,1,1]
   expected_delta = coef1 * inner - coef2 * norm_sq
-  assert torch.allclose(out_bias - out_nobias, expected_delta, atol=1e-4)
+  # The formula at full precision; forward adds it at the logits' dtype (bf16 under
+  # autocast, see `_plaid_bias`), so the forward's delta is only that precise.
+  assert torch.allclose(backbone._plaid_bias(z, alpha, sigma, r), expected_delta, atol=1e-4)
+  assert torch.allclose((out_bias - out_nobias).float(),
+                        backbone._plaid_bias(z, alpha, sigma, r, dtype=out_bias.dtype).float(), atol=1e-4)
 
 
+@needs_gpu
 def test_plaid_bias_finite_at_both_gamma_clip_ends():
   """ARCH §8 G / #9: at both γ clip ends the bias and final log-probs are finite
   (σ²>0 because γ is clipped)."""
   V, d = 10, 32
   cfg = _make_config(d=d, length=4, vocab_size=V, init='unit_var',
                      self_conditioning=False, logit_bias=True, n_blocks=1)
-  backbone = _make_backbone(cfg, vocab_size=V).eval()
-  noise = _make_noise()
+  backbone = _make_backbone(cfg, vocab_size=V).to(DEVICE).eval()
+  noise = _make_noise().to(DEVICE)
   a = float(noise.P_mu.detach()
             - noise.P_beta.detach() * math.log(-math.log(1 - noise.q_clip)))
   b = float(noise.P_mu.detach()
             - noise.P_beta.detach() * math.log(-math.log(noise.q_clip)))
   B, L = 2, 4
-  z = torch.randn(B, L, d)
+  z = torch.randn(B, L, d, device=DEVICE)
   for gamma_val in (a, b):
-    gamma = torch.full((B,), gamma_val)
+    gamma = torch.full((B,), gamma_val, device=DEVICE)
     alpha, sigma = noise.alpha_sigma_from_gamma(gamma)
     ctx = algo.LangFlowContext(
       z_sc=None, alpha=alpha.unsqueeze(-1), sigma=sigma.unsqueeze(-1), r=1.0)
@@ -512,17 +528,18 @@ def test_self_cond_off_returns_none():
   assert out is None
 
 
+@needs_gpu
 def test_self_cond_first_pass_output_is_detached():
   """ARCH §4.5 / §8 F: when self-cond fires (p_self_cond=1.0), the returned z_sc
   carries NO grad (first pass under no_grad + detach)."""
   stub, config, backbone = _build_langflow_stub(
-    d=16, length=4, vocab_size=10, self_conditioning=True, p_self_cond=1.0,
-    n_blocks=1)
+    device=DEVICE, d=16, length=4, vocab_size=10, self_conditioning=True,
+    p_self_cond=1.0, n_blocks=1)
   B, L, d = 2, 4, 16
-  z_gamma = torch.randn(B, L, d)
-  gamma = torch.zeros(B)
-  alpha = torch.full((B, 1), 0.6)
-  sigma = torch.full((B, 1), 0.8)
+  z_gamma = torch.randn(B, L, d, device=DEVICE)
+  gamma = torch.zeros(B, device=DEVICE)
+  alpha = torch.full((B, 1), 0.6, device=DEVICE)
+  sigma = torch.full((B, 1), 0.8, device=DEVICE)
   z_sc = stub._self_cond_pass(z_gamma, gamma, alpha, sigma, train_mode=True)
   assert z_sc is not None
   assert z_sc.requires_grad is False
@@ -545,28 +562,30 @@ def test_self_cond_train_parity_with_sampler_zhat():
 # Stopgrad boundaries (ARCH §4.7 / §8 D, test surface #5 / #6)
 # ===========================================================================
 
+@needs_gpu
 def test_nll_gamma_returned_is_detached():
   """ARCH §4.5 B1: `nll` returns gamma in the 't' slot DETACHED (no grad path
   into the schedule from the CE/VP path)."""
   stub, config, backbone = _build_langflow_stub(
-    d=16, length=4, vocab_size=10, n_blocks=1)
+    device=DEVICE, d=16, length=4, vocab_size=10, n_blocks=1)
   B, L = 2, 4
-  x0 = torch.randint(0, 10, (B, L))
-  valid = torch.ones(B, L, dtype=torch.long)
+  x0 = torch.randint(0, 10, (B, L), device=DEVICE)
+  valid = torch.ones(B, L, dtype=torch.long, device=DEVICE)
   ce, gamma = stub.nll(
     x0, output_tokens=None, context=None,
     current_accumulation_step=None, train_mode=True, valid_tokens=valid)
   assert gamma.requires_grad is False
 
 
+@needs_gpu
 def test_nll_b1_stopgrad_no_schedule_grad_from_ce():
   """ARCH §4.7 B1 / #6: backprop of the CE produced by `nll` yields grad on the
   embedding table but NONE on the schedule params raw_mu/raw_beta/raw_H."""
   stub, config, backbone = _build_langflow_stub(
-    d=16, length=4, vocab_size=10, n_blocks=1)
+    device=DEVICE, d=16, length=4, vocab_size=10, n_blocks=1)
   B, L = 2, 4
-  x0 = torch.randint(0, 10, (B, L))
-  valid = torch.ones(B, L, dtype=torch.long)
+  x0 = torch.randint(0, 10, (B, L), device=DEVICE)
+  valid = torch.ones(B, L, dtype=torch.long, device=DEVICE)
   for p in stub.noise.parameters():
     p.grad = None
   backbone.sphere_embed.weight.grad = None

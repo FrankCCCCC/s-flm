@@ -82,6 +82,7 @@ def _make_config(*, d=512, length=180, vocab_size=16, init='hyperbolic',
       'renormalize_weights': False,
       'prior_cov': prior_cov,
       'rho_max': rho_max,
+      'gaussian_curvature': -1.0,
     },
     'noise': {'adaptive': False},
   }
@@ -112,6 +113,7 @@ class _HFLMStub:
     self.invert_time_convention = config.algo.invert_time_convention
     self.prior_cov = config.algo.prior_cov
     self.rho_max = config.algo.rho_max
+    self.gaussian_curvature = config.algo.gaussian_curvature
     self._algo = algo
 
   def __getattr__(self, name):
@@ -547,17 +549,19 @@ def test_get_hyperbolic_polar_embeddings_preserves_unnormalized_radius():
                         torch.full((1, 2), 5.0), atol=1e-5)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(),
+                    reason='DiT forward requires flash-attn rotary (GPU tensors)')
 def test_hyperbolic_dit_forward_returns_logits_shape():
   """ARCH §3.2: `forward(x0, xt, sigma)` returns logits `[B,L,V]` consuming the
   Poincaré `xt` as-is (no sphere calibration of the output).
   """
   V = 9
   config = _make_config(d=16, length=4, vocab_size=V, n_blocks=1)
-  backbone = _make_backbone(config, vocab_size=V)
+  backbone = _make_backbone(config, vocab_size=V).cuda()
   B, L, d = 2, 4, 16
   # A valid Poincaré-ball point (‖xt‖<1).
-  xt = torch.randn(B, L, d) * 0.1
-  sigma = torch.zeros(B)
+  xt = torch.randn(B, L, d, device='cuda') * 0.1
+  sigma = torch.zeros(B, device='cuda')
   out = backbone(None, xt, sigma, None)
   assert tuple(out.shape) == (B, L, V)
 
