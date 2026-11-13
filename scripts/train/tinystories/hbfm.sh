@@ -30,6 +30,7 @@ LR_DECAY_STEPS="${LR_DECAY_STEPS:-${MAX_STEPS}}"   # cosine: the step the decay 
 LR_SCHED_FROM="${LR_SCHED_FROM:-0}"      # cosine: the step of a constant-LR checkpoint (past its warmup) it resumes; the scheduler counts from 0 there, so no warmup and the decay spans LR_DECAY_STEPS - LR_SCHED_FROM
 LR_HOLD_STEPS="${LR_HOLD_STEPS:-3500}"   # wsd: steps at the peak LR after the 2500-step warmup, then a cosine decay to 0 at step LR_DECAY_STEPS
 SEED="${SEED:-1}"
+SAMPLING_EPS="${SAMPLING_EPS:-1e-3}"     # training.sampling_eps: t ~ U[eps, 1]; under exp the horizon is ln(1/eps) / PROPOSAL_RATE
 DROPOUT="${DROPOUT:-0.1}"           # model.dropout of the DiT blocks (configs/model default 0.1)
 INIT="${INIT:-ngpt}"
 HYLA_DIM="${HYLA_DIM:-null}"           # random Laplacian features (HyLa) of the state fed to the DiT: total feature dim, a multiple of the factor count; null = feed the Poincaré coordinates
@@ -106,6 +107,7 @@ python -u -m main \
     sampler=hbfm \
     sampler.t_max=${T_MAX} \
     noise=log-linear \
+    training.sampling_eps=${SAMPLING_EPS} \
     optim.lr=${LR} \
     "${SCHED_ARGS[@]}" \
     loader.global_batch_size=${GLOBAL_BATCH} \

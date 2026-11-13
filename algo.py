@@ -961,6 +961,7 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
     self.invert_time_convention = config.algo.invert_time_convention
     self.curvature_bound = config.algo.curvature_bound
     self.elbo_num_words = config.algo.elbo_num_words
+    self.ce_time_weighted = config.algo.ce_time_weighted
     self.prod_factor_dim, self.prod_factor_gaussian_curvature = (
       self._resolve_prod_factors(config.algo, self.backbone.embed_dim))
     # sample_radial forms the heat-kernel marginal in linear float64, which
@@ -1180,7 +1181,7 @@ class HyperbolicBoundaryFM(trainer_base.Diffusion, HyperbolicModelBase):
                             valid_tokens=valid_tokens, curvature=curvature)
     elif self.loss_type == 'ce':
       loss = self.ce_loss(log_x_theta=log_x_theta, x0=x0)
-      if weight is not None:
+      if weight is not None and self.ce_time_weighted:
         return loss * weight
       return loss
     else:

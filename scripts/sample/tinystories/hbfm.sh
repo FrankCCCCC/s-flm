@@ -24,6 +24,7 @@ RUN_PPL_EVAL="${RUN_PPL_EVAL:-true}"   # false: GenPPL pass only
 LOSS_TYPE="${LOSS_TYPE:-ce}"           # objective of the ppl_eval pass (algo.loss_type): elbo = the NELBO, ce = the denoising CE bound it trained on
 PPL_JSON="${PPL_JSON:-${OUTPUT_DIR}/ppl.json}"   # where the ppl_eval metrics go
 SEED="${SEED:-1}"                      # seed of the ppl_eval pass (the (t, noise) draws)
+SAMPLING_EPS="${SAMPLING_EPS:-1e-3}"   # training.sampling_eps of the ppl_eval pass: under exp it sets the NELBO's horizon
 RUN_SAMPLE_EVAL="${RUN_SAMPLE_EVAL:-true}"   # false: ppl_eval pass only
 MODEL="${MODEL:-small-hyperbolic-dit}"
 SEQ_LEN="${SEQ_LEN:-256}"
@@ -68,6 +69,7 @@ MARGS=(
     algo.readout_precision=${READOUT_PRECISION}
     algo.loss_type=${LOSS_TYPE}
     noise=log-linear
+    training.sampling_eps=${SAMPLING_EPS}
     loader.global_batch_size=${GLOBAL_BATCH}
     sampler=hbfm
     sampler.velocity=${VELOCITY}
