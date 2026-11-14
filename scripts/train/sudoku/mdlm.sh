@@ -37,4 +37,5 @@ python -u -m main \
     trainer.limit_val_batches=0 \
     trainer.max_steps=${MAX_STEPS} \
     callbacks.checkpoint_every_n_steps.every_n_train_steps=${CKPT_EVERY} \
-    hydra.run.dir="${OUTPUT_DIR}"
+    hydra.run.dir="${OUTPUT_DIR}" \
+    "$@"

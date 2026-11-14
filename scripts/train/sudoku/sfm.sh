@@ -9,6 +9,7 @@ DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/sfm_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
+PER_GPU_BS="${PER_GPU_BS:-256}"      # micro-batch per GPU (accumulation = 256 / (DEVICES x PER_GPU_BS))
 SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
 # self-conditioning leaves the self-cond params unused on ~75% of steps (p_self_cond);
@@ -28,7 +29,7 @@ python -u -m main \
     algo.self_conditioning="${SELF_COND}" \
     noise=log-linear \
     loader.global_batch_size=256 \
-    loader.batch_size=256 \
+    loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=256 \
     loader.num_workers=8 \
     eval.generate_samples=False \

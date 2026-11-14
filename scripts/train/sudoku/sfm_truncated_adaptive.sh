@@ -9,6 +9,7 @@ DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/sfm_truncated_adaptive_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
+PER_GPU_BS="${PER_GPU_BS:-256}"      # micro-batch per GPU (accumulation = 256 / (DEVICES x PER_GPU_BS))
 SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
 LR="${LR:-3e-4}"                     # AdamW learning rate
 SELF_COND="${SELF_COND:-false}"      # LangFlow-style self-conditioning
@@ -38,7 +39,7 @@ python -u -m main \
     noise.adaptive_ema=0.9 \
     noise.adaptive_uniform_mix=1e-3 \
     loader.global_batch_size=${GLOBAL_BS} \
-    loader.batch_size=256 \
+    loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=256 \
     loader.num_workers=8 \
     eval.generate_samples=False \
