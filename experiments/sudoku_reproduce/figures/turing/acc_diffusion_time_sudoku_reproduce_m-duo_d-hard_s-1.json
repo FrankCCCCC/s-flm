@@ -1,0 +1,15 @@
+{
+ "cell": "/share/desa/nfs02/sc3379/workspace/research/s-flm-dev1/s-flm/outputs/sudoku_reproduce/sudoku_reproduce_m-duo_d-hard_s-1",
+ "ckpt": "last.ckpt",
+ "boards": 2000,
+ "steps": 180,
+ "seed": 3,
+ "samplers": [
+  {
+   "spec": "none",
+   "label": "ancestral sampler",
+   "decoded_empty_acc": 0.8464509803921568,
+   "decoded_board_acc": 0.511
+  }
+ ]
+}
