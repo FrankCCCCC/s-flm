@@ -1,0 +1,15 @@
+{
+ "cell": "/share/desa/nfs02/sc3379/workspace/research/s-flm-dev1/s-flm/outputs/sudoku_reproduce/sudoku_reproduce_m-eflm_auto_trunc_d-hard_s-1",
+ "ckpt": "last.ckpt",
+ "boards": 2000,
+ "steps": 180,
+ "seed": 3,
+ "samplers": [
+  {
+   "spec": "none",
+   "label": "flow sampler (exact velocity)",
+   "decoded_empty_acc": 0.8493137254901961,
+   "decoded_board_acc": 0.497
+  }
+ ]
+}

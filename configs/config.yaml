@@ -25,6 +25,7 @@ gsm8k:
 seed: 1
 allow_tf32: True
 cudnn_benchmark: True
+sdpa_math: False  # True: math attention kernel only, as on Turing GPUs (experiments/sudoku_reproduce)
 compile_backbone: False  # False / True
 
 neg_infinity_mode: large-finite  # large-finite / true-inf / value-{float} <- value after '-' is cast to a float, negated and used

@@ -9,6 +9,8 @@ DIFFICULTY="${DIFFICULTY:-easy}"      # easy / medium / hard
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/sudoku/duo_${DIFFICULTY}}"
 NUM_NODES="${NUM_NODES:-1}"
 DEVICES="${DEVICES:-1}"
+PER_GPU_BS="${PER_GPU_BS:-256}"      # micro-batch per GPU (accumulation = 256 / (DEVICES x PER_GPU_BS))
+SEED="${SEED:-1}"                    # global random seed (L.seed_everything)
 
 cd "${REPO_ROOT}"
 
@@ -18,8 +20,9 @@ python -u -m main \
     data.difficulty="${DIFFICULTY}" \
     model=tiny \
     algo=duo-base \
+    seed="${SEED}" \
     loader.global_batch_size=256 \
-    loader.batch_size=256 \
+    loader.batch_size=${PER_GPU_BS} \
     loader.eval_batch_size=256 \
     loader.num_workers=8 \
     eval.generate_samples=False \
